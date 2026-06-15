@@ -13,13 +13,13 @@
 
 你有没有过这样的体验——打开一个 AI 对话，每次都要重新自我介绍：「我是高一学生，选科物化生，数学比较弱……」隔天再聊，它又忘了。想让它帮你搜个东西，它只能凭训练数据猜。想持久化维护管理一个数字错题本，普通 AI 根本处理不了。
 
-**FeClaw 就是来解决这些问题的。** 它是一个专为学习场景设计的 AI 平台。它不是普通的聊天机器人——它能记住你的学习进度、自动搜索教材和网络、帮你分析错题、管理学习文件。像一个真正了解你的学习搭档。
+**FeClaw 在探索解决这些问题的可能性。** 它不是普通的聊天机器人——它能记住你的学习进度、自动搜索教材和网络、帮你分析错题、管理学习文件。像一个真正了解你的学习搭档。
 
 ### 它能做什么？
 
 **🧠 有记忆，不用每次重新介绍自己**
 
-聊过几次之后，FeClaw 会自动提取你的偏好、学习进度、薄弱知识点。下次对话自动加载，不需要你手动写任何东西。
+聊过几次之后，FeClaw 会尝试提取你的偏好、学习进度、薄弱知识点。下次对话自动加载这些信息。
 
 **🔍 会搜索，教材 + 联网双管齐下**
 
@@ -27,7 +27,7 @@
 
 **⚡ 快的时候秒回，难的时候深度思考**
 
-简单聊天？不到十秒就能回复。需要数学推理、复杂分析？自动开启深度思考模式，慢慢推理。你感知不到切换过程——只感觉它该快时快，该慢时慢。
+简单聊天？不到十秒就能回复。需要数学推理、复杂分析？自动开启深度思考模式，仔细推理。你感知不到切换过程——只感觉它该快时快，该准时准。
 
 **📝 错题分析，拍照就能搞定**
 
@@ -47,7 +47,7 @@
 
 ### 设计理念
 
-**All-in-Text** — 一切皆文本。Agent 的系统提示词、人格设定、用户画像、长期记忆、会话笔记，全部是 Markdown 文件，存放在 VFS（虚拟文件系统）中。Agent 通过读写文件来维护自身状态，而不是依赖黑盒的向量数据库或私有存储格式。这意味着：完全可审计、可编辑、可备份。
+**All-in-Text** — 一切皆文本。Agent 的系统提示词、人格设定、用户画像、长期记忆、会话笔记，全部是 Markdown 文件，存放在 VFS（虚拟文件系统）中。Agent 通过读写文件来维护自身状态。这意味着：完全可审计、可编辑、可备份。
 
 **大小模型分步混排** — 每条消息进入系统后，先经过 SmartRouter（智能路由层）用小模型做意图分类和预取决策。纯文本用 `qwen3.6-flash`（约 0.5s），带图片时自动切换 `qwen3.6-35b-a3b` 多模态模型（约 1.3s）。简单问题直接回复，复杂问题对同一模型开启深度思考模式。既省成本，又保体验。
 
@@ -55,7 +55,7 @@
 1. 判断是否需要深度思考（thinking）
 2. 预取外部数据（prefetch：知识库/联网搜索/文件读取），省去主模型的一轮工具调用
 3. 判断是否可以直接回复（direct_reply），跳过主模型
-4. 注射规则提示（inject_rules），指导主模型行为
+4. 注入规则提示（inject_rules），指导主模型行为
 
 ### 核心架构
 
@@ -73,9 +73,20 @@
 | 数据库 | SQLite（默认）/ MySQL（可选），SQLAlchemy ORM |
 | 文件存储 | 腾讯云 COS（通过 VFS 抽象层访问） |
 | 消息协议 | SSE（流式对话）、WebSocket |
-| 多模型兼容 | DeepSeek / 智谱 GLM / 通义千问 / 豆包 / Kimi（OpenAI 兼容协议） |
-| 向量检索 | 腾讯云向量存储桶（教材库 + 会话记忆） |
-| 沙箱执行 | bwrap 容器隔离 + FUSE 文件系统 |
+| 多模型兼容 | DeepSeek / 千问 / 智谱 GLM / 豆包 / 小米 MiMo / Kimi（OpenAI 兼容协议） |
+
+### 适配的模型
+
+| 模型名 | Provider | 能力 | 需配置 |
+|--------|----------|------|--------|
+| `deepseek-v4-flash` | DeepSeek | 文本 + 深度思考 | `DEEPSEEK_API_KEY` |
+| `qwen3.6-flash` | 千问 | 文本（速度快） | `QWEN_API_KEY` |
+| `qwen3.6-35b-a3b` | 千问 | **视觉**（图文理解） | `QWEN_API_KEY` |
+| `text-embedding-v4` | 千问 | **嵌入向量化** | `QWEN_API_KEY` |
+| `glm-4.7` / `glm-4.7-flash` | 智谱 GLM | 文本 | `ZHIPU_API_KEY` |
+| `embedding-3` | 智谱 GLM | **嵌入向量化** | `ZHIPU_API_KEY` |
+| `doubao-seed-2-0-lite-260215` | 豆包 | 视觉 | `DOUBAO_API_KEY` |
+| `mimo-v2.5-pro` / `mimo-v2.5-pro-ultraspeed` | 小米 MiMo | 文本 + 深度思考 | `MIMO_API_KEY` |
 
 ### 快速开始
 
@@ -86,17 +97,29 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-编辑 `.env`。系统依赖多个 LLM 提供商协同工作（主模型、多模态识别、轻量路由），以及腾讯云 COS 作为文件存储，建议至少配置以下变量以确保核心功能正常运行：
+**最简起步 — 只配一个千问 API Key**（推荐用于快速体验）：
+
+阿里云百炼同时提供文本模型、视觉模型、嵌入模型和搜索服务，一个 `QWEN_API_KEY` 即可覆盖全部核心功能。
 
 ```ini
 JWT_SECRET=your-random-secret-here
-DEEPSEEK_API_KEY=sk-xxx       # 主模型
-QWEN_API_KEY=sk-xxx           # 路由层（小模型 + 多模态）
-DOUBAO_API_KEY=sk-xxx         # 图片识别（VLM）
-TENCENT_COS_SECRET_ID=xxx     # COS 文件存储
-TENCENT_COS_SECRET_KEY=xxx
-TENCENT_COS_BUCKET=xxx
+QWEN_API_KEY=sk-xxx          # 文本 + 视觉 + 嵌入 + 搜索，all in
+MAIN_TEXT_MODEL=qwen3.6-flash
+MAIN_VISION_MODEL=qwen3.6-35b-a3b
 ```
+
+> 注意：百炼的搜索服务通过 Qwen3.5-Flash 的联网搜索能力实现（`search_qwen`），无需额外 API Key。
+
+**完整体验 — 添加 DeepSeek**（中文素养更佳）：
+
+DeepSeek 的中文措辞和表达风格在同类模型中表现优秀，适合需要高质量中文交互的场景。
+
+```ini
+DEEPSEEK_API_KEY=sk-xxx
+MAIN_TEXT_MODEL=deepseek-v4-flash       # 主模型切到 DeepSeek
+```
+
+> 所有三档配置（`MAIN_TEXT_MODEL`、`MAIN_VISION_MODEL`、`MAIN_EMBEDDING_MODEL`）均可独立覆盖或替换，不限制必须来自同一家平台。
 
 此外还需在腾讯云创建 COS 存储桶（普通文件存储）和向量存储桶（知识库索引），后者需要在 `services/vector_search_service.py` 中配置桶名称和地址。
 
@@ -106,9 +129,9 @@ TENCENT_COS_BUCKET=xxx
 python -m uvicorn main:app --host 0.0.0.0 --port 8080 --reload
 ```
 
-首次启动时系统自动创建 SQLite 数据库和默认管理员账号。
+首次启动时系统自动创建 SQLite 数据库和默认管理员账号（默认密码 `admin`，**强烈建议部署后立即修改**）。
 
-打开 http://localhost:8080 ，用 `admin` / `admin` 登录控制台，创建 Agent 后即可使用。系统会自动创建一个示例 Agent。
+打开 http://localhost:8080 ，用默认账号登录控制台，创建 Agent 后即可使用。系统会自动创建一个示例 Agent。
 
 ### 配置参考
 
@@ -128,7 +151,10 @@ python -m uvicorn main:app --host 0.0.0.0 --port 8080 --reload
 | `TENCENT_COS_BUCKET` | COS 存储桶名称（需在腾讯云创建） | — |
 | `OAUTH_PROVIDER_URL` | OAuth Provider 地址（启用 SSO 时） | — |
 | `FECLAW_DOMAIN` | 部署域名 | — |
-| `AGENT_LLM_MODEL` | Agent 默认模型 | `deepseek-v4-flash` |
+| `MIMO_API_KEY` | 小米 MiMo | — |
+| `MAIN_TEXT_MODEL` | 默认文本模型 | `deepseek-v4-flash` |
+| `MAIN_VISION_MODEL` | 默认视觉模型 | `qwen3.6-35b-a3b` |
+| `MAIN_EMBEDDING_MODEL` | 默认嵌入模型 | `text-embedding-v4` |
 
 ### 项目结构
 

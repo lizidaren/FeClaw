@@ -3,7 +3,7 @@
 
 在调主模型之前，用小模型做决策：是否需要深度思考（thinking）、
 是否需要预取外部数据（prefetch）、是否可以直接回复（L0）、
-以及需要注射给主模型的规则提示（inject_rules）。
+以及需要注入给主模型的规则提示（inject_rules）。
 """
 
 import asyncio
@@ -15,12 +15,10 @@ from typing import List, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
-from services.model_registry import find_by_capability as _sr_find
+from config import settings as _sr_settings
 
-# 纯文字 → 注册表中首个文本模型
-# 有图片 → 注册表中首个多模态模型
-SR_TEXT_MODEL = _sr_find(supports_vision=False) or "qwen3.6-flash"
-SR_VL_MODEL = _sr_find(supports_vision=True) or "qwen3.6-35b-a3b"
+SR_TEXT_MODEL = _sr_settings.MAIN_TEXT_MODEL
+SR_VL_MODEL = _sr_settings.MAIN_VISION_MODEL
 
 SR_PROMPT = """你是AI系统的智能路由层，任务是在主模型处理用户请求前，提前做两件事：
 1. 预取外部数据（避免主模型额外花一轮工具调用）
@@ -46,7 +44,7 @@ SR_PROMPT = """你是AI系统的智能路由层，任务是在主模型处理用
   ⚠️ file_read/file_list 的路径必须从用户消息中提取（如「图片路径:」标注的路径），禁止自己构造或猜测路径（如 current_image.png 等）。如果用户消息中没有明确路径标注，不要预取文件读取。
 - buffer_msg: 等待主模型时的缓冲消息（自然、不重复、语气多样）
 - direct_reply: 极简单的问题直接回复（不走主模型）
-- inject_rules: 注射给主模型的规则提示，每条≤30字，最多3条。精确简洁，让主模型一看就懂
+- inject_rules: 注入给主模型的规则提示，每条≤30字，最多3条。精确简洁，让主模型一看就懂
   用途示例：当并行知识搜索结果不相关时，提示主模型"忽略搜索结果，以实际工具调用为准"。
 
 可用预取工具：

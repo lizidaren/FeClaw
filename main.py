@@ -54,7 +54,7 @@ import uvicorn
 from config import settings
 from models.database import init_db, SessionLocal, User, engine
 from utils.auth import generate_salt, hash_password
-from routers import static_site, static_site_public, workspace, wechat, oauth, console, health, subagent_presets, vfs_image_dedup, sandbox, share, vfs_view, apps_gateway
+from routers import static_site, static_site_public, workspace, wechat, oauth, console, health, vfs_image_dedup, sandbox, share, vfs_view, apps_gateway
 from routers.feclaw_domain import router as feclaw_domain_router
 from routers.feclaw_chat import router as feclaw_chat_router
 from routers.agent_config_ui import router as agent_config_ui_router
@@ -316,7 +316,6 @@ app.include_router(agent_config_router)  # Agent 配置 API
 app.include_router(agent_config_chat_router)  # Agent 配置聊天 API
 app.include_router(static_site.router)  # 静态网站托管 API
 app.include_router(health.router)  # 健康检查 API (必须在 static_site_public 之前)
-app.include_router(subagent_presets.router)  # Subagent 预置角色 API
 app.include_router(vfs_image_dedup.router)  # VFS 图片去重管理 API
 app.include_router(sandbox.router)  # 安全沙箱执行环境 API
 app.include_router(share.router)  # 分享链接解析

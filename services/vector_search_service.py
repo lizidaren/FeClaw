@@ -82,8 +82,8 @@ class _VectorClientWrapper:
 
 
 # Embedding API
-EMBEDDING_API_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1/embeddings"
-EMBEDDING_MODEL = "text-embedding-v4"
+EMBEDDING_API_URL_QWEN = "https://dashscope.aliyuncs.com/compatible-mode/v1/embeddings"
+EMBEDDING_MODEL = "text-embedding-v4"  # deprecated, use settings.MAIN_EMBEDDING_MODEL instead
 # Embedding 限制
 MAX_BATCH_SIZE = 10
 MAX_TOKENS = 8000
@@ -174,23 +174,37 @@ class VectorSearchService:
     # ----- Embedding -----
 
     async def _call_embedding_api(self, texts: List[str]) -> Optional[List[List[float]]]:
-        """调用 DashScope Embedding API（同步 httpx，最大 10 条/批）"""
-        api_key = settings.QWEN_API_KEY or os.getenv("QWEN_API_KEY")
+        """调用 Embedding API（根据 MAIN_EMBEDDING_MODEL 自动选择 provider）"""
+        emb_model = settings.MAIN_EMBEDDING_MODEL
+        emb_info = _reg_resolve(emb_model)
+        emb_provider = emb_info["provider"]
+        api_key_attr = emb_info.get("api_key_attr", "")
+        api_key = getattr(settings, api_key_attr, "") or os.getenv(api_key_attr, "")
         if not api_key:
-            logger.error("QWEN_API_KEY not configured")
+            logger.error(f"{api_key_attr} not configured")
+            return None
+
+        # provider → endpoint
+        if emb_provider == "qwen":
+            api_url = EMBEDDING_API_URL_QWEN
+        elif emb_provider == "zhipuai":
+            base = emb_info.get("base_url", "https://open.bigmodel.cn/api/paas/v4")
+            api_url = f"{base}/embeddings"
+        else:
+            logger.error(f"Unsupported embedding provider: {emb_provider}")
             return None
 
         for attempt in range(MAX_RETRIES):
             try:
                 async with httpx.AsyncClient(timeout=30.0) as client:
                     resp = await client.post(
-                        EMBEDDING_API_URL,
+                        api_url,
                         headers={
                             "Authorization": f"Bearer {api_key}",
                             "Content-Type": "application/json",
                         },
                         json={
-                            "model": EMBEDDING_MODEL,
+                            "model": emb_model,
                             "input": texts,
                             "dimensions": VECTOR_DIMENSION,
                         },

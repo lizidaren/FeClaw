@@ -22,10 +22,14 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-# Qwen3.6-35b-a3b API 配置（MoE 架构，3B 激活参数，经实测为所有千问视觉模型中速度最优）
-QWEN_VL_BASE = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
-QWEN_VL_KEY: str = os.getenv("QWEN_API_KEY") or os.getenv("QWEN_VL_KEY", "")
-QWEN_VL_MODEL = "qwen3.6-35b-a3b"
+# VL 模型配置 — 从 registry 动态解析（provider / base_url / api_key）
+from config import settings as _img_settings
+from services.model_registry import resolve as _img_resolve
+
+_img_info = _img_resolve(_img_settings.MAIN_VISION_MODEL)
+QWEN_VL_MODEL = _img_settings.MAIN_VISION_MODEL
+QWEN_VL_BASE = f"{_img_info['base_url']}/chat/completions"
+QWEN_VL_KEY: str = os.getenv(_img_info.get("api_key_attr", ""), "")
 
 # 快速描述提示词：简短、客观、不联想
 QUICK_DESCRIBE_PROMPT = "3句话客观描述此图：图中的内容、文字信息、布局结构。不联想不评价。"

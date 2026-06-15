@@ -17,6 +17,37 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
+# ─── Provider 元信息（api_key 属性名 + base_url） ───
+
+PROVIDER_META = {
+    "deepseek": {
+        "api_key_attr": "DEEPSEEK_API_KEY",
+        "base_url": "https://api.deepseek.com"
+    },
+    "zhipuai": {
+        "api_key_attr": "ZHIPU_API_KEY",
+        "base_url": "https://open.bigmodel.cn/api/paas/v4"
+    },
+    "doubao": {
+        "api_key_attr": "DOUBAO_API_KEY",
+        "base_url": "https://ark.cn-beijing.volces.com/api/v3"
+    },
+    "kimi": {
+        "api_key_attr": "KIMI_API_KEY",
+        "base_url": None  # 使用 settings.KIMI_BASE_URL
+    },
+    "qwen": {
+        "api_key_attr": "QWEN_API_KEY",
+        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    },
+    "mimo": {
+        "api_key_attr": "MIMO_API_KEY",
+        "base_url": "https://api.xiaomimimo.com/v1"
+    },
+}
+
+# ─── 模型注册表 ───
+
 MODEL_REGISTRY = {
     # ─── DeepSeek ───
     "deepseek-v4-flash": {
@@ -73,32 +104,90 @@ MODEL_REGISTRY = {
         "supports_thinking": True,
         "supports_vision": False,
     },
+    # ─── 小米 MiMo ───
+    "mimo-v2-flash": {
+        "provider": "mimo",
+        "supports_thinking": False,
+        "supports_vision": False,
+    },
+    "mimo-v2-pro": {
+        "provider": "mimo",
+        "supports_thinking": True,
+        "supports_vision": False,
+    },
+    "mimo-v2.5": {
+        "provider": "mimo",
+        "supports_thinking": True,
+        "supports_vision": False,
+    },
+    "mimo-v2.5-pro": {
+        "provider": "mimo",
+        "supports_thinking": True,
+        "supports_vision": False,
+    },
+    "mimo-v2.5-pro-ultraspeed": {
+        "provider": "mimo",
+        "supports_thinking": True,
+        "supports_vision": False,
+    },
+    # ─── Embedding ───
+    "text-embedding-v4": {
+        "provider": "qwen",
+        "supports_thinking": False,
+        "supports_vision": False,
+    },
+    "embedding-3": {
+        "provider": "zhipuai",
+        "supports_thinking": False,
+        "supports_vision": False,
+    },
 }
 
 
 def resolve(model_name: str) -> dict:
     """
-    根据模型名返回 provider 和能力信息。
+    根据模型名返回 provider、能力信息以及 provider 元信息。
 
     Args:
         model_name: 模型名称
 
     Returns:
-        {"provider": str, "supports_thinking": bool, "supports_vision": bool}
+        {"provider": str, "supports_thinking": bool, "supports_vision": bool,
+         "api_key_attr": str, "base_url": str|None}
 
     未注册的模型返回默认 provider（来自 config.py）。
     """
     info = MODEL_REGISTRY.get(model_name)
     if info:
-        return dict(info)  # 返回副本，防止外部修改
+        result = dict(info)
+        provider_meta = PROVIDER_META.get(info["provider"], {})
+        result["api_key_attr"] = provider_meta.get("api_key_attr")
+        result["base_url"] = provider_meta.get("base_url")
+        return result
 
     from config import settings
-    logger.warning(f"Model '{model_name}' not in registry, using default provider")
+    logger.warning(f"Model '{model_name}' not in registry, using default provider from MAIN_TEXT_MODEL")
+    main_info = MODEL_REGISTRY.get(settings.MAIN_TEXT_MODEL, {})
+    provider = main_info.get("provider", "deepseek")
+    provider_meta = PROVIDER_META.get(provider, {})
     return {
-        "provider": settings.AGENT_LLM_PROVIDER,
+        "provider": provider,
         "supports_thinking": False,
         "supports_vision": False,
+        "api_key_attr": provider_meta.get("api_key_attr"),
+        "base_url": provider_meta.get("base_url"),
     }
+
+
+def resolve_provider(provider_name: str) -> Optional[dict]:
+    """
+    根据 provider 名返回元信息（api_key_attr, base_url）。
+
+    Returns:
+        {"api_key_attr": str, "base_url": str|None} 或 None
+    """
+    meta = PROVIDER_META.get(provider_name)
+    return dict(meta) if meta else None
 
 
 def find_by_capability(*, supports_vision: Optional[bool] = None,

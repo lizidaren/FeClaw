@@ -57,7 +57,7 @@ class AIToolsMixin(AgentToolsServiceBase):
                         "Content-Type": "application/json"
                     },
                     json={
-                        "model": settings.AGENT_LLM_MODEL,
+                        "model": settings.MAIN_TEXT_MODEL,
                         "messages": [
                             {"role": "system", "content": "你是一个文本摘要助手。请对用户提供的文本生成简洁、准确的摘要。保留关键信息和要点，去除冗余内容。摘要应简明扼要。"},
                             {"role": "user", "content": f"请总结以下文本：\n\n{content}"}
@@ -96,7 +96,7 @@ class AIToolsMixin(AgentToolsServiceBase):
                         "Content-Type": "application/json"
                     },
                     json={
-                        "model": settings.AGENT_LLM_MODEL,
+                        "model": settings.MAIN_TEXT_MODEL,
                         "messages": [
                             {"role": "system", "content": f"你是一个翻译助手。请将用户提供的文本翻译为{target_language}。只返回翻译结果，不要添加任何解释。"},
                             {"role": "user", "content": content}

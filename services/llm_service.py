@@ -9,6 +9,7 @@ import httpx
 from abc import ABC, abstractmethod
 from typing import AsyncGenerator, Callable, Optional, Dict, Any, List
 from config import settings
+from services.model_registry import resolve
 from models.database import LLMStat, SessionLocal
 
 import asyncio
@@ -133,7 +134,7 @@ class DeepSeekProvider(LLMProvider):
         }
 
         payload = {
-            "model": model or settings.AGENT_LLM_MODEL,
+            "model": model or settings.MAIN_TEXT_MODEL,
             "messages": messages,
             "stream": stream,
         }
@@ -485,31 +486,6 @@ class QwenProvider(LLMProvider):
                 yield content
 
 
-# Provider 配置映射（共享常量，避免在多处重复）
-PROVIDER_CONFIG = {
-    "deepseek": {
-        "api_key_attr": "DEEPSEEK_API_KEY",
-        "base_url": "https://api.deepseek.com"
-    },
-    "zhipuai": {
-        "api_key_attr": "ZHIPU_API_KEY",
-        "base_url": "https://open.bigmodel.cn/api/paas/v4"
-    },
-    "doubao": {
-        "api_key_attr": "DOUBAO_API_KEY",
-        "base_url": "https://ark.cn-beijing.volces.com/api/v3"
-    },
-    "kimi": {
-        "api_key_attr": "KIMI_API_KEY",
-        "base_url": None  # 使用 settings.KIMI_BASE_URL
-    },
-    "qwen": {
-        "api_key_attr": "QWEN_API_KEY",
-        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1"
-    },
-}
-
-
 def _resolve_provider(provider_name: str) -> tuple:
     """
     共享的 provider 解析函数，用于 chat_with_tools 和 chat_with_tools_stream。
@@ -517,12 +493,14 @@ def _resolve_provider(provider_name: str) -> tuple:
     Returns:
         (api_key, base_url) 或 raises ValueError
     """
-    config = PROVIDER_CONFIG.get(provider_name)
-    if not config:
+    from services.model_registry import resolve_provider
+
+    meta = resolve_provider(provider_name)
+    if not meta:
         raise ValueError(f"Unknown provider for tools: {provider_name}")
 
-    api_key = getattr(settings, config["api_key_attr"], None)
-    base_url = config["base_url"]
+    api_key = getattr(settings, meta["api_key_attr"], None)
+    base_url = meta["base_url"]
     if base_url is None:
         base_url = settings.KIMI_BASE_URL
 
@@ -707,7 +685,8 @@ class LLMService:
             max_filter_retries: tool_filter 拒绝后的最大重试轮数
         """
 
-        provider_name = provider or settings.AGENT_LLM_PROVIDER
+        actual_model = model or settings.MAIN_TEXT_MODEL
+        provider_name = provider or resolve(actual_model)["provider"]
         api_key, base_url = _resolve_provider(provider_name)
 
         headers = {
@@ -716,16 +695,15 @@ class LLMService:
         }
 
         payload = {
-            "model": model or settings.AGENT_LLM_MODEL,
+            "model": model or settings.MAIN_TEXT_MODEL,
             "messages": messages,
             "stream": False,
         }
-
         if tools:
             payload["tools"] = tools
 
         # 记录统计
-        asyncio.create_task(self._record_stat(provider_name, model or settings.AGENT_LLM_MODEL, request_type))
+        asyncio.create_task(self._record_stat(provider_name, model or settings.MAIN_TEXT_MODEL, request_type))
 
         client = await self._ensure_http_client()
 
@@ -842,7 +820,8 @@ class LLMService:
             {"type": "done", "content": "...", "tool_calls": [...]} - 流结束，包含完整信息
         """
 
-        provider_name = provider or settings.AGENT_LLM_PROVIDER
+        actual_model = model or settings.MAIN_TEXT_MODEL
+        provider_name = provider or resolve(actual_model)["provider"]
         api_key, base_url = _resolve_provider(provider_name)
 
         headers = {
@@ -851,7 +830,7 @@ class LLMService:
         }
 
         payload = {
-            "model": model or settings.AGENT_LLM_MODEL,
+            "model": model or settings.MAIN_TEXT_MODEL,
             "messages": messages,
             "stream": True,  # 流式模式
         }
@@ -867,7 +846,7 @@ class LLMService:
                 payload["thinking"] = {"type": "disabled"}
 
         # 记录统计
-        asyncio.create_task(self._record_stat(provider_name, model or settings.AGENT_LLM_MODEL, request_type))
+        asyncio.create_task(self._record_stat(provider_name, model or settings.MAIN_TEXT_MODEL, request_type))
 
         full_content = ""
         full_reasoning = ""

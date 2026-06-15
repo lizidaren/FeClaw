@@ -40,8 +40,7 @@ def estimate_tokens(text) -> int:
     other_chars = len(text) - chinese_chars
     return int(chinese_chars * 1.5 + other_chars / 4 + 0.5)
 
-# 默认摘要模型
-DEFAULT_SUMMARY_MODEL = "deepseek-v4-flash"
+# 摘要模型 — 现在由 settings.AGENT_LLM_MODEL 动态决定，不再需要默认常量
 
 # L2-L4 压缩参数默认值
 DEFAULT_COLD_THRESHOLD = 50  # 冷路径阈值：超过此数量的消息进入冷路径
@@ -72,7 +71,7 @@ class MessageCompactor:
         max_tokens: int = 80000,
         compression_ratio: float = 0.3,
         summary_provider: str = None,
-        summary_model: str = DEFAULT_SUMMARY_MODEL,
+        summary_model: str = None,
         cold_threshold: int = DEFAULT_COLD_THRESHOLD,
         hot_window: int = DEFAULT_HOT_WINDOW,
         shear_aggressive: bool = DEFAULT_SHEAR_AGGRESSIVE,
@@ -91,9 +90,10 @@ class MessageCompactor:
         self.max_recent = max_recent
         self.max_tokens = max_tokens
         self.compression_ratio = compression_ratio
+        from config import settings
         from services.model_registry import resolve
-        self.summary_provider = summary_provider or resolve(DEFAULT_SUMMARY_MODEL)["provider"]
-        self.summary_model = summary_model
+        self.summary_model = summary_model or settings.MAIN_TEXT_MODEL
+        self.summary_provider = summary_provider or resolve(self.summary_model)["provider"]
         self.cold_threshold = cold_threshold
         self.hot_window = hot_window
         self.shear_aggressive = shear_aggressive

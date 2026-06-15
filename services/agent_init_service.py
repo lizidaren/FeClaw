@@ -553,9 +553,11 @@ class AgentInitService:
             self._write_config_db(agent_hash, "tools", json.dumps(tools_content), db=db)
 
         # 3. 保存 agent 配置到数据库（仅当不存在时写入默认值）
+        from services.model_registry import resolve as _ais_resolve
+        _ais_main_info = _ais_resolve(settings.MAIN_TEXT_MODEL)
         default_config = {
-            "llm_provider": settings.AGENT_LLM_PROVIDER,
-            "llm_model": settings.AGENT_LLM_MODEL,
+            "llm_provider": _ais_main_info["provider"],
+            "llm_model": settings.MAIN_TEXT_MODEL,
             "max_context_tokens": 110000,
             "compression_ratio": 0.3,
             "max_tool_rounds": 50

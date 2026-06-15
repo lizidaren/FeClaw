@@ -202,14 +202,15 @@ class AgentExecutor:
 
         Args:
             messages: 对话消息列表
-            provider: LLM 提供商（默认 settings.AGENT_LLM_PROVIDER）
-            model: 模型名称（默认 settings.AGENT_LLM_MODEL）
+            provider: LLM 提供商（默认从 MAIN_TEXT_MODEL 的 registry 解析）
+            model: 模型名称（默认 settings.MAIN_TEXT_MODEL）
             reasoning_effort: 深度思考强度（默认 settings.AGENT_LLM_REASONING_EFFORT）
         """
         MAX_TOOL_ROUNDS = 25
         TOOL_LOOP_TIMEOUT = 120  # 整体工具循环超时（秒）
-        actual_provider = provider or settings.AGENT_LLM_PROVIDER
-        actual_model = model or settings.AGENT_LLM_MODEL
+        actual_model = model or settings.MAIN_TEXT_MODEL
+        from services.model_registry import resolve as _exec_resolve
+        actual_provider = provider or _exec_resolve(actual_model)["provider"]
         actual_reasoning = reasoning_effort if reasoning_effort is not None else settings.AGENT_LLM_REASONING_EFFORT
 
         # 0. 检查 Agent 状态
@@ -341,7 +342,7 @@ class AgentExecutor:
             _done = await asyncio.gather(*_tasks)
             prefetch_results = [r for r in _done if r is not None]
 
-        # 2c. 注射规则（追加到 system 消息，确保主模型在 prompt 层面接收）
+        # 2c. 注入规则（追加到 system 消息，确保主模型在 prompt 层面接收）
         if decision.inject_rules:
             rules_text = "\n".join(f"- {r}" for r in decision.inject_rules)
             _rule_block = f"\n\n【人设注入】\n{rules_text}"
@@ -354,14 +355,14 @@ class AgentExecutor:
             if not _found_system:
                 working_messages.insert(0, {"role": "system", "content": _rule_block.strip()})
 
-        # 2d. 注射预取数据（标记为低优先级参考信息，避免误导主模型）
+        # 2d. 注入预取数据（标记为低优先级参考信息，避免误导主模型）
         if prefetch_results:
             working_messages.append({
                 "role": "user",
                 "content": "[系统预取数据-仅供参考]\n⚠️ 以下为预取数据，仅供参考。如果与用户消息中的实际路径/内容不一致，以用户消息为准。\n" + "\n---\n".join(prefetch_results[:3]) + "\n[/系统预取数据]"
             })
 
-        # 2d2. 注射向量搜索结果（等并行向量搜索完成，超时 3s）
+        # 2d2. 注入向量搜索结果（等并行向量搜索完成，超时 3s）
         if _vec_task:
             _vec_results = []
             try:

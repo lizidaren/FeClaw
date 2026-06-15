@@ -20,7 +20,8 @@ class EmbeddingService:
     提供更简洁的 embed/embed_batch 接口。
     """
 
-    MODEL = "text-embedding-v4"
+    from config import settings as _es
+    MODEL = _es.MAIN_EMBEDDING_MODEL
     DIMENSION = 1024
     MAX_BATCH = 10
 
