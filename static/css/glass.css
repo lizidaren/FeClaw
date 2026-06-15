@@ -1,0 +1,263 @@
+/* ============================================
+ * Glass CSS - 液态玻璃效果
+ * 包含：玻璃卡片、按钮、输入框、面板
+ * ============================================ */
+
+/* 玻璃卡片 - 核心组件 */
+.glass-card {
+    background: var(--bg-primary);
+    backdrop-filter: blur(var(--glass-blur));
+    -webkit-backdrop-filter: blur(var(--glass-blur));
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-md);
+    padding: var(--spacing-lg);
+    position: relative;
+    overflow: hidden;
+    transition: all var(--transition-normal);
+}
+
+.glass-card::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.3), transparent);
+}
+
+.glass-card:hover {
+    background: var(--bg-secondary);
+    border-color: var(--border-light);
+    transform: translateY(-2px);
+    box-shadow: var(--shadow-lg);
+}
+
+/* 玻璃卡片变体 */
+.glass-card-sm {
+    padding: var(--spacing-md);
+}
+
+.glass-card-lg {
+    padding: var(--spacing-xl);
+}
+
+.glass-card-transparent {
+    background: rgba(255, 255, 255, 0.02);
+}
+
+/* 玻璃面板 */
+.glass-panel {
+    background: var(--bg-primary);
+    backdrop-filter: blur(var(--glass-blur-heavy));
+    -webkit-backdrop-filter: blur(var(--glass-blur-heavy));
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-xl);
+    box-shadow: var(--shadow-lg);
+    padding: var(--spacing-2xl);
+}
+
+.glass-panel-wide {
+    width: 100%;
+    max-width: var(--container-lg);
+}
+
+/* 玻璃按钮 */
+.glass-button {
+    background: var(--bg-secondary);
+    backdrop-filter: blur(var(--glass-blur));
+    -webkit-backdrop-filter: blur(var(--glass-blur));
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-md);
+    padding: var(--spacing-md) var(--spacing-lg);
+    color: var(--text-primary);
+    font-weight: 500;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--spacing-sm);
+    transition: all var(--transition-normal);
+    cursor: pointer;
+    position: relative;
+    overflow: hidden;
+}
+
+.glass-button::before {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 0;
+    height: 0;
+    background: radial-gradient(circle, rgba(255, 255, 255, 0.3) 0%, transparent 70%);
+    transform: translate(-50%, -50%);
+    transition: width 0.6s, height 0.6s;
+}
+
+.glass-button:hover::before {
+    width: 200%;
+    height: 200%;
+}
+
+.glass-button:hover {
+    background: var(--bg-hover);
+    border-color: var(--border-light);
+    transform: translateY(-1px);
+    box-shadow: var(--shadow-glow);
+}
+
+.glass-button:active {
+    transform: translateY(0);
+}
+
+/* 按钮变体 */
+.glass-button-primary {
+    background: linear-gradient(135deg, var(--accent-blue), rgba(0, 217, 255, 0.6));
+    border-color: var(--accent-blue);
+}
+
+.glass-button-primary:hover {
+    background: linear-gradient(135deg, var(--accent-blue), rgba(0, 217, 255, 0.8));
+    box-shadow: 0 0 30px rgba(0, 217, 255, 0.4);
+}
+
+.glass-button-success {
+    background: linear-gradient(135deg, var(--accent-green), rgba(74, 222, 128, 0.6));
+    border-color: var(--accent-green);
+}
+
+.glass-button-success:hover {
+    box-shadow: 0 0 30px rgba(74, 222, 128, 0.4);
+}
+
+.glass-button-danger {
+    background: linear-gradient(135deg, var(--accent-red), rgba(255, 107, 107, 0.6));
+    border-color: var(--accent-red);
+}
+
+.glass-button-danger:hover {
+    box-shadow: 0 0 30px rgba(255, 107, 107, 0.4);
+}
+
+.glass-button-full {
+    width: 100%;
+}
+
+.glass-button-sm {
+    padding: var(--spacing-sm) var(--spacing-md);
+    font-size: var(--text-sm);
+}
+
+.glass-button-lg {
+    padding: var(--spacing-lg) var(--spacing-xl);
+    font-size: var(--text-lg);
+}
+
+/* 玻璃输入框 */
+.glass-input {
+    background: var(--bg-primary);
+    backdrop-filter: blur(var(--glass-blur));
+    -webkit-backdrop-filter: blur(var(--glass-blur));
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-md);
+    padding: var(--spacing-md) var(--spacing-lg);
+    color: var(--text-primary);
+    width: 100%;
+    transition: all var(--transition-normal);
+}
+
+.glass-input::placeholder {
+    color: var(--text-hint);
+}
+
+.glass-input:focus {
+    border-color: var(--accent-blue);
+    box-shadow: 0 0 0 3px rgba(0, 217, 255, 0.2), var(--shadow-sm);
+    background: var(--bg-secondary);
+}
+
+.glass-input:hover:not(:focus) {
+    border-color: var(--border-light);
+}
+
+/* 输入框变体 */
+.glass-input-lg {
+    padding: var(--spacing-lg) var(--spacing-xl);
+    font-size: var(--text-lg);
+}
+
+.glass-input-error {
+    border-color: var(--accent-red);
+}
+
+.glass-input-error:focus {
+    box-shadow: 0 0 0 3px rgba(255, 107, 107, 0.2);
+}
+
+/* 玻璃导航 */
+.glass-nav {
+    background: var(--bg-primary);
+    backdrop-filter: blur(var(--glass-blur));
+    -webkit-backdrop-filter: blur(var(--glass-blur));
+    border-bottom: 1px solid var(--border-subtle);
+    position: sticky;
+    top: 0;
+    z-index: 100;
+}
+
+.glass-nav-item {
+    padding: var(--spacing-md) var(--spacing-lg);
+    color: var(--text-secondary);
+    transition: all var(--transition-normal);
+    border-radius: var(--radius-md);
+}
+
+.glass-nav-item:hover {
+    color: var(--text-primary);
+    background: var(--bg-secondary);
+}
+
+.glass-nav-item.active {
+    color: var(--accent-blue);
+    background: rgba(0, 217, 255, 0.1);
+}
+
+/* 玻璃分割线 */
+.glass-divider {
+    height: 1px;
+    background: linear-gradient(90deg, transparent, var(--border-subtle), transparent);
+    margin: var(--spacing-lg) 0;
+}
+
+/* 玻璃徽章 */
+.glass-badge {
+    background: var(--bg-secondary);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-full);
+    padding: var(--spacing-xs) var(--spacing-md);
+    font-size: var(--text-sm);
+    color: var(--text-secondary);
+    display: inline-flex;
+    align-items: center;
+}
+
+.glass-badge-blue {
+    background: rgba(0, 217, 255, 0.2);
+    border-color: rgba(0, 217, 255, 0.3);
+    color: var(--accent-blue);
+}
+
+.glass-badge-green {
+    background: rgba(74, 222, 128, 0.2);
+    border-color: rgba(74, 222, 128, 0.3);
+    color: var(--accent-green);
+}
+
+.glass-badge-red {
+    background: rgba(255, 107, 107, 0.2);
+    border-color: rgba(255, 107, 107, 0.3);
+    color: var(--accent-red);
+}

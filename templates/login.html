@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% if is_subdomain %}Agent 登录{% else %}登录{% endif %} - FeClaw</title>
+
+{% if is_subdomain %}
+    {# 子域名：旧版 TOTP #}
+    <script src="/static/js/auth.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background: linear-gradient(135deg, #0f0f23 0%, #1a1a3e 50%, #0f0f23 100%);
+            min-height: 100vh;
+            display: flex; align-items: center; justify-content: center;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            color: #e0e0e0;
+        }
+        .login-card {
+            background: rgba(255,255,255,0.05);
+            backdrop-filter: blur(20px);
+            border: 1px solid rgba(255,255,255,0.1);
+            border-radius: 20px;
+            padding: 40px;
+            width: 380px;
+            max-width: 90vw;
+        }
+        .logo { text-align: center; margin-bottom: 30px; }
+        .logo h1 { font-size: 28px; background: linear-gradient(135deg, #667eea, #764ba2); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+        .subtitle { color: #888; font-size: 14px; margin-top: 5px; }
+        .input-group { margin-bottom: 16px; }
+        .input-group label { display: block; color: #aaa; font-size: 13px; margin-bottom: 6px; }
+        .input-group input {
+            width: 100%; padding: 12px 16px; background: rgba(255,255,255,0.08);
+            border: 1px solid rgba(255,255,255,0.15); border-radius: 10px;
+            color: #fff; font-size: 16px; outline: none; transition: border-color 0.2s;
+        }
+        .input-group input:focus { border-color: #667eea; }
+        .input-group input[readonly] { opacity: 0.6; }
+        .btn {
+            width: 100%; padding: 12px; border: none; border-radius: 10px;
+            font-size: 16px; cursor: pointer; transition: all 0.2s;
+        }
+        .btn-primary {
+            background: linear-gradient(135deg, #667eea, #764ba2); color: #fff;
+        }
+        .btn-primary:hover { opacity: 0.9; transform: translateY(-1px); }
+        .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+        .btn-secondary {
+            background: rgba(255,255,255,0.1); color: #e0e0e0;
+        }
+        .btn-secondary:hover { background: rgba(255,255,255,0.15); }
+        .back { display: block; text-align: center; color: #888; text-decoration: none; font-size: 14px; margin-top: 16px; }
+        .back:hover { color: #aaa; }
+        .error-msg { color: #f87171; font-size: 13px; text-align: center; margin-top: 10px; min-height: 20px; }
+        .divider { display: flex; align-items: center; margin: 20px 0; }
+        .divider::before, .divider::after { content: ''; flex: 1; height: 1px; background: rgba(255,255,255,0.1); }
+        .divider-text { padding: 0 16px; color: #666; font-size: 12px; }
+    </style>
+</head>
+<body>
+    <div class="login-card">
+        <div class="logo">
+            <h1>✦ FeClaw</h1>
+            <p class="subtitle" id="subtitle">Agent 控制台 • TOTP 验证</p>
+        </div>
+
+        <div id="totpSection">
+            <div class="input-group">
+                <label>Agent Hash</label>
+                <input type="text" id="agentHashInput" placeholder="abcd" maxlength="4" readonly>
+            </div>
+            <div class="input-group">
+                <label>6 位验证码</label>
+                <input type="text" id="totpInput" placeholder="000000" maxlength="6" autocomplete="off">
+            </div>
+            <button class="btn btn-primary" onclick="verifyTOTP()" id="loginBtn">验证并登录</button>
+        </div>
+
+        <div class="divider" id="loginDivider">
+            <span class="divider-text">其他方式</span>
+        </div>
+        <button class="btn btn-secondary" id="switchBtn" onclick="window.location.href='{{ oauth_login_url }}'">
+            使用 Platform 账号登录
+        </button>
+
+        <div class="error-msg" id="errorMsg"></div>
+        <div id="ownershipWarning" style="display:none;text-align:center;margin-top:12px;">
+            <p style="color:#f87171;font-size:14px;margin-bottom:8px;">❌ 此 Agent 不属于您</p>
+            <p style="color:#888;font-size:13px;margin-bottom:16px;">您当前已登录 Platform，但此 Agent 并非您的账号下的资源。<br>请在主域名中退出当前账号，再使用 TOTP 验证码登录。</p>
+            <button class="btn btn-secondary" onclick="window.location.href='/'">返回首页</button>
+        </div>
+    </div>
+
+    <script>
+        // 子域名：自动填充 hash
+        var agentHash = '{{ agent_hash }}';
+        var strictOwnership = {{ totp_strict_ownership|lower }};
+        if (agentHash) {
+            document.getElementById('agentHashInput').value = agentHash;
+        }
+
+        // 检查 Platform 用户是否拥有此 Agent
+        (async function checkOwnership() {
+            if (!strictOwnership || !agentHash) return;
+            var token = (typeof Auth !== 'undefined') ? Auth.getToken() : localStorage.getItem('feclaw_jwt');
+            if (!token) return;  // 没有 Platform 会话，正常显示 TOTP
+            try {
+                var res = await fetch('/api/agent/info?agent_hash=' + agentHash, {
+                    headers: { 'Authorization': 'Bearer ' + token }
+                });
+                if (!res.ok && res.status === 403) {
+                    // 此 Agent 不属于当前用户
+                    document.getElementById('totpSection').style.display = 'none';
+                    document.getElementById('loginDivider').style.display = 'none';
+                    document.getElementById('switchBtn').style.display = 'none';
+                    document.getElementById('ownershipWarning').style.display = 'block';
+                }
+            } catch(e) {}
+        })();
+
+        // 支持 URL 参数 ?totp=123456 自动填入验证码
+        var urlParams = new URLSearchParams(window.location.search);
+        var totpCode = urlParams.get('totp');
+        if (totpCode) {
+            document.getElementById('totpInput').value = totpCode;
+            // 自动触发验证
+            setTimeout(verifyTOTP, 300);
+        }
+
+        async function verifyTOTP() {
+            var code = document.getElementById('totpInput').value.trim();
+            var hash = document.getElementById('agentHashInput').value.trim();
+            if (!code || code.length !== 6) {
+                document.getElementById('errorMsg').textContent = '请输入 6 位验证码';
+                return;
+            }
+            var btn = document.getElementById('loginBtn');
+            btn.disabled = true; btn.textContent = '验证中...';
+            try {
+                var res = await fetch('/api/totp/verify', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ agent_hash: hash, code: code })
+                });
+                var data = await res.json();
+                if (res.ok && data.token) {
+                    Auth.setToken(data.token);
+                    window.location.href = '/chat/';
+                } else {
+                    document.getElementById('errorMsg').textContent = data.detail || '验证失败';
+                    btn.disabled = false; btn.textContent = '验证并登录';
+                }
+            } catch(e) {
+                document.getElementById('errorMsg').textContent = '网络错误';
+                btn.disabled = false; btn.textContent = '验证并登录';
+            }
+        }
+    </script>
+{% else %}
+    {# 根域名：新版跳转提示 #}
+    <link rel="stylesheet" href="/static/css/base.css">
+    <link rel="stylesheet" href="/static/css/glass.css">
+    <link rel="stylesheet" href="/static/css/components.css">
+    <link rel="stylesheet" href="/static/css/layouts.css">
+    <link rel="stylesheet" href="/static/css/animations.css">
+    <style>
+        body {
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+        }
+        .login-panel {
+            max-width: 400px;
+            width: 100%;
+            text-align: center;
+        }
+        .spinner {
+            width: 32px;
+            height: 32px;
+            margin: 0 auto 20px;
+            border: 3px solid rgba(255,255,255,0.1);
+            border-top-color: var(--accent);
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .redirect-note {
+            color: var(--text-muted);
+            font-size: var(--text-sm);
+            margin-top: 20px;
+        }
+        .redirect-note a {
+            color: var(--accent);
+            text-decoration: none;
+        }
+        .redirect-note a:hover { text-decoration: underline; }
+    </style>
+</head>
+<body>
+    <div class="glass-panel login-panel animate-scale-in">
+        <div class="brand mb-xl text-center">
+            <span class="brand-icon" style="display:inline-flex;margin-bottom:12px;">
+                <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                    <path d="M12 2L2 7l10 5 10-5-10-5z"/>
+                    <path d="M2 17l10 5 10-5"/>
+                    <path d="M2 12l10 5 10-5"/>
+                </svg>
+            </span>
+            <h2 class="hero-title" style="font-size:var(--text-xl);">FeClaw</h2>
+            <p class="text-secondary">正在跳转到 FirstEntrance Platform...</p>
+        </div>
+
+        <div class="spinner"></div>
+
+        <a href="{{ oauth_login_url }}" class="glass-button glass-button-primary glass-button-full" id="loginBtn">
+            使用 Platform 账号登录
+        </a>
+
+        <p class="redirect-note">
+            如果未自动跳转，请点击上方按钮
+        </p>
+
+
+    </div>
+
+    <script>
+        // 自动跳转到 Platform 登录
+        var loginBtn = document.getElementById('loginBtn');
+        if (loginBtn) {
+            setTimeout(function() {
+                window.location.href = loginBtn.getAttribute('href');
+            }, 400);
+        }
+        // 防抖：防止双击生成两个 OAuth state
+        loginBtn.addEventListener('click', function(e) {
+            if (this.dataset.clicked) { e.preventDefault(); return; }
+            this.dataset.clicked = '1';
+        });
+    </script>
+{% endif %}
+</body>
+</html>

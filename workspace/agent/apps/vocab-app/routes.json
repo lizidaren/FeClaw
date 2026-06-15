@@ -1,0 +1,32 @@
+{
+  "app_id": "vocab-app",
+  "version": "1.0",
+  "routes": [
+    {
+      "endpoint": "/",
+      "type": "static",
+      "file": "index.html"
+    },
+    {
+      "endpoint": "/api/query",
+      "type": "ai",
+      "subagent": {
+        "system_prompt": "你是英语词汇查询助手。返回 JSON：{\"word\": string, \"pronunciation\": string, \"definitions\": [{\"part_of_speech\": string, \"meaning\": string, \"examples\": [string]}]}",
+        "tools": [
+          "web_search"
+        ],
+        "tool_filter": {
+          "allow": [
+            "web_search"
+          ]
+        },
+        "max_turns": 2
+      }
+    },
+    {
+      "endpoint": "/data",
+      "type": "data",
+      "dataset": "vocabulary-gaokao-3500"
+    }
+  ]
+}

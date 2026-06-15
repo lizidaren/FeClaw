@@ -1,0 +1,1222 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <script src="/static/js/auth.js"></script>
+    <script>
+        // 阻塞式检查认证，未认证则不渲染页面
+        Auth.checkAuthBeforeRender().then(authenticated => {
+            if (!authenticated) {
+                // 阻止页面渲染
+                document.write('<div style="display:none">');
+            }
+        }).catch(e => {
+            document.getElementById('fileList').innerHTML =
+                '<div class="empty-state"><div class="icon">❌</div><p>认证异常: ' + (e.message || e) + '</p></div>';
+        });
+    </script>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FeClaw 文件管理</title>
+    <!-- CodeMirror 编辑器（本地托管） -->
+    <link rel="stylesheet" href="/static/codemirror.css">
+    <script src="/static/codemirror.js"></script>
+    <script src="/static/cm-mode-xml.js"></script>
+    <script src="/static/cm-mode-htmlmixed.js"></script>
+    <script src="/static/cm-mode-javascript.js"></script>
+    <script src="/static/cm-mode-css.js"></script>
+    <script src="/static/cm-mode-python.js"></script>
+    <script src="/static/cm-mode-markdown.js"></script>
+    <script src="/static/cm-mode-yaml.js"></script>
+    <script src="/static/cm-mode-sql.js"></script>
+    <script src="/static/cm-mode-shell.js"></script>
+    <script src="/static/cm-addon-matchbrackets.js"></script>
+    <!-- Markdown 渲染 -->
+    <script src="/static/marked.min.js"></script>
+    <!-- COS SDK (本地托管，避免 unpkg 被墙) -->
+    <script src="/static/cos-js-sdk-v5.min.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f5f5f5; min-height: 100vh; }
+        .header {
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            padding: 15px 20px;
+            display: flex; justify-content: space-between; align-items: center;
+            color: white;
+        }
+        .header h1 { font-size: 18px; display: flex; align-items: center; gap: 10px; }
+        .header .agent { color: #888; font-size: 14px; }
+        .header button {
+            padding: 8px 16px;
+            background: rgba(255,255,255,0.1);
+            color: white;
+            border: 1px solid rgba(255,255,255,0.2);
+            border-radius: 6px;
+            cursor: pointer;
+        }
+        .breadcrumb { background: white; padding: 12px 20px; border-bottom: 1px solid #eee; }
+        .breadcrumb a { color: #667eea; text-decoration: none; }
+        .toolbar { padding: 15px 20px; display: flex; gap: 10px; }
+        .toolbar button {
+            padding: 8px 16px;
+            border: 1px solid #ddd;
+            background: white;
+            border-radius: 6px;
+            cursor: pointer;
+        }
+        .toolbar button.primary {
+            background: #667eea;
+            color: white;
+            border-color: #667eea;
+        }
+        .file-list { background: white; margin: 0 20px 20px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+        .file-item {
+            display: flex; align-items: center;
+            padding: 12px 15px;
+            border-bottom: 1px solid #eee;
+            transition: background 0.2s;
+        }
+        .file-item:hover { background: #f8f8f8; }
+        .file-item .icon { font-size: 20px; margin-right: 12px; cursor: default; }
+        .file-item .name { flex: 1; cursor: pointer; color: #333; }
+        .file-item .name:hover { color: #667eea; }
+        .file-item .size { color: #888; margin-right: 8px; font-size: 14px; }
+        .file-item-wrap { display: flex; align-items: center; flex: 1; cursor: pointer; }
+
+        /* 三点按钮 */
+        .three-dot-btn {
+            width: 32px; height: 32px;
+            border: none; background: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 18px; color: #888;
+            display: flex; align-items: center; justify-content: center;
+            position: relative;
+            flex-shrink: 0;
+        }
+        .three-dot-btn:hover { background: #e8e8e8; color: #333; }
+
+        /* 三点菜单面板 */
+        .dot-menu-panel {
+            display: none;
+            position: fixed;
+            z-index: 999;
+            background: #fff;
+            border-radius: 8px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.15), 0 1px 3px rgba(0,0,0,0.1);
+            min-width: 260px;
+            padding: 12px 0;
+            border: 1px solid #e0e0e0;
+        }
+        .dot-menu-panel.active { display: block; }
+        .dot-menu-panel .menu-file-name {
+            padding: 4px 16px 8px;
+            font-size: 14px; font-weight: 600;
+            color: #333;
+            word-break: break-all;
+            border-bottom: 1px solid #eee;
+            margin-bottom: 6px;
+        }
+        .dot-menu-panel .menu-meta {
+            padding: 4px 16px 8px;
+            font-size: 12px; color: #888;
+            border-bottom: 1px solid #eee;
+            margin-bottom: 6px;
+            line-height: 1.6;
+        }
+        .dot-menu-panel .menu-item {
+            display: flex; align-items: center; gap: 8px;
+            padding: 8px 16px;
+            cursor: pointer;
+            font-size: 14px; color: #333;
+            transition: background 0.15s;
+            border: none; background: none; width: 100%; text-align: left;
+        }
+        .dot-menu-panel .menu-item:hover { background: #f5f5f5; }
+        .dot-menu-panel .menu-item.danger { color: #e74c3c; }
+        .dot-menu-panel .menu-item.danger:hover { background: #ffebee; }
+
+        .empty-state { text-align: center; padding: 60px 20px; color: #888; }
+        .empty-state .icon { font-size: 48px; margin-bottom: 15px; }
+        .back-link { display: inline-block; padding: 10px 20px; color: #667eea; text-decoration: none; }
+
+        /* 编辑弹窗 */
+        .modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 1000; }
+        .modal.active { display: flex; align-items: center; justify-content: center; }
+        .modal-content { background: #1e1e1e; border-radius: 8px; width: 95vw; height: 90vh; max-width: 1400px; overflow: hidden; display: flex; flex-direction: column; }
+        .modal-header { padding: 12px 20px; border-bottom: 1px solid #333; display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+        .modal-header h2 { font-size: 15px; color: #ccc; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .modal-header .header-actions { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
+        .modal-header button { background: none; border: none; font-size: 22px; cursor: pointer; color: #888; }
+        .modal-header button:hover { color: #ccc; }
+
+        /* 模式切换按钮 */
+        .mode-toggle-btn {
+            padding: 4px 12px;
+            border: 1px solid #555;
+            border-radius: 4px;
+            background: #333;
+            color: #ccc;
+            font-size: 13px;
+            cursor: pointer;
+            white-space: nowrap;
+        }
+        .mode-toggle-btn:hover { background: #444; border-color: #777; }
+        .mode-toggle-btn.active { background: #667eea; border-color: #667eea; color: white; }
+
+        /* 编辑器容器 */
+        .editor-container { flex: 1; display: flex; min-height: 0; overflow: hidden; }
+        .editor-pane { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-height: 0; }
+        .editor-pane-header { padding: 8px 15px; background: #252526; font-size: 12px; color: #ccc; border-bottom: 1px solid #333; flex-shrink: 0; }
+        .editor-body { flex: 1; position: relative; overflow: hidden; min-height: 0; }
+        .editor-body .CodeMirror { position: absolute; top: 0; left: 0; right: 0; bottom: 0; height: auto; font-family: 'Monaco', 'Consolas', 'Fira Code', monospace; font-size: 14px; line-height: 1.5; }
+        .editor-body .CodeMirror-scroll { height: 100% !important; overflow: auto !important; }
+        .editor-body .image-preview { display: none; position: absolute; top: 0; left: 0; right: 0; bottom: 0; align-items: center; justify-content: center; overflow: auto; background: #2d2d2d; }
+        .editor-body .image-preview img { max-width: 100%; max-height: 100%; object-fit: contain; }
+        /* 配置编辑器（暗色主题，editor-body 隐藏时占据全部空间） */
+        .editor-pane #configEditor { display: none; flex: 1; flex-direction: column; padding: 20px; overflow: auto; }
+        .editor-pane #configEditor #configKeyDisplay { background: #252526; padding: 12px 16px; border-radius: 6px; margin-bottom: 12px; font-family: monospace; font-size: 13px; color: #9cdcfe; word-break: break-all; border-left: 3px solid #569cd6; }
+        .editor-pane #configEditor #configDesc { padding: 8px 12px; border-radius: 6px; font-size: 12px; background: #3c3c3c; color: #d4d4d4; margin-bottom: 12px; }
+        .editor-pane #configEditor #configTypeWidget { margin-bottom: 10px; }
+        .editor-pane #configEditor #configValueEdit { width: 100%; min-height: 80px; padding: 14px; background: #1e1e1e; color: #d4d4d4; border: 1px solid #3c3c3c; border-radius: 6px; font-family: 'Monaco','Consolas','Fira Code',monospace; font-size: 14px; line-height: 1.5; resize: vertical; outline: none; box-sizing: border-box; }
+        .editor-pane #configEditor #configValueEdit:focus { border-color: #569cd6; }
+        .editor-pane #configEditor #configMeta { margin-top: 12px; font-size: 12px; color: #888; display: flex; gap: 16px; }
+
+        /* 预览面板 (Markdown 渲染 / 媒体预览 / 不支持) */
+        .preview-pane {
+            display: none;
+            position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+            overflow: auto;
+            background: #fff;
+            color: #333;
+            padding: 30px 40px;
+            font-size: 15px; line-height: 1.8;
+        }
+        .preview-pane.active { display: block; }
+        .preview-pane h1, .preview-pane h2, .preview-pane h3 { margin-top: 24px; margin-bottom: 12px; color: #1a1a1a; }
+        .preview-pane h1 { font-size: 1.8em; border-bottom: 1px solid #eee; padding-bottom: 8px; }
+        .preview-pane h2 { font-size: 1.4em; border-bottom: 1px solid #f0f0f0; padding-bottom: 6px; }
+        .preview-pane p { margin-bottom: 12px; }
+        .preview-pane code { background: #f5f5f5; padding: 2px 6px; border-radius: 3px; font-size: 0.9em; }
+        .preview-pane pre { background: #f5f5f5; padding: 16px; border-radius: 6px; overflow-x: auto; margin-bottom: 16px; }
+        .preview-pane pre code { background: none; padding: 0; }
+        .preview-pane blockquote { border-left: 4px solid #667eea; padding: 8px 16px; margin: 12px 0; color: #555; background: #f9f9f9; }
+        .preview-pane table { border-collapse: collapse; width: 100%; margin-bottom: 16px; }
+        .preview-pane th, .preview-pane td { border: 1px solid #ddd; padding: 8px 12px; text-align: left; }
+        .preview-pane th { background: #f5f5f5; font-weight: 600; }
+        .preview-pane img { max-width: 100%; }
+        .preview-pane a { color: #667eea; }
+
+        /* 媒体预览 (video/audio) */
+        .media-preview {
+            display: none;
+            position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+            align-items: center; justify-content: center;
+            background: #000;
+        }
+        .media-preview.active { display: flex; }
+        .media-preview video { max-width: 100%; max-height: 100%; outline: none; }
+        .media-preview audio { width: 80%; max-width: 500px; outline: none; }
+
+        /* 不支持预览 */
+        .unsupported-preview {
+            display: none;
+            position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+            align-items: center; justify-content: center;
+            background: #1e1e1e;
+            color: #888;
+            font-size: 16px;
+        }
+        .unsupported-preview.active { display: flex; }
+        .unsupported-preview .msg { text-align: center; }
+        .unsupported-preview .msg .big { font-size: 48px; margin-bottom: 12px; }
+
+        /* CodeMirror 暗色主题（VS Code 风格） */
+        .CodeMirror { background: #1e1e1e; color: #d4d4d4; }
+        .CodeMirror-gutters { background: #252526; border-right: 1px solid #333; }
+        .CodeMirror-linenumber { color: #858585; }
+        .CodeMirror-cursor { border-left: 2px solid #528bff; }
+        .CodeMirror-selected { background: #264f78; }
+        .CodeMirror-focused .CodeMirror-selected { background: #264f78; }
+        .cm-s-default .cm-keyword { color: #569cd6; }
+        .cm-s-default .cm-atom { color: #dcdcaa; }
+        .cm-s-default .cm-number { color: #b5cea8; }
+        .cm-s-default .cm-def { color: #dcdcaa; }
+        .cm-s-default .cm-variable { color: #d4d4d4; }
+        .cm-s-default .cm-variable-2 { color: #9cdcfe; }
+        .cm-s-default .cm-property { color: #9cdcfe; }
+        .cm-s-default .cm-operator { color: #d4d4d4; }
+        .cm-s-default .cm-comment { color: #6a9955; font-style: italic; }
+        .cm-s-default .cm-string { color: #ce9178; }
+        .cm-s-default .cm-string-2 { color: #ce9178; }
+        .cm-s-default .cm-meta { color: #d4d4d4; }
+        .cm-s-default .cm-qualifier { color: #569cd6; }
+        .cm-s-default .cm-builtin { color: #569cd6; }
+        .cm-s-default .cm-bracket { color: #d4d4d4; }
+        .cm-s-default .cm-tag { color: #569cd6; }
+        .cm-s-default .cm-attribute { color: #9cdcfe; }
+        .cm-s-default .cm-link { color: #569cd6; }
+
+        .modal-actions { padding: 15px 20px; border-top: 1px solid #333; display: flex; justify-content: flex-end; gap: 10px; background: #252526; }
+
+        /* 上传进度 */
+        .upload-progress { padding: 10px 20px; background: #e8f5e9; border-radius: 6px; margin: 10px 20px; }
+        .upload-progress.error { background: #ffebee; }
+
+        /* 移动端适配 */
+        @media (max-width: 768px) {
+            .editor-container { flex-direction: column; }
+            .preview-pane { padding: 16px 20px; }
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div>
+            <h1>📁 FeClaw 文件管理</h1>
+            <span class="agent" id="agentHash">加载中...</span>
+        </div>
+        <button onclick="logout()">🚪 退出</button>
+    </div>
+    <a href="/" class="back-link">← 返回主页</a>
+    <div class="breadcrumb" id="breadcrumb"></div>
+    <div class="toolbar">
+        <button class="primary" onclick="newFile()" id="btnNewFile">📝 新建</button>
+        <button onclick="uploadFile()" id="btnUpload">📤 上传</button>
+        <button onclick="loadFiles()">🔄 刷新</button>
+        <span id="readonlyBadge" style="display:none;padding:4px 10px;background:#ffebee;color:#c62828;border-radius:4px;font-size:12px;font-weight:600;margin-left:10px">🔒 只读目录</span>
+        <span id="configInfoBadge" style="display:none;padding:4px 10px;background:#e3f2fd;color:#1565c0;border-radius:4px;font-size:12px;margin-left:10px">⚙️ 建议通过 <a href="/settings" style="color:#1565c0;font-weight:600" target="_blank">配置管理 →</a> 修改</span>
+        <input type="file" id="fileUploadInput" style="display: none;" onchange="handleFileUpload(event)">
+    </div>
+    <div class="upload-progress" id="uploadProgress" style="display: none;"></div>
+    <div class="file-list" id="fileList">
+        <div class="empty-state"><div class="icon">⏳</div><p>加载中...</p></div>
+    </div>
+
+    <!-- 三点菜单浮层 -->
+    <div class="dot-menu-panel" id="dotMenuPanel">
+        <div class="menu-file-name" id="dotMenuFileName"></div>
+        <div class="menu-meta" id="dotMenuMeta"></div>
+        <button class="menu-item" id="dotMenuDownload">
+            <span>📥</span> 下载
+        </button>
+        <button class="menu-item danger" id="dotMenuDelete">
+            <span>🗑️</span> 删除
+        </button>
+    </div>
+
+    <!-- 编辑弹窗 -->
+    <div class="modal" id="editModal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 id="editFileName">编辑文件</h2>
+                <div class="header-actions">
+                    <button class="mode-toggle-btn" id="modeToggleBtn" style="display:none" onclick="togglePreviewMode()">编辑</button>
+                    <button onclick="closeModal()">&times;</button>
+                </div>
+            </div>
+            <div class="editor-container">
+                <div class="editor-pane">
+                    <div class="editor-pane-header" id="editorPaneHeader">📝 编辑器（带语法高亮）</div>
+                    <div class="editor-body">
+                        <textarea id="editorContainer" placeholder="文件内容..."></textarea>
+                        <div class="image-preview" id="imagePreview"><img id="imagePreviewImg" src="" alt="preview"></div>
+                        <div class="preview-pane" id="markdownPreview"></div>
+                        <div class="media-preview" id="mediaPreview"></div>
+                        <div class="unsupported-preview" id="unsupportedPreview">
+                            <div class="msg"><div class="big">📄</div><p>不支持预览此文件类型</p></div>
+                        </div>
+                    </div>
+                    <div id="configEditor" style="display:none">
+                        <div id="configKeyDisplay"></div>
+                        <div id="configDesc" style="display:none"></div>
+                        <div id="configTypeWidget" style="margin-bottom:10px"></div>
+                        <textarea id="configValueEdit" placeholder="配置值..."></textarea>
+                        <div id="configMeta"></div>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-actions" id="modalActions">
+                <button class="cancel" onclick="closeModal()">取消</button>
+                <button class="save" onclick="saveFile()" id="btnSave">保存</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let jwt = localStorage.getItem('feclaw_jwt');
+        let currentPath = '';
+        let editingFile = null;
+        let editor = null;  // CodeMirror 实例
+        let cosClient = null;
+        let stsCredential = null;
+        let bucket = '';
+        let region = '';
+        let userPrefix = '';
+        let currentMode = 'edit';  // 'edit' | 'preview'
+        let currentFileType = 'text';  // 'text' | 'markdown' | 'image' | 'video' | 'audio' | 'binary'
+        let fileListCache = [];  // 缓存当前文件列表，供三点菜单使用
+
+        // 转义路径中的特殊字符，防止 XSS
+        function escapeJsStr(s) {
+            return String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '\\"').replace(/\n/g, '\\n').replace(/\r/g, '\\r');
+        }
+
+        const host = window.location.host;
+        const hashMatch = host.match(/^([a-f0-9]{4})\./);
+        const agentHash = hashMatch ? hashMatch[1] : null;
+        document.getElementById('agentHash').textContent = 'Agent: ' + agentHash;
+
+        if (!jwt) {
+            window.location.href = '/login';
+        } else {
+            // 首次加载立即用 API 列出文件（不等待 COS SDK 初始化）
+            loadFiles();
+            // 后台异步初始化 COS SDK（首次文件操作前必须就绪）
+            initCosClient();
+        }
+
+        // --- COS 客户端 ---
+
+        async function initCosClient() {
+            try {
+                const res = await fetch('/api/file/sts-credential', {
+                    headers: { 'Authorization': 'Bearer ' + jwt }
+                });
+
+                if (res.status === 401) {
+                    logout();
+                    return;
+                }
+
+                const data = await res.json();
+                stsCredential = data.credentials;
+                bucket = data.bucket;
+                region = data.region;
+                userPrefix = data.prefix;
+
+                cosClient = new COS({
+                    SecretId: stsCredential.secret_id,
+                    SecretKey: stsCredential.secret_key,
+                    XCosSecurityToken: stsCredential.session_token
+                });
+
+                console.log('[File] COS client initialized, prefix:', userPrefix);
+                loadFiles();
+            } catch (e) {
+                console.error('[File] Failed to init COS client:', e);
+                document.getElementById('fileList').innerHTML =
+                    '<div class="empty-state"><div class="icon">❌</div><p>初始化失败: ' + e.message + '</p></div>';
+            }
+        }
+
+        function logout() {
+            if (typeof Auth !== 'undefined') { Auth.clearAuth(); }
+            else { localStorage.removeItem('feclaw_jwt'); }
+            window.location.href = '/login';
+        }
+
+        // --- VFS API ---
+
+        async function fetchVFSDir(path) {
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 10000);
+            try {
+                const res = await fetch('/api/files?path=' + encodeURIComponent(path), {
+                    headers: { 'Authorization': 'Bearer ' + jwt },
+                    signal: controller.signal
+                });
+                clearTimeout(timeoutId);
+                if (!res.ok) throw new Error('HTTP ' + res.status);
+                const data = await res.json();
+                return data.files || [];
+            } catch (e) {
+                if (e.name === 'AbortError') throw new Error('请求超时');
+                throw e;
+            }
+        }
+
+        async function fetchVFSFile(path) {
+            const res = await fetch('/api/file?path=' + encodeURIComponent(path), {
+                headers: { 'Authorization': 'Bearer ' + jwt }
+            });
+            if (!res.ok) throw new Error('HTTP ' + res.status);
+            return await res.json();
+        }
+
+        async function saveVFSFile(path, content) {
+            const res = await fetch('/api/file?path=' + encodeURIComponent(path), {
+                method: 'PUT',
+                headers: {
+                    'Authorization': 'Bearer ' + jwt,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ content })
+            });
+            if (!res.ok) throw new Error('HTTP ' + res.status);
+            return await res.json();
+        }
+
+        // --- 文件列表 ---
+
+        function loadFiles() {
+            fetchVFSDir(currentPath).then(files => {
+                fileListCache = files;
+                renderFiles(files);
+                updateBreadcrumb();
+            }).catch(e => {
+                document.getElementById('fileList').innerHTML =
+                    '<div class="empty-state"><div class="icon">❌</div><p>加载失败: ' + e.message + '</p></div>';
+            });
+        }
+
+        function renderFiles(files) {
+            const list = document.getElementById('fileList');
+            if (files.length === 0) {
+                list.innerHTML = '<div class="empty-state"><div class="icon">📂</div><p>空文件夹</p></div>';
+                return;
+            }
+
+            list.innerHTML = files.map(f => {
+                const safePath = escapeJsStr(f.path);
+                const safeName = escapeJsStr(f.name);
+                if (f.type === 'dir') {
+                    return `
+                <div class="file-item" onclick="navigate('${safePath}')" style="cursor:pointer">
+                    <span class="icon">📁</span>
+                    <span class="name">${safeName}</span>
+                    <span class="size">${formatSize(f.size)}</span>
+                </div>`;
+                }
+                // 文件：名称可点击 + 三点按钮
+                return `
+                <div class="file-item">
+                    <span class="icon">📄</span>
+                    <div class="file-item-wrap" onclick="openFile('${safePath}')">
+                        <span class="name">${safeName}</span>
+                    </div>
+                    <span class="size">${formatSize(f.size)}</span>
+                    <button class="three-dot-btn" onclick="event.stopPropagation();toggleDotMenu(event, '${safePath}')" title="更多操作">⋯</button>
+                </div>`;
+            }).join('');
+        }
+
+        function formatSize(bytes) {
+            if (bytes === 0) return '-';
+            const k = 1024;
+            const sizes = ['B', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+        }
+
+        function formatTime(isoStr) {
+            if (!isoStr) return '-';
+            try {
+                const d = new Date(isoStr);
+                if (isNaN(d.getTime())) return isoStr;
+                const pad = n => String(n).padStart(2, '0');
+                return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate())
+                    + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
+            } catch (e) {
+                return isoStr;
+            }
+        }
+
+        function isReadonlyPath() {
+            if (!currentPath) return false;
+            return currentPath === 'public' || currentPath.startsWith('public/')
+                || currentPath === 'config' || currentPath.startsWith('config/');
+        }
+
+        function updateBreadcrumb() {
+            const isPublic = currentPath === 'public' || currentPath.startsWith('public/');
+            const isConfig = currentPath === 'config' || currentPath.startsWith('config/');
+            const readonly = isPublic || isConfig;
+            document.getElementById('btnNewFile').style.display = readonly ? 'none' : '';
+            document.getElementById('btnUpload').style.display = readonly ? 'none' : '';
+            document.getElementById('readonlyBadge').style.display = isPublic ? 'inline' : 'none';
+            document.getElementById('configInfoBadge').style.display = isConfig ? 'inline' : 'none';
+
+            const bc = document.getElementById('breadcrumb');
+            if (!currentPath) {
+                bc.innerHTML = '<a href="/">📁 根目录</a>';
+            } else {
+                const parts = currentPath.split('/').filter(p => p);
+                let html = '<a href="javascript:navigate(\'\')">📁 根目录</a>';
+                let path = '';
+                parts.forEach((part, i) => {
+                    path += (path ? '/' : '') + part;
+                    html += ' / <a href="javascript:navigate(\'' + escapeJsStr(path) + '\')">' + escapeJsStr(part) + '</a>';
+                });
+                bc.innerHTML = html;
+            }
+        }
+
+        function navigate(path) {
+            currentPath = path;
+            loadFiles();
+        }
+
+        // --- 三点菜单 ---
+
+        let dotMenuTargetPath = null;
+
+        function toggleDotMenu(event, escapedPath) {
+            // escapedPath 已经过 escapeJsStr 处理，直接作为 JS 字符串使用
+            dotMenuTargetPath = escapedPath;
+            const panel = document.getElementById('dotMenuPanel');
+
+            if (panel.classList.contains('active') && dotMenuTargetPath === escapedPath) {
+                closeDotMenu();
+                return;
+            }
+
+            // 从缓存中找到文件信息
+            const fileInfo = fileListCache.find(f => escapeJsStr(f.path) === escapedPath);
+            if (!fileInfo) return;
+
+            document.getElementById('dotMenuFileName').textContent = '📄 ' + fileInfo.name;
+            document.getElementById('dotMenuMeta').innerHTML =
+                '修改时间: ' + formatTime(fileInfo.updated_at) + '<br>' +
+                '文件大小: ' + formatSize(fileInfo.size);
+
+            // 定位面板
+            const btn = event.currentTarget;
+            const rect = btn.getBoundingClientRect();
+            const panelWidth = 260;
+            let left = rect.right - panelWidth;
+            if (left < 8) left = 8;
+            let top = rect.bottom + 4;
+            // 避免超出视口底部
+            if (top + 200 > window.innerHeight) {
+                top = rect.top - 210;
+            }
+
+            panel.style.left = left + 'px';
+            panel.style.top = top + 'px';
+            panel.classList.add('active');
+        }
+
+        function closeDotMenu() {
+            document.getElementById('dotMenuPanel').classList.remove('active');
+            dotMenuTargetPath = null;
+        }
+
+        document.addEventListener('click', function(e) {
+            const panel = document.getElementById('dotMenuPanel');
+            if (!panel.classList.contains('active')) return;
+            if (!panel.contains(e.target) && !e.target.closest('.three-dot-btn')) {
+                closeDotMenu();
+            }
+        });
+
+        document.addEventListener('keydown', function(e) {
+            if (e.key === 'Escape') closeDotMenu();
+        });
+
+        // 下载（从三点菜单触发）
+        document.getElementById('dotMenuDownload').addEventListener('click', function() {
+            if (dotMenuTargetPath) downloadFile(dotMenuTargetPath);
+            closeDotMenu();
+        });
+
+        // 删除（从三点菜单触发）
+        document.getElementById('dotMenuDelete').addEventListener('click', function() {
+            if (!dotMenuTargetPath) return;
+            const fileInfo = fileListCache.find(f => escapeJsStr(f.path) === dotMenuTargetPath);
+            const name = fileInfo ? fileInfo.name : dotMenuTargetPath;
+            if (confirm('确定要删除 "' + name + '" 吗？')) {
+                deleteFileByPath(dotMenuTargetPath);
+            }
+            closeDotMenu();
+        });
+
+        function deleteFileByPath(path) {
+            const name = path.split('/').pop();
+
+            // 只读目录拦截
+            if (path === 'public' || path.startsWith('public/') || path === 'config' || path.startsWith('config/')) {
+                alert('只读目录不允许删除');
+                return;
+            }
+
+            // config/ 虚拟目录走 VFS API
+            if (path === 'config' || path.startsWith('config/')) {
+                fetch('/api/file?path=' + encodeURIComponent(path), {
+                    method: 'DELETE',
+                    headers: { 'Authorization': 'Bearer ' + jwt }
+                }).then(res => {
+                    if (res.ok) {
+                        loadFiles();
+                    } else {
+                        res.json().then(err => alert('删除失败: ' + (err.detail || 'HTTP ' + res.status)));
+                    }
+                }).catch(e => {
+                    alert('删除失败: ' + e.message);
+                });
+                return;
+            }
+
+            const key = userPrefix + path;
+            cosClient.deleteObject({
+                Bucket: bucket,
+                Region: region,
+                Key: key
+            }, function(err, data) {
+                if (err) {
+                    alert('删除失败: ' + err.message);
+                } else {
+                    loadFiles();
+                }
+            });
+        }
+
+        // --- 文件类型检测 ---
+
+        function getFileCategory(path) {
+            const ext = path.split('.').pop().toLowerCase();
+            if (['md', 'markdown'].includes(ext)) return 'markdown';
+            if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico'].includes(ext)) return 'image';
+            if (['mp4', 'webm', 'ogg', 'mov'].includes(ext)) return 'video';
+            if (['mp3', 'wav', 'flac', 'm4a'].includes(ext)) return 'audio';
+            return 'text';
+        }
+
+        function detectCodeMirrorMode(path) {
+            const ext = path.split('.').pop().toLowerCase();
+            const modeMap = {
+                'py': 'python',
+                'js': 'javascript',
+                'jsx': 'jsx',
+                'ts': 'javascript',
+                'tsx': 'jsx',
+                'json': 'application/json',
+                'html': 'htmlmixed',
+                'htm': 'htmlmixed',
+                'xml': 'xml',
+                'svg': 'xml',
+                'css': 'css',
+                'scss': 'css',
+                'less': 'css',
+                'md': 'markdown',
+                'markdown': 'markdown',
+                'yaml': 'yaml',
+                'yml': 'yaml',
+                'sql': 'sql',
+                'sh': 'shell',
+                'bash': 'shell',
+                'zsh': 'shell',
+            };
+            return modeMap[ext] || null;
+        }
+
+        function isBinaryContent(text) {
+            // 检查字符串是否包含 null 字节（二进制特征）
+            return text.indexOf('\0') !== -1;
+        }
+
+        // --- 隐藏所有预览/编辑区域 ---
+        function hideAllPanes() {
+            document.getElementById('editorContainer').style.display = 'none';
+            document.getElementById('imagePreview').style.display = 'none';
+            document.getElementById('markdownPreview').classList.remove('active');
+            document.getElementById('mediaPreview').classList.remove('active');
+            document.getElementById('mediaPreview').innerHTML = '';
+            document.getElementById('unsupportedPreview').classList.remove('active');
+            document.getElementById('modeToggleBtn').style.display = 'none';
+            document.getElementById('modalActions').style.display = 'flex';
+            document.getElementById('btnSave').style.display = '';
+            document.getElementById('editorPaneHeader').style.display = '';
+        }
+
+        // --- 打开文件（按类型分发）---
+
+        async function openFile(path) {
+            editingFile = path;
+            document.getElementById('editFileName').textContent = path;
+            document.getElementById('editModal').classList.add('active');
+
+            const category = getFileCategory(path);
+            currentFileType = category;
+            currentMode = (category === 'markdown') ? 'preview' : 'edit';
+
+            // 隐藏 config 编辑器
+            document.getElementById('configEditor').style.display = 'none';
+            hideAllPanes();
+
+            // config/ 虚拟目录走独立配置编辑器（不使用 CodeMirror）
+            if (path === 'config' || path.startsWith('config/')) {
+                openConfigFile(path);
+                return;
+            }
+
+            // 获取签名下载 URL
+            try {
+                const res = await fetch('/api/file/signed-url', {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': 'Bearer ' + jwt,
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ path: path, operation: 'download' })
+                });
+
+                if (!res.ok) {
+                    alert('获取签名 URL 失败');
+                    return;
+                }
+
+                const data = await res.json();
+
+                switch (category) {
+                    case 'image':
+                        showImagePreview(data.url);
+                        break;
+                    case 'video':
+                        showMediaPreview('video', data.url);
+                        break;
+                    case 'audio':
+                        showMediaPreview('audio', data.url);
+                        break;
+                    case 'markdown':
+                        await openMarkdownFile(data.url, path);
+                        break;
+                    default:
+                        await openTextFile(data.url, path);
+                        break;
+                }
+            } catch (e) {
+                alert('加载失败: ' + e.message);
+            }
+        }
+
+        function showImagePreview(url) {
+            hideAllPanes();
+            document.getElementById('imagePreview').style.display = 'flex';
+            document.getElementById('imagePreviewImg').src = url;
+            document.getElementById('modalActions').style.display = 'none';
+        }
+
+        function showMediaPreview(type, url) {
+            hideAllPanes();
+            const container = document.getElementById('mediaPreview');
+            container.innerHTML = type === 'video'
+                ? '<video controls autoplay src="' + url + '"></video>'
+                : '<audio controls autoplay src="' + url + '"></audio>';
+            container.classList.add('active');
+            document.getElementById('modalActions').style.display = 'none';
+        }
+
+        async function openMarkdownFile(url, path) {
+            try {
+                const contentRes = await fetch(url);
+                if (!contentRes.ok) throw new Error('HTTP ' + contentRes.status);
+                const content = await contentRes.text();
+
+                // 同时初始化 CodeMirror（编辑模式备用）
+                initEditor(content, 'markdown');
+
+                // 显示预览
+                showMarkdownPreview(content);
+            } catch (e) {
+                alert('加载 Markdown 失败: ' + e.message);
+            }
+        }
+
+        function showMarkdownPreview(mdContent) {
+            hideAllPanes();
+            document.getElementById('editorContainer').style.display = 'none';
+            document.getElementById('markdownPreview').innerHTML = marked.parse(mdContent);
+            document.getElementById('markdownPreview').classList.add('active');
+            document.getElementById('editorPaneHeader').style.display = 'none';
+
+            // 显示模式切换按钮
+            const toggleBtn = document.getElementById('modeToggleBtn');
+            toggleBtn.style.display = '';
+            toggleBtn.textContent = '编辑';
+            toggleBtn.classList.add('active');
+
+            document.getElementById('modalActions').style.display = 'none';
+            currentMode = 'preview';
+        }
+
+        async function openTextFile(url, path) {
+            try {
+                const contentRes = await fetch(url);
+                if (!contentRes.ok) throw new Error('HTTP ' + contentRes.status);
+                const content = await contentRes.text();
+
+                // 检查是否为二进制内容
+                if (isBinaryContent(content)) {
+                    showUnsupportedPreview();
+                    return;
+                }
+
+                showCodeEditor(content, path);
+            } catch (e) {
+                alert('加载文件失败: ' + e.message);
+            }
+        }
+
+        function showUnsupportedPreview() {
+            hideAllPanes();
+            document.getElementById('unsupportedPreview').classList.add('active');
+            document.getElementById('modalActions').style.display = 'none';
+        }
+
+        function showCodeEditor(content, path) {
+            hideAllPanes();
+            document.getElementById('editorContainer').style.display = 'block';
+            document.getElementById('editorPaneHeader').style.display = '';
+            document.getElementById('modalActions').style.display = 'flex';
+            document.getElementById('btnSave').style.display = '';
+            document.getElementById('modeToggleBtn').style.display = 'none';
+            initEditor(content || '', detectCodeMirrorMode(path));
+            currentMode = 'edit';
+        }
+
+        // --- 预览/编辑切换（Markdown）---
+
+        function togglePreviewMode() {
+            if (currentMode === 'preview') {
+                // 切换到编辑模式
+                hideAllPanes();
+                document.getElementById('editorContainer').style.display = 'block';
+                document.getElementById('editorPaneHeader').style.display = '';
+                document.getElementById('modalActions').style.display = 'flex';
+                document.getElementById('btnSave').style.display = '';
+                document.getElementById('modeToggleBtn').style.display = '';
+                document.getElementById('modeToggleBtn').textContent = '预览';
+                document.getElementById('modeToggleBtn').classList.remove('active');
+                if (editor) editor.refresh();
+                currentMode = 'edit';
+            } else {
+                // 切换到预览模式
+                const mdContent = editor ? editor.getValue() : '';
+                showMarkdownPreview(mdContent);
+            }
+        }
+
+        // --- Config 文件编辑（特殊处理）---
+
+        async function openConfigFile(path) {
+            hideAllPanes();
+            if (editor) { editor.getTextArea().style.display = 'block'; editor.toTextArea(); editor = null; }
+            document.querySelector('.editor-body').style.display = 'none';
+            document.getElementById('editorContainer').style.display = 'none';
+            document.getElementById('configEditor').style.display = 'flex';
+            document.getElementById('modeToggleBtn').style.display = 'none';
+            document.getElementById('modalActions').style.display = 'flex';
+            document.getElementById('btnSave').style.display = '';
+
+            try {
+                const data = await fetchVFSFile(path);
+                document.getElementById('configKeyDisplay').textContent = '📋 ' + path;
+                document.getElementById('configMeta').textContent = '大小: ' + data.size + ' bytes';
+
+                const rawVal = data.content || '';
+                const keyName = path.split('/').pop();
+                const descEl = document.getElementById('configDesc');
+                const widgetEl = document.getElementById('configTypeWidget');
+                const textareaEl = document.getElementById('configValueEdit');
+
+                const lower = rawVal.trim().toLowerCase();
+                let type = 'text';
+                if (lower === 'true' || lower === 'false') type = 'bool';
+                else if (/^\d+(\.\d+)?$/.test(rawVal.trim())) type = 'number';
+                else if (rawVal.trim().startsWith('{') || rawVal.trim().startsWith('[')) type = 'json';
+                else if (rawVal.length > 500) type = 'longtext';
+
+                const reservedKeys = ['heartbeat.interval', 'tools'];
+                const isReserved = reservedKeys.includes(keyName);
+                const friendlyName = keyName.replace(/[-_.]/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+                descEl.textContent = isReserved
+                    ? '🔮 ' + friendlyName + ' — 未来预留配置，修改暂时不会生效'
+                    : '💡 ' + friendlyName;
+                descEl.style.display = 'block';
+
+                if (type === 'bool') {
+                    textareaEl.style.display = 'none';
+                    widgetEl.style.display = 'block';
+                    const isOn = lower === 'true';
+                    widgetEl.innerHTML = '<label style="display:flex;align-items:center;gap:12px;cursor:pointer;padding:12px 16px;background:#252526;border-radius:8px;font-size:14px;color:#d4d4d4">' +
+                        '<input type="checkbox" ' + (isOn ? 'checked' : '') + ' id="configBoolToggle" style="width:22px;height:22px;accent-color:#4ec9b0;cursor:pointer">' +
+                        '<span>' + (isOn ? '✅ 已启用' : '⛔ 已禁用') + '</span>' +
+                        '</label>';
+                } else if (type === 'number') {
+                    textareaEl.style.display = 'none';
+                    widgetEl.style.display = 'block';
+                    widgetEl.innerHTML = '<input type="number" value="' + rawVal.trim() + '" id="configNumberInput" ' +
+                        'style="width:200px;padding:12px;background:#1e1e1e;color:#d4d4d4;border:1px solid #3c3c3c;border-radius:6px;font-size:14px;outline:none">';
+                } else if (type === 'json') {
+                    textareaEl.style.display = 'block';
+                    textareaEl.value = JSON.stringify(JSON.parse(rawVal), null, 2) || rawVal;
+                    textareaEl.style.minHeight = '200px';
+                    widgetEl.style.display = 'none';
+                } else if (type === 'longtext') {
+                    textareaEl.style.display = 'block';
+                    textareaEl.value = rawVal;
+                    textareaEl.style.minHeight = '300px';
+                    widgetEl.style.display = 'none';
+                } else {
+                    textareaEl.style.display = 'block';
+                    textareaEl.value = rawVal;
+                    textareaEl.style.minHeight = '80px';
+                    widgetEl.style.display = 'none';
+                }
+            } catch (e) {
+                alert('加载配置失败: ' + e.message);
+            }
+        }
+
+        // --- CodeMirror 初始化 ---
+
+        function initEditor(content, mode) {
+            const textarea = document.getElementById('editorContainer');
+            if (editor) {
+                editor.setValue(content || '');
+                if (mode) editor.setOption('mode', mode);
+                editor.refresh();
+                return;
+            }
+            textarea.value = content || '';
+            editor = CodeMirror.fromTextArea(textarea, {
+                mode: mode || null,
+                theme: 'default',
+                indentUnit: 4,
+                tabSize: 4,
+                lineNumbers: true,
+                matchBrackets: true,
+                lineWrapping: false,
+                extraKeys: {
+                    "Esc": function() { closeModal(); }
+                }
+            });
+            editor.refresh();
+        }
+
+        // --- 关闭弹窗 ---
+
+        function closeModal() {
+            document.getElementById('editModal').classList.remove('active');
+            if (editor) { editor.getTextArea().style.display = 'block'; editor.toTextArea(); editor = null; }
+            const body = document.querySelector('.editor-body');
+            if (body) body.style.display = '';
+            document.getElementById('editorContainer').style.display = 'block';
+            document.getElementById('configEditor').style.display = 'none';
+            document.getElementById('configDesc').style.display = 'none';
+            document.getElementById('configValueEdit').style.display = 'block';
+            document.getElementById('imagePreview').style.display = 'none';
+            document.getElementById('markdownPreview').classList.remove('active');
+            document.getElementById('mediaPreview').classList.remove('active');
+            document.getElementById('mediaPreview').innerHTML = '';
+            document.getElementById('unsupportedPreview').classList.remove('active');
+            document.getElementById('modeToggleBtn').style.display = 'none';
+            document.getElementById('modalActions').style.display = 'flex';
+            document.getElementById('btnSave').style.display = '';
+            document.getElementById('editorPaneHeader').style.display = '';
+            editingFile = null;
+            currentMode = 'edit';
+            currentFileType = 'text';
+        }
+
+        // --- 保存文件 ---
+
+        async function saveFile() {
+            if (!editingFile) return;
+
+            // config/ 虚拟目录走独立配置编辑器
+            if (editingFile === 'config' || editingFile.startsWith('config/')) {
+                let content;
+                const toggle = document.getElementById('configBoolToggle');
+                const numberInput = document.getElementById('configNumberInput');
+                if (toggle) {
+                    content = toggle.checked ? 'true' : 'false';
+                } else if (numberInput) {
+                    content = String(numberInput.value);
+                } else {
+                    content = document.getElementById('configValueEdit').value;
+                }
+                try {
+                    await saveVFSFile(editingFile, content);
+                    alert('配置已保存');
+                    closeModal();
+                    loadFiles();
+                } catch (e) {
+                    alert('保存失败: ' + e.message);
+                }
+                return;
+            }
+
+            let content;
+            if (editor) {
+                content = editor.getValue();
+            } else {
+                content = document.getElementById('configValueEdit').value;
+            }
+
+            try {
+                const res = await fetch('/api/file/signed-url', {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': 'Bearer ' + jwt,
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ path: editingFile, operation: 'upload' })
+                });
+
+                if (res.ok) {
+                    const data = await res.json();
+                    const uploadRes = await fetch(data.url, {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+                        body: content
+                    });
+
+                    if (uploadRes.ok) {
+                        alert('保存成功');
+                        closeModal();
+                        loadFiles();
+                    } else {
+                        alert('上传失败: ' + uploadRes.status);
+                    }
+                } else {
+                    const err = await res.json();
+                    alert('获取签名 URL 失败: ' + (err.detail || '未知错误'));
+                }
+            } catch (e) {
+                alert('保存失败: ' + e.message);
+            }
+        }
+
+        // --- 新建文件 ---
+
+        function newFile() {
+            const name = prompt('请输入文件名:');
+            if (!name) return;
+
+            if (isReadonlyPath()) {
+                alert('只读目录不允许新建文件');
+                return;
+            }
+
+            const path = currentPath ? currentPath + '/' + name : name;
+            editingFile = path;
+            document.getElementById('editFileName').textContent = '新建: ' + name;
+            document.getElementById('editModal').classList.add('active');
+            if (editor) { editor.getTextArea().style.display = 'block'; editor.toTextArea(); editor = null; }
+            document.getElementById('configEditor').style.display = 'none';
+            document.getElementById('editorContainer').style.display = 'block';
+            document.getElementById('modeToggleBtn').style.display = 'none';
+            document.getElementById('modalActions').style.display = 'flex';
+            document.getElementById('btnSave').style.display = '';
+            document.getElementById('editorPaneHeader').style.display = '';
+            hideAllPanes();
+            const mode = detectCodeMirrorMode(path);
+            initEditor('', mode);
+            currentMode = 'edit';
+            currentFileType = 'text';
+        }
+
+        // --- 上传文件 ---
+
+        function uploadFile() {
+            if (isReadonlyPath()) {
+                alert('只读目录不允许上传文件');
+                return;
+            }
+            document.getElementById('fileUploadInput').click();
+        }
+
+        async function handleFileUpload(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+
+            const path = currentPath ? currentPath + '/' + file.name : file.name;
+
+            if (isReadonlyPath() || path === 'public' || path.startsWith('public/') || path === 'config' || path.startsWith('config/')) {
+                alert('公共空间为只读，不允许上传');
+                return;
+            }
+
+            const progressEl = document.getElementById('uploadProgress');
+            progressEl.style.display = 'block';
+            progressEl.className = 'upload-progress';
+            progressEl.textContent = '⏳ 正在上传 ' + file.name + '...';
+
+            try {
+                const res = await fetch('/api/file/signed-url', {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': 'Bearer ' + jwt,
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ path: path, operation: 'upload' })
+                });
+
+                if (res.ok) {
+                    const data = await res.json();
+                    const uploadRes = await fetch(data.url, {
+                        method: 'PUT',
+                        headers: { 'Content-Type': file.type || 'application/octet-stream' },
+                        body: file
+                    });
+
+                    if (uploadRes.ok) {
+                        progressEl.textContent = '✅ 上传成功: ' + file.name;
+                        loadFiles();
+                    } else {
+                        progressEl.className = 'upload-progress error';
+                        progressEl.textContent = '❌ 上传失败: ' + uploadRes.status;
+                    }
+                } else {
+                    progressEl.className = 'upload-progress error';
+                    progressEl.textContent = '❌ 获取签名 URL 失败';
+                }
+            } catch (e) {
+                progressEl.className = 'upload-progress error';
+                progressEl.textContent = '❌ 上传失败: ' + e.message;
+            }
+
+            event.target.value = '';
+            setTimeout(() => progressEl.style.display = 'none', 3000);
+        }
+
+        // --- 下载文件 ---
+
+        async function downloadFile(path) {
+            try {
+                const res = await fetch('/api/file/signed-url', {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': 'Bearer ' + jwt,
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ path: path, operation: 'download', expires: 300 })
+                });
+
+                if (res.ok) {
+                    const data = await res.json();
+                    const a = document.createElement('a');
+                    a.href = data.url;
+                    a.download = path.split('/').pop();
+                    a.target = '_blank';
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                } else {
+                    alert('获取下载链接失败');
+                }
+            } catch (e) {
+                alert('下载失败: ' + e.message);
+            }
+        }
+
+        // --- 删除文件（兼容旧接口）---
+
+        async function deleteFile(path, name) {
+            if (!confirm('确定要删除 "' + name + '" 吗？')) return;
+            deleteFileByPath(path);
+        }
+    </script>
+</body>
+</html>

@@ -1,0 +1,905 @@
+"""
+聊天业务服务 - 渠道无关的 AI 对话核心逻辑
+
+职责：
+- 构建系统提示词（从 VFS 读取 soul/identity/user/memory）
+- 管理 AI 对话流程（流式响应、工具调用）
+- 处理消息压缩和历史管理
+- 会话管理（创建/恢复/保存）
+
+使用方式：
+    chat = ChatService(user_id="2", channel="wechat")
+    async for event in chat.chat("你好"):
+        if event.type == ChatEventType.TEXT:
+            print(event.content)
+        elif event.type == ChatEventType.DONE:
+            print("对话结束")
+"""
+
+import asyncio
+import logging
+import time
+import warnings
+from typing import AsyncGenerator, Optional, List, Dict, Any, Callable, Awaitable
+from datetime import datetime
+from contextlib import contextmanager
+
+from models.chat import ChatEvent, ChatEventType, ChatContext
+from models.chat_input import ChatInput, Attachment
+from config import settings
+from services.virtual_filesystem import VirtualFileSystem
+from services.agent_tools_service import AgentToolsService, Step
+from services.agent_executor import AgentExecutor
+from services.point_service import PointService
+from services.message_compactor import estimate_tokens
+from services.workspace_service import get_agent_workspace_root
+from models.database import SessionLocal, AgentProfile, ChatHistory
+
+logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def get_session():
+    """SessionLocal 的上下文管理器"""
+    session = SessionLocal()
+    try:
+        yield session
+    finally:
+        session.close()
+
+# Agent 初始化提示模板
+AGENT_PENDING_PROMPT = """Agent 尚未初始化
+
+此 Agent 正处于待初始化状态，需要完成初始化后才能正常使用。
+
+请通过管理控制台完成 Agent 初始化配置。
+
+初始化完成后，Agent 将能够：
+- 读取人格设定（soul.md）
+- 配置身份信息（identity.md）
+- 存储用户偏好（user.md）
+- 管理长期记忆（memory.md）
+
+如果您是管理员，请尽快完成初始化配置。
+"""
+
+# 最大历史消息对数
+MAX_HISTORY_MESSAGES = 20
+
+
+def _has_meaningful_content(text: str) -> bool:
+    """判断 memory.md 是否有实际内容，跳过纯标题/占位符的空模板。"""
+    lines = [l.strip() for l in text.strip().split('\n') if l.strip()]
+    if not lines:
+        return False
+    # 排除纯标题行
+    content_lines = [l for l in lines if not l.startswith('#')]
+    # 排除仅占位符行
+    placeholders = {'暂无记录', '暂无信息', ''}
+    content_lines = [l for l in content_lines if l not in placeholders]
+    return len(content_lines) > 0
+
+
+class ChatService:
+    """聊天业务服务 - 渠道无关"""
+
+    def __init__(
+        self,
+        agent_hash: str,
+        channel: str = "api",
+        session_id: Optional[str] = None,
+        session_reset_at: Optional[datetime] = None,
+        pre_process_hook: Optional[Callable[[str, Dict, str], Awaitable[Optional[str]]]] = None,
+    ):
+        """
+        初始化聊天服务
+
+        Args:
+            agent_hash: Agent hash（必需）
+            channel: 渠道标识（wechat, api, web 等）
+            session_id: 会话 ID（wechat_main / web_sess_abc）
+            session_reset_at: 会话切割时间（WeChat 新会话用）
+            pre_process_hook: 前置钩子 async (channel, meta, text) -> str|None
+                              None=继续, ""=静默终止, "文本"=回复并跳过LLM
+        """
+        self.agent_hash = agent_hash
+        self.channel = channel
+        self.session_id = session_id
+        self.session_reset_at = session_reset_at
+        self.pre_process_hook = pre_process_hook
+        self._agent_status = None
+        self._user_id = None
+
+        # 内部组件
+        self.tools = AgentToolsService(agent_hash)
+        self.executor = AgentExecutor(agent_hash, self.tools)
+        self.workspace_root = get_agent_workspace_root(agent_hash)
+
+        self.vfs = VirtualFileSystem(agent_hash=agent_hash)
+        self.context = ChatContext(user_id=self.user_id, channel=channel)
+        self._history_loaded_from_session = False  # 由 WebChannelService 设置
+
+        # Session Memory 提取状态追踪
+        self._session_memory_lock = asyncio.Lock()
+        self._session_memory_initialized: bool = False
+        self._session_memory_last_extract_idx: int = 0
+        self._session_memory_tool_calls_since: int = 0
+
+        # Reflection 事实核查状态
+        self._pending_correction = None  # {short_desc, topic, msg_count, consumed}
+
+        # User Profile 提取状态追踪
+        self._user_profile_lock = asyncio.Lock()
+        self._user_profile_initialized: bool = False
+        self._user_profile_last_extract_idx: int = 0
+        self._user_profile_last_extract_time: float = 0
+        self._user_profile_tool_calls_since: int = 0
+
+    def _check_agent_status(self) -> str:
+        """检查 Agent 状态（懒加载）"""
+        if self._agent_status is None:
+            with get_session() as db:
+                agent = db.query(AgentProfile).filter(AgentProfile.hash == self.agent_hash).first()
+                if agent:
+                    self._agent_status = agent.status
+                else:
+                    self._agent_status = "unknown"
+        return self._agent_status
+
+    @property
+    def user_id(self) -> str:
+        """获取所属用户 ID（懒加载）"""
+        if self._user_id is None:
+            with get_session() as db:
+                agent = db.query(AgentProfile).filter(AgentProfile.hash == self.agent_hash).first()
+                if agent:
+                    self._user_id = str(agent.user_id)
+                else:
+                    raise ValueError(f"Agent {self.agent_hash} not found")
+        return self._user_id
+
+    async def chat(
+        self,
+        user_input: str = None,
+        image_url: Optional[str] = None,
+        skip_history: bool = False,
+        input: Optional[ChatInput] = None,
+    ) -> AsyncGenerator[ChatEvent, None]:
+        """
+        核心 AI 对话方法
+
+        新签名（推荐）：
+            chat(input=ChatInput(text=..., attachments=..., meta=...))
+        旧签名（兼容，发出 deprecation warning）：
+            chat(user_input, image_url, skip_history)
+
+        Yields:
+            ChatEvent: 对话事件流
+        """
+        # 构建 ChatInput（兼容旧签名）
+        if input is not None:
+            actual = input
+        else:
+            warnings.warn(
+                "ChatService.chat(user_input, image_url, skip_history) is deprecated. "
+                "Use chat(input=ChatInput(...)) instead.",
+                DeprecationWarning, stacklevel=2
+            )
+            attachments = []
+            if image_url:
+                attachments.append(Attachment(type="image", url=image_url))
+            actual = ChatInput(
+                text=user_input or "",
+                attachments=attachments,
+                meta={}
+            )
+
+        try:
+            # ① 前置钩子
+            if self.pre_process_hook:
+                result = await self.pre_process_hook(self.channel, actual.meta, actual.text)
+                if result is not None:
+                    if result == "":
+                        return  # 静默终止
+                    yield ChatEvent(
+                        type=ChatEventType.TEXT,
+                        content=result
+                    )
+                    yield ChatEvent(
+                        type=ChatEventType.DONE,
+                        content=result
+                    )
+                    return
+
+            # ② 检查 Agent 状态
+            agent_status = self._check_agent_status()
+            if agent_status == "pending":
+                yield ChatEvent(
+                    type=ChatEventType.TEXT,
+                    content=AGENT_PENDING_PROMPT
+                )
+                yield ChatEvent(
+                    type=ChatEventType.DONE,
+                    content=AGENT_PENDING_PROMPT,
+                    metadata={"channel": self.channel, "agent_status": "pending"}
+                )
+                return
+
+            # ③ 检查每日配额
+            if not PointService.try_deduct(self.user_id):
+                yield ChatEvent(
+                    type=ChatEventType.ERROR,
+                    error_message="今日对话次数已达上限"
+                )
+                return
+
+            # ④ 构建系统提示词
+            system_prompt = await self.build_system_prompt()
+
+            # ⑤ 加载历史消息
+            if not skip_history and not self._history_loaded_from_session:
+                await self._load_history()
+                yield ChatEvent(
+                    type=ChatEventType.HISTORY_LOADED,
+                    metadata={"count": len(self.context.history)}
+                )
+
+            # ⑥ 构建消息列表
+            messages = self._build_messages(system_prompt, actual.text, image_url)
+
+            # ⑦ 调用 AI 进行对话
+            full_response = ""
+            async for event in self._stream_ai_response(messages):
+                if event.type == ChatEventType.TEXT:
+                    full_response += event.content
+                yield event
+
+            # ⑧ 保存对话历史
+            self._save_conversation(
+                actual.text, full_response,
+                meta=actual.meta if actual.meta else None,
+                attachments=actual.attachments if actual.attachments else None,
+            )
+
+            # ⑨ 会话记忆后台提取（非阻塞）
+            if settings.SESSION_MEMORY_ENABLED:
+                asyncio.create_task(self._maybe_extract_session_memory())
+
+            # ⑩ 用户画像后台提取（非阻塞）
+            if getattr(settings, 'USER_PROFILE_ENABLED', True):
+                asyncio.create_task(self._maybe_extract_user_profile())
+
+            # ⑪ 发送完成事件
+            yield ChatEvent(
+                type=ChatEventType.DONE,
+                content=full_response,
+                metadata={"channel": self.channel}
+            )
+
+        except Exception as e:
+            logger.error(f"[ChatService] chat error: {e}", exc_info=True)
+            yield ChatEvent(
+                type=ChatEventType.ERROR,
+                error_message=str(e)
+            )
+    
+    async def build_system_prompt(self) -> str:
+        """构建系统提示词，优先使用 AgentProfile.system_prompt，否则从 VFS 读取"""
+
+        # 0. 当前时间信息（用 Python 标准库，不手算）
+        import zoneinfo as _zi
+        from datetime import datetime as _dt
+        from utils.lunar_date import LunarDate as _LunarDate
+
+        _tz = _zi.ZoneInfo("Asia/Shanghai")
+        _now = _dt.now(_tz)
+        _naive = _now.replace(tzinfo=None)
+        _lc = _LunarDate.from_datetime(_naive)
+        _wd = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"][_now.weekday()]
+        _cn = ["零", "一", "二", "三", "四", "五", "六", "七", "八", "九", "十",
+               "十一", "十二"]
+        _lc_month = _cn[_lc.lunar_month]
+        _lc_day = _lc.lunar_day
+        if _lc_day <= 10:
+            _lc_day_str = f"初{_cn[_lc_day]}"
+        elif _lc_day < 20:
+            _lc_day_str = f"十{_cn[_lc_day - 10]}"
+        elif _lc_day == 20:
+            _lc_day_str = "二十"
+        else:
+            _lc_day_str = f"廿{_cn[_lc_day - 20]}"
+        _time_header = (
+            "【当前时间（BJT）】\n"
+            f"{_now.year}.{_now.month}.{_now.day}（农历{_lc_month}月{_lc_day_str}，{_wd}） {_now.hour:02d}:{_now.minute:02d}"
+        )
+
+        # 1. 优先检查 AgentProfile 中的自定义 system_prompt
+        with get_session() as db:
+            profile = db.query(AgentProfile).filter(
+                AgentProfile.hash == self.agent_hash
+            ).first()
+            if profile and profile.system_prompt:
+                return _time_header + "\n\n" + profile.system_prompt
+
+        # 2. 回退到 VFS 读取
+        parts = [_time_header]
+
+        # 读取人格设定
+        soul_content = self._read_vfs_file('/workspace/agent/soul.md')
+        if soul_content:
+            parts.append(f"【人格设定】\n{soul_content}")
+
+        # 读取身份配置
+        identity_content = self._read_vfs_file('/workspace/agent/identity.md')
+        if identity_content:
+            parts.append(f"【身份配置】\n{identity_content}")
+
+        # 读取用户信息
+        user_content = self._read_vfs_file('/workspace/agent/user.md')
+        if user_content:
+            parts.append(f"【用户信息】\n{user_content}")
+
+            # 检查并注入画像摘要
+            try:
+                from services.user_profile_service import UserProfileService
+                if UserProfileService.has_learning_profile(user_content):
+                    injection = UserProfileService.build_injection(user_content)
+                    if injection:
+                        parts.append(injection)
+            except Exception as e:
+                logger.debug(f"[ChatService] User profile injection skipped: {e}")
+
+        # 读取长期记忆（跳过纯标题的空模板）
+        memory_content = self._read_vfs_file('/workspace/agent/memory.md')
+        if memory_content and _has_meaningful_content(memory_content):
+            parts.append(f"【长期记忆】\n{memory_content}")
+            # 追加写入指南
+            parts.append("""【长期记忆 - 写入指南】
+使用 file_write 工具写入 /workspace/agent/memory.md 来维护以下类型的信息：
+
+### 应该保存
+- **用户偏好**：称呼、语气偏好、使用习惯
+- **重要决策**：选择方案和理由、拒绝的方案
+- **修正反馈**：用户纠正你做法的情况（"不是这样"、"别用X"）
+- **完成确认**：用户明确认可的策略或方案
+- **任务状态**：正在进行中的任务和进展
+
+### 格式建议
+使用 markdown 标题分类，按时间顺序追加，不要删除旧内容。
+
+### 不要保存
+- 代码或文件路径（从文件系统可读）
+- Git 历史（git 命令可查）
+- 临时对话状态（会过时）
+- 当前消息的逐字记录（对话历史里已有）
+""")
+        else:
+            parts.append("""【长期记忆】
+你有长期记忆能力。当你发现需要记住以下类型的信息时，请使用 file_write 工具写入 /workspace/agent/memory.md：
+- 用户偏好、重要决策、修正反馈、任务状态
+保持简洁，按标题分类，不要保存代码路径或临时对话状态。
+""")
+
+        # 会话笔记（自动记录，按需读取）
+        session_note_path = "/workspace/agent/session_memory.md"
+        if self._session_memory_initialized or settings.SESSION_MEMORY_ENABLED:
+            parts.append(f"【会话笔记】\n当前会话有自动记录的笔记文件，包含近期重要信息。如需了解会话上下文，请使用 file_read 读取 `{session_note_path}`。")
+
+        # 平台信息
+        platform_info = self._read_vfs_file('/public/feclaw/index.md')
+        if platform_info:
+            parts.append(f"【平台信息】\n{platform_info}")
+
+        # 工具调用原则（从公共空间读取）
+        principles_content = self._read_vfs_file('/public/feclaw/principles.md')
+        if principles_content:
+            parts.append(f"【重要：工具调用原则】\n{principles_content}")
+        else:
+            parts.append("""【重要：工具调用原则】
+🚨 **必须真实进行 tool call，而不是宣称调用了工具但实际没有。**
+1️⃣ **工具结果 > 你的训练记忆**。搜索结果是实时信息，必须基于回答。
+2️⃣ 历史中的 [⚠️] 标记可能已过时，重新调用确认。
+3️⃣ 如果回复里出现了"我让子Agent干某某事"、"读取文件最新内容"、"保存到错题本"之类的话，但没有对应工具调用，那就是在编造，绝不允许！""")
+
+        # 会话管理提示
+        session_mgmt = self._read_vfs_file('/public/feclaw/session_management.md')
+        if session_mgmt:
+            parts.append(f"【会话管理】\n{session_mgmt}")
+        else:
+            parts.append("""【会话管理】
+你可以使用以下工具管理对话会话：
+- end_conversation: 结束当前对话并保存会话记录
+- list_conversations: 列出用户的所有已保存会话
+- load_conversation: 加载指定的历史会话继续对话
+- search_sessions: 根据关键词搜索相关会话
+- auto_suggest_session: 根据当前对话内容自动建议相关历史会话
+当用户想要回顾之前的讨论或切换到其他话题时，主动使用这些工具帮助管理会话。""")
+
+        # 图片处理提示
+        image_processing = self._read_vfs_file('/public/feclaw/image_processing.md')
+        if image_processing:
+            parts.append(f"【图片处理】\n{image_processing}")
+        else:
+            parts.append("""【图片处理】
+规则1️⃣：**用户没文字、只发图 → 不要分析，只回复"收到图片"等待指示。**
+规则2️⃣：**默认 spawn_subagent 用轻量模型（qwen3.6-35b-a3b）。doubao 系列太慢，除非确认极难任务否则禁用。**
+规则3️⃣：**预识别提供 {场景/文字/风格/意图} 供参考，但你仍须遵循规则1。**
+
+注意：微信默认图片先发文字后到，所以看到无文字图片时极大概率是用户还在编辑文字。""")
+
+        # 微信渠道 - 长内容输出规则
+        if self.channel == "wechat":
+            parts.append("""【微信消息 - 长内容输出规则】
+微信对复杂的格式（如LaTeX公式${...}$、表格、大段代码、结构化数据）支持不佳。
+当涉及以下场景时，默认先将内容写入 VFS MD 文件，用 create_share_link 生成分享链接发送给用户，同时附简短摘要：
+- 收集或展示题目列表、练习题答案详解
+- 大段公式推导、多行计算过程
+- 表格数据、代码片段
+- 任何超过 200 字的格式化内容
+
+除非用户明确指定了输出形式（如"直接发"、"计算器"等），否则默认走文件分享路径。""")
+
+        # Skills 系统（按需加载）
+        skills_index = self._read_vfs_file('/public/feclaw/skills/INDEX.md')
+        if skills_index:
+            parts.append(f"【技能系统】\n{skills_index}")
+        
+        # Agent 本地技能（自动从对话中积累）
+        local_skills = self._read_vfs_file('/workspace/agent/skills/INDEX.md')
+        if local_skills and len(local_skills) > 50:
+            parts.append(f"【个人技能】\n{local_skills}")
+
+        # 知识库 RAG：搜索相关 VFS 索引内容（静默失败，不阻塞主流程）
+        try:
+            from services.vector_search_service import VectorSearchService
+            vs = VectorSearchService(agent_hash=self.agent_hash)
+            # 使用空查询搜索最近索引的内容（最多 3 条）
+            rag_results = await vs.search("", top_k=3)
+            if rag_results:
+                rag_lines = ["【知识库参考】", "以下内容来自您之前创建的文件："]
+                for r in rag_results:
+                    meta = r.get("metadata", {})
+                    fp = meta.get("file_path", r.get("key", ""))
+                    text = meta.get("text", "")[:200]
+                    score = r.get("score", 0)
+                    if score > 0.3:  # 相关性阈值
+                        rag_lines.append(f"- {fp}: {text}")
+                if len(rag_lines) > 2:
+                    parts.append("\n".join(rag_lines))
+        except Exception as e:
+            logger.debug(f"[ChatService] RAG search skipped: {e}")
+
+        # BOOTSTRAP.md 初始化引导（存在时注入，不存在则忽略）
+        bootstrap_content = self._read_vfs_file('/workspace/agent/BOOTSTRAP.md')
+        if bootstrap_content:
+            parts.append(f"【初始化引导 — BOOTSTRAP.md】\n{bootstrap_content}")
+
+        return "\n\n".join(parts)
+    
+    def _read_vfs_file(self, path: str) -> Optional[str]:
+        """从 VFS 读取文件内容"""
+        try:
+            content = self.vfs.cat(path)
+            if content and not content.startswith('Error'):
+                return content.strip()
+        except Exception as e:
+            logger.debug(f"[ChatService] VFS read error for {path}: {e}")
+        return None
+    
+    async def _load_history(self):
+        """从 ChatHistory 表加载对话历史，注入到 ChatContext
+
+        WeChat 渠道过渡期：ChatHistory 为空时 fallback 到 WeChatMessage。
+        """
+        try:
+            with get_session() as db:
+                query = db.query(ChatHistory).filter(
+                    ChatHistory.user_id == int(self.user_id),
+                    ChatHistory.agent_hash == self.agent_hash,
+                    ChatHistory.channel == self.channel,
+                )
+                if self.session_id:
+                    query = query.filter(ChatHistory.session_id == self.session_id)
+                if self.session_reset_at:
+                    query = query.filter(ChatHistory.created_at > self.session_reset_at)
+
+                records = query.order_by(ChatHistory.created_at.asc()).limit(200).all()
+                if records:
+                    self.context.history = [
+                        {"role": r.role, "content": r.content}
+                        for r in records
+                    ]
+                elif self.channel == "wechat":
+                    # 过渡期 fallback：ChatHistory 尚无数据，从 WeChatMessage 读取
+                    await self._load_history_from_wechat_messages(db)
+        except Exception as e:
+            logger.debug(f"[ChatService] Failed to load history: {e}")
+
+    async def _load_history_from_wechat_messages(self, db):
+        """WeChat 渠道过渡期 fallback：从 WeChatMessage 读取历史并转换为 ChatHistory 格式"""
+        from models.database import WeChatBinding, WeChatMessage
+        import re as _re
+
+        binding = db.query(WeChatBinding).filter(
+            WeChatBinding.user_id == int(self.user_id),
+            WeChatBinding.agent_hash == self.agent_hash,
+        ).first()
+
+        if not binding:
+            return
+
+        query = db.query(WeChatMessage).filter(
+            WeChatMessage.binding_id == binding.id,
+            WeChatMessage.agent_hash == binding.agent_hash,
+        )
+        if self.session_reset_at:
+            query = query.filter(WeChatMessage.created_at > self.session_reset_at)
+
+        db_messages = query.order_by(WeChatMessage.created_at.asc()).limit(50).all()
+
+        history = []
+        for msg in db_messages:
+            if not msg.content or msg.content.startswith("{"):
+                continue
+            if msg.direction == "received":
+                history.append({"role": "user", "content": msg.content})
+            elif msg.direction == "sent":
+                if msg.content.startswith("[工具调用]") or msg.content.startswith("{"):
+                    continue
+                content = msg.content
+                content = _re.sub(r'</?invoke[^>]*>|</?parameter[^>]*>|🔧\s*执行工具:\s*[\w_]+', '', content).strip()
+                history.append({"role": "assistant", "content": content})
+
+        if history:
+            self.context.history = history
+            logger.info(f"[ChatService] Loaded {len(history)} messages from WeChatMessage fallback")
+    
+    def _inject_corrections(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """注入未消费的 pending_correction 到最新 user prompt 末尾"""
+        if not self._pending_correction or self._pending_correction.get("consumed"):
+            return messages
+
+        corr = self._pending_correction
+        msgs = list(messages)
+        for i in range(len(msgs) - 1, -1, -1):
+            if msgs[i].get("role") == "user":
+                ct = corr.get("topic", "").lower()
+                ui = msgs[i].get("content", "")
+                if isinstance(ui, str):
+                    ui_lower = ui.lower()
+                else:
+                    continue
+                # 短 topic 守卫：topic 太短不匹配，避免 "力" 匹配 "努力了"
+                if len(ct) <= 2:
+                    break
+                if ct in ui_lower or ui_lower in ct:
+                    msgs[i]["content"] = ui + f"\n\n[内部提醒] {corr['short_desc']}"
+                    corr["consumed"] = True
+                    logger.info(
+                        "[ChatService] Injected pending_correction: topic=%s",
+                        corr.get("topic")
+                    )
+                break
+        return msgs
+
+    def _build_messages(
+        self, 
+        system_prompt: str, 
+        user_input: str,
+        image_url: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """构建消息列表"""
+        messages = [{"role": "system", "content": system_prompt}]
+        
+        # 添加历史消息
+        messages.extend(self.context.history)
+        
+        # 添加用户消息
+        if image_url:
+            # 多模态消息
+            messages.append({
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": user_input},
+                    {"type": "image_url", "image_url": {"url": image_url}}
+                ]
+            })
+        else:
+            messages.append({"role": "user", "content": user_input})
+
+        messages = self._inject_corrections(messages)
+        return messages
+    
+    async def _stream_ai_response(
+        self, 
+        messages: List[Dict[str, Any]]
+    ) -> AsyncGenerator[ChatEvent, None]:
+        """流式调用 AI 并处理工具调用"""
+        try:
+            # 使用 AgentExecutor 进行对话（支持工具调用）
+            response_text = ""
+            async for step in self.executor.chat_with_tools(messages=messages):
+                if step.step_type == "token":
+                    # 流式输出文本片段（真正的流式）
+                    response_text += step.content
+                    yield ChatEvent(
+                        type=ChatEventType.TEXT,
+                        content=step.content
+                    )
+                elif step.step_type == "pre_tool":
+                    # 工具调用前的思考
+                    yield ChatEvent(
+                        type=ChatEventType.PRE_TOOL,
+                        content=step.content or ""
+                    )
+                elif step.step_type == "tool_call":
+                    # 工具调用
+                    self._session_memory_tool_calls_since += 1
+                    yield ChatEvent(
+                        type=ChatEventType.TOOL_CALL,
+                        tool_name=step.tool_name,
+                        tool_args=step.tool_args,
+                        content=step.content or ""
+                    )
+                elif step.step_type == "tool_result":
+                    # 工具执行结果
+                    yield ChatEvent(
+                        type=ChatEventType.TOOL_RESULT,
+                        tool_name=step.tool_name,
+                        tool_result=step.tool_result,
+                        content=step.content or ""
+                    )
+                elif step.step_type == "final":
+                    # 最终响应（可能是工具超限时的提示）
+                    if step.content and step.content.strip():
+                        response_text += step.content
+                        yield ChatEvent(
+                            type=ChatEventType.TEXT,
+                            content=step.content
+                        )
+                elif step.step_type == "keepalive":
+                    # 工具执行心跳，透传给前端
+                    yield ChatEvent(
+                        type=ChatEventType.KEEPALIVE,
+                        content=step.content or ""
+                    )
+
+            # 注意：DONE 事件由 chat() 方法统一发送，避免重复
+
+        except Exception as e:
+            logger.error(f"[ChatService] AI response error: {e}", exc_info=True)
+            yield ChatEvent(
+                type=ChatEventType.ERROR,
+                error_message=str(e)
+            )
+    
+    def _save_conversation(self, user_input: str, response: str,
+                           meta: Optional[Dict] = None,
+                           attachments: Optional[List] = None):
+        """保存对话记录到内存和数据库（单事务双行写入）"""
+
+        # 保存到内存
+        self.context.history.append({"role": "user", "content": user_input})
+        self.context.history.append({"role": "assistant", "content": response})
+
+        # 限制历史长度
+        if len(self.context.history) > 200 * 2:
+            self.context.history = self.context.history[-200 * 2:]
+
+        # 自动触发消息压缩（token估算超过阈值时）
+        total_est = sum(
+            estimate_tokens(msg.get("content", ""))
+            for msg in self.context.history
+        )
+
+        if total_est > 80000:
+            from services.message_compactor import MessageCompactor
+            compactor = MessageCompactor(max_tokens=80000)
+            self.context.history = compactor.l2_shear(self.context.history)
+            self.context.history = compactor.l3_micro_compact(self.context.history)
+            total_est = sum(
+                estimate_tokens(msg.get("content", ""))
+                for msg in self.context.history
+            )
+            if total_est > 80000:
+                self.context.history = compactor.l4_context_crash(self.context.history)
+
+        # wechat_msg_id 从 meta JSON 派生
+        _wx_msg_id = None
+        if meta and "wechat_metadata" in meta:
+            _wx_msg_id = meta["wechat_metadata"].get("msg_id")
+
+        # 序列化 attachments
+        _attachments_json = None
+        if attachments:
+            _attachments_json = [a.dict() if hasattr(a, 'dict') else a for a in attachments]
+
+        # 保存到数据库（ChatHistory 表，单事务双行写入）
+        try:
+            with get_session() as db:
+                user_msg = ChatHistory(
+                    user_id=int(self.user_id),
+                    agent_hash=self.agent_hash,
+                    role="user",
+                    content=user_input,
+                    channel=self.channel,
+                    session_id=self.session_id,
+                    meta=meta,
+                    attachments=_attachments_json,
+                    wechat_msg_id=_wx_msg_id,
+                )
+                db.add(user_msg)
+
+                assistant_msg = ChatHistory(
+                    user_id=int(self.user_id),
+                    agent_hash=self.agent_hash,
+                    role="assistant",
+                    content=response,
+                    channel=self.channel,
+                    session_id=self.session_id,
+                    meta=meta,
+                )
+                db.add(assistant_msg)
+
+                db.commit()
+                logger.debug(f"[ChatService] Saved conversation: user_id={self.user_id}, agent_hash={self.agent_hash}")
+        except Exception as e:
+            logger.warning(f"[ChatService] Failed to save conversation to database: {e}")
+
+    async def _maybe_extract_session_memory(self):
+        """后置钩子：会话记忆提取（非阻塞，后台执行）"""
+        async with self._session_memory_lock:
+            try:
+                from services.session_memory_service import SessionMemoryService
+
+                svc = SessionMemoryService(agent_hash=self.agent_hash)
+
+                # 检查是否已初始化
+                if not self._session_memory_initialized:
+                    self._session_memory_initialized = svc.is_memory_initialized()
+
+                # 阈值判断
+                decision = svc.should_extract(
+                    messages=self.context.history,
+                    is_initialized=self._session_memory_initialized,
+                    last_extract_msg_index=self._session_memory_last_extract_idx,
+                    tool_calls_since=self._session_memory_tool_calls_since,
+                )
+
+                if not decision["should_extract"]:
+                    logger.debug(
+                        "[ChatService] Session memory extraction skipped: %s",
+                        decision["reason"]
+                    )
+                    return
+
+                logger.info(
+                    "[ChatService] Triggering session memory extraction: %s",
+                    decision["reason"]
+                )
+
+                # 执行提取
+                success = await svc.extract(self.context.history)
+
+                if success:
+                    self._session_memory_initialized = True
+                    self._session_memory_last_extract_idx = len(self.context.history)
+                    self._session_memory_tool_calls_since = 0
+                    # 触发蒸馏检查
+                    await svc.maybe_distill_to_longterm(self.context.history)
+                    # 触发 Reflection 事实核查
+                    asyncio.create_task(self._run_reflection(self.context.history))
+                    logger.info("[ChatService] Session memory extraction completed successfully")
+                else:
+                    self._session_memory_tool_calls_since = 0
+                    logger.warning("[ChatService] Session memory extraction failed")
+
+            except Exception as e:
+                self._session_memory_tool_calls_since = 0
+                logger.error("[ChatService] Session memory extraction error: %s", e, exc_info=True)
+
+    async def _run_reflection(self, messages):
+        """在 Session Memory 提取成功后，异步触发 Reflection 事实核查"""
+        try:
+            from services.reflection_service import ReflectionService
+
+            previous_correction = (
+                self._pending_correction["short_desc"]
+                if self._pending_correction else None
+            )
+            result = await ReflectionService.check_session_memory(messages, previous_correction)
+
+            current_count = len(messages)
+
+            # 覆盖策略：只有新结果消息更多才覆盖旧的 pending
+            if self._pending_correction and current_count <= self._pending_correction.get("msg_count", 0):
+                logger.debug(
+                    "[ChatService] Reflection result discarded: "
+                    "current msg_count=%d <= pending msg_count=%d",
+                    current_count, self._pending_correction["msg_count"]
+                )
+                return
+
+            logger.info(
+                "[ChatService] Reflection result: %s",
+                json.dumps({k: v for k, v in result.items() if k != "detail"}, ensure_ascii=False)
+            )
+
+            if result.get("has_errors"):
+                self._pending_correction = {
+                    "short_desc": result["short_desc"],
+                    "topic": result["topic"],
+                    "msg_count": current_count,
+                    "consumed": False,
+                }
+                logger.info(
+                    "[ChatService] Reflection found error: topic=%s, short_desc=%s",
+                    result.get("topic"), result.get("short_desc")
+                )
+            else:
+                if self._pending_correction:
+                    logger.info(
+                        "[ChatService] Reflection cleared previous pending_correction (topic=%s)",
+                        self._pending_correction.get("topic")
+                    )
+                self._pending_correction = None
+
+        except Exception as e:
+            logger.error("[ChatService] Reflection error: %s", e, exc_info=True)
+
+    async def _maybe_extract_user_profile(self):
+        """后置钩子：用户画像提取（非阻塞，后台执行）"""
+        async with self._user_profile_lock:
+            try:
+                from services.user_profile_service import UserProfileService
+
+                svc = UserProfileService(agent_hash=self.agent_hash)
+
+                # 检查是否已初始化
+                if not self._user_profile_initialized:
+                    self._user_profile_initialized = svc.is_profile_initialized()
+
+                # 阈值判断
+                decision = UserProfileService.should_extract(
+                    messages=self.context.history,
+                    is_initialized=self._user_profile_initialized,
+                    last_extract_msg_index=self._user_profile_last_extract_idx,
+                    last_extract_time=self._user_profile_last_extract_time,
+                    tool_calls_since=self._user_profile_tool_calls_since,
+                )
+
+                if not decision["should_extract"]:
+                    reason = decision.get("reason", "")
+                    if "消息不足" in reason:
+                        logger.debug(
+                            "[ChatService] User profile extraction skipped: %s",
+                            reason
+                        )
+                    else:
+                        logger.info(
+                            "[ChatService] User profile extraction skipped: %s",
+                            reason
+                        )
+                    return
+
+                logger.info(
+                    "[ChatService] Triggering user profile extraction: %s",
+                    decision["reason"]
+                )
+
+                # 执行提取
+                success = await svc.extract(self.context.history)
+
+                if success:
+                    self._user_profile_initialized = True
+                    self._user_profile_last_extract_idx = len(self.context.history)
+                    self._user_profile_last_extract_time = time.time()
+                    self._user_profile_tool_calls_since = 0
+                    logger.info("[ChatService] User profile extraction completed successfully")
+                else:
+                    self._user_profile_tool_calls_since = 0
+                    logger.info("[ChatService] User profile extraction finished (no changes or LLM decided no update needed)")
+
+            except Exception as e:
+                self._user_profile_tool_calls_since = 0
+                logger.error("[ChatService] User profile extraction error: %s", e, exc_info=True)

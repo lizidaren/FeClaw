@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FeClaw 文件管理</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #f5f5f5;
+            min-height: 100vh;
+        }
+        .header {
+            background: white;
+            padding: 15px 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+        .header h1 { font-size: 20px; color: #333; }
+        .breadcrumb {
+            background: white;
+            padding: 12px 20px;
+            border-bottom: 1px solid #eee;
+        }
+        .breadcrumb a {
+            color: #4a90d9;
+            text-decoration: none;
+        }
+        .breadcrumb a:hover { text-decoration: underline; }
+        .toolbar {
+            padding: 15px 20px;
+            display: flex;
+            gap: 10px;
+        }
+        .toolbar button {
+            padding: 8px 16px;
+            border: 1px solid #ddd;
+            background: white;
+            border-radius: 6px;
+            cursor: pointer;
+        }
+        .toolbar button:hover { background: #f0f0f0; }
+        .file-list {
+            background: white;
+            margin: 0 20px;
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        .file-item {
+            display: flex;
+            align-items: center;
+            padding: 12px 15px;
+            border-bottom: 1px solid #eee;
+            cursor: pointer;
+        }
+        .file-item:hover { background: #f8f8f8; }
+        .file-item .icon {
+            width: 32px; height: 32px; margin-right: 12px;
+            display: flex; align-items: center; justify-content: center;
+            font-size: 20px;
+        }
+        .file-item .name { flex: 1; }
+        .file-item .size { color: #888; margin-right: 20px; }
+        .file-item .date { color: #888; font-size: 14px; }
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0,0,0,0.5);
+            z-index: 1000;
+        }
+        .modal.active { display: flex; align-items: center; justify-content: center; }
+        .modal-content {
+            background: white;
+            padding: 20px;
+            border-radius: 12px;
+            max-width: 600px;
+            width: 90%;
+            max-height: 80vh;
+            overflow: auto;
+        }
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 15px;
+        }
+        .modal-header h2 { font-size: 18px; }
+        .modal-header button {
+            background: none; border: none; font-size: 24px; cursor: pointer;
+        }
+        .modal textarea {
+            width: 100%; height: 300px;
+            padding: 10px; border: 1px solid #ddd;
+            border-radius: 6px; font-family: monospace; font-size: 14px;
+        }
+        .modal img#imagePreview {
+            display: none;
+            max-width: 100%; max-height: 60vh;
+            margin: 0 auto;
+            border-radius: 8px;
+            box-shadow: 0 2px 12px rgba(0,0,0,0.15);
+        }
+        .modal .actions { margin-top: 15px; text-align: right; }
+        .modal .actions button {
+            padding: 8px 20px; margin-left: 10px; border-radius: 6px; cursor: pointer;
+        }
+        .modal .actions .save { background: #4a90d9; color: white; border: none; }
+        .modal .actions .cancel { background: white; border: 1px solid #ddd; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>📁 VFS 文件管理</h1>
+    </div>
+    <div class="breadcrumb" id="breadcrumb">
+        <a href="#" onclick="navigate('')">/</a>
+    </div>
+    <div class="toolbar">
+        <button onclick="showUploadModal()">📤 上传</button>
+        <button onclick="showNewFileModal()">📝 新建文件</button>
+        <button onclick="refresh()">🔄 刷新</button>
+    </div>
+    <div class="file-list" id="fileList">
+        <div style="padding:40px;text-align:center;color:#888">加载中...</div>
+    </div>
+
+    <!-- 编辑弹窗 -->
+    <div class="modal" id="editModal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 id="editFileName">编辑文件</h2>
+                <button onclick="closeEditModal()">&times;</button>
+            </div>
+            <textarea id="editContent"></textarea>
+            <img id="imagePreview">
+            <div class="actions">
+                <button class="cancel" onclick="closeEditModal()">取消</button>
+                <button class="save" onclick="saveFile()">保存</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 上传弹窗 -->
+    <div class="modal" id="uploadModal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>上传文件</h2>
+                <button onclick="closeUploadModal()">&times;</button>
+            </div>
+            <input type="file" id="fileInput" multiple>
+            <div class="actions">
+                <button class="cancel" onclick="closeUploadModal()">取消</button>
+                <button class="save" onclick="uploadFiles()">上传</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let currentPath = '';
+        let editingFile = '';
+
+        // ========== 文件列表 ==========
+        async function loadFiles() {
+            try {
+                const res = await fetch(`/api/files?path=${encodeURIComponent(currentPath)}`);
+                if (res.status === 401) {
+                    // 跳转到登录页
+                    window.location.href = '/login';
+                    return;
+                }
+                if (!res.ok) {
+                    const text = await res.text();
+                    let msg = text;
+                    try { msg = JSON.parse(text).detail || text; } catch(e) {}
+                    throw new Error(`HTTP ${res.status}: ${msg}`);
+                }
+                const data = await res.json();
+                renderFiles(data.files || []);
+                updateBreadcrumb();
+            } catch (e) {
+                document.getElementById('fileList').innerHTML =
+                    `<div style="padding:40px;text-align:center;color:#e74c3c">加载失败: ${e.message}</div>`;
+            }
+        }
+
+        function renderFiles(files) {
+            const list = document.getElementById('fileList');
+            if (!files.length) {
+                list.innerHTML = '<div style="padding:40px;text-align:center;color:#888">空文件夹</div>';
+                return;
+            }
+            list.innerHTML = files.map(f => `
+                <div class="file-item" onclick="${f.type === 'dir' ? `navigate('${f.path}')` : `openFile('${f.path}')`}">
+                    <div class="icon">${f.type === 'dir' ? '📁' : '📄'}</div>
+                    <div class="name">${f.name}</div>
+                    <div class="size">${formatSize(f.size)}</div>
+                    <div class="date">${f.updated_at}</div>
+                </div>
+            `).join('');
+        }
+
+        function formatSize(bytes) {
+            if (!bytes || bytes < 1024) return (bytes || 0) + ' B';
+            if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+            return (bytes / 1024 / 1024).toFixed(1) + ' MB';
+        }
+
+        // ========== 导航 ==========
+        function navigate(path) {
+            currentPath = path;
+            loadFiles();
+        }
+
+        function updateBreadcrumb() {
+            const parts = currentPath.split('/').filter(p => p);
+            let html = '<a href="#" onclick="navigate(\'\')">/</a>';
+            let path = '';
+            for (const part of parts) {
+                path += (path ? '/' : '') + part;
+                html += ` <a href="#" onclick="navigate('${path}')">${part}</a> /`;
+            }
+            document.getElementById('breadcrumb').innerHTML = html;
+        }
+
+        // ========== 读取 ==========
+        async function openFile(path) {
+            try {
+                const res = await fetch(`/api/file?path=${encodeURIComponent(path)}`);
+                if (res.status === 401) { window.location.href = '/login'; return; }
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                const data = await res.json();
+                editingFile = path;
+                const fileName = path.split('/').pop();
+                document.getElementById('editFileName').textContent = fileName;
+                if (data.binary) {
+                    // 二进制文件：尝试渲染图片
+                    const ext = path.split('.').pop().toLowerCase();
+                    const isImage = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp'].includes(ext);
+                    if (isImage) {
+                        const mime = ext === 'svg' ? 'image/svg+xml' : `image/${ext === 'jpg' ? 'jpeg' : ext}`;
+                        document.getElementById('editContent').style.display = 'none';
+                        document.getElementById('imagePreview').src = `data:${mime};base64,${data.content}`;
+                        document.getElementById('imagePreview').style.display = 'block';
+                    } else {
+                        document.getElementById('editContent').style.display = 'block';
+                        document.getElementById('imagePreview').style.display = 'none';
+                        document.getElementById('editContent').value = `[二进制文件] ${fileName}\n大小: ${data.size} bytes\n\n该文件类型不支持在线编辑。`;
+                    }
+                } else {
+                    document.getElementById('editContent').style.display = 'block';
+                    document.getElementById('imagePreview').style.display = 'none';
+                    document.getElementById('editContent').value = data.content || '';
+                }
+                document.getElementById('editModal').classList.add('active');
+            } catch (e) {
+                alert('打开失败: ' + e.message);
+            }
+        }
+
+        // ========== 写入 ==========
+        async function saveFile() {
+            const content = document.getElementById('editContent').value;
+            try {
+                const res = await fetch(`/api/file?path=${encodeURIComponent(editingFile)}`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ content })
+                });
+                if (res.status === 401) { window.location.href = '/login'; return; }
+                if (res.ok) {
+                    closeEditModal();
+                    alert('保存成功');
+                } else {
+                    const err = await res.text();
+                    alert('保存失败: ' + err);
+                }
+            } catch (e) {
+                alert('保存失败: ' + e.message);
+            }
+        }
+
+        function closeEditModal() {
+            document.getElementById('editModal').classList.remove('active');
+            document.getElementById('editContent').style.display = 'block';
+            document.getElementById('imagePreview').style.display = 'none';
+            document.getElementById('imagePreview').src = '';
+        }
+
+        // ========== 上传 ==========
+        function showUploadModal() {
+            document.getElementById('uploadModal').classList.add('active');
+        }
+        function closeUploadModal() {
+            document.getElementById('uploadModal').classList.remove('active');
+        }
+
+        async function uploadFiles() {
+            const input = document.getElementById('fileInput');
+            if (!input.files.length) return;
+            for (const file of input.files) {
+                const formData = new FormData();
+                formData.append('file', file);
+                try {
+                    const res = await fetch(`/api/file/upload?path=${encodeURIComponent(currentPath + '/' + file.name)}`, {
+                        method: 'POST',
+                        body: formData
+                    });
+                    if (res.status === 401) { window.location.href = '/login'; return; }
+                    if (!res.ok) alert(`上传 ${file.name} 失败`);
+                } catch (e) {
+                    alert(`上传 ${file.name} 失败: ${e.message}`);
+                }
+            }
+            closeUploadModal();
+            loadFiles();
+        }
+
+        // ========== 新建 ==========
+        function showNewFileModal() {
+            const name = prompt('文件名:');
+            if (!name) return;
+            editingFile = currentPath + '/' + name;
+            document.getElementById('editFileName').textContent = name;
+            document.getElementById('editContent').value = '';
+            document.getElementById('editModal').classList.add('active');
+        }
+
+        // ========== 刷新 ==========
+        function refresh() { loadFiles(); }
+
+        // 启动
+        loadFiles();
+    </script>
+</body>
+</html>

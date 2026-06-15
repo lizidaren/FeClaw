@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>设置 - FeClaw</title>
+    <!-- 液态玻璃风格 CSS -->
+    <link rel="stylesheet" href="/static/css/base.css">
+    <link rel="stylesheet" href="/static/css/glass.css">
+    <link rel="stylesheet" href="/static/css/components.css">
+    <link rel="stylesheet" href="/static/css/layouts.css">
+    <link rel="stylesheet" href="/static/css/animations.css">
+    <link rel="stylesheet" href="/static/css/responsive.css">
+    <link rel="stylesheet" href="/static/css/themes.css">
+    <!-- 认证检查（必须在页面渲染前执行） -->
+    <script src="/static/js/auth.js"></script>
+    <script>
+        (async function() {
+            const loggedIn = await Auth.checkAuthBeforeRender();
+            if (!loggedIn) {
+                document.write('<div style="display:flex;align-items:center;justify-content:center;height:100vh;background:#1a1a2e;color:#fff;font-family:sans-serif;"><p>正在跳转到登录页...</p></div>');
+            }
+        })();
+    </script>
+</head>
+<body>
+    
+    <div class="page page-enter">
+        <!-- 导航栏 -->
+        <nav class="glass-nav">
+            <div class="container flex justify-between items-center">
+                <a href="/" class="navbar-brand">
+                    <span class="brand-icon">
+                        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M12 2L2 7l10 5 10-5-10-5z"/>
+                            <path d="M2 17l10 5 10-5"/>
+                            <path d="M2 12l10 5 10-5"/>
+                        </svg>
+                    </span>
+                    FeClaw
+                </a>
+                <div class="navbar-nav">
+                    <a href="/dashboard" class="nav-link">控制台</a>
+                    <a href="/settings" class="nav-link active">设置</a>
+                </div>
+            </div>
+        </nav>
+
+        <!-- 主内容区 -->
+        <section class="section">
+            <div class="container container-md">
+                <div class="text-center mb-xl">
+                    <h2>设置</h2>
+                    <p class="text-secondary">管理您的账户和平台配置</p>
+                </div>
+
+                <!-- 设置选项卡 -->
+                <div class="glass-panel">
+                    <div class="flex flex-col gap-lg">
+                        <!-- 修改密码 -->
+                        <div class="glass-card">
+                            <div class="card-header">
+                                <h4 class="card-title">修改密码</h4>
+                            </div>
+                            <div class="card-body">
+                                <form class="form" id="password-form">
+                                    <div class="input-group">
+                                        <label>当前密码</label>
+                                        <input type="password" id="current-password" class="glass-input" placeholder="输入当前密码">
+                                    </div>
+                                    <div class="input-group">
+                                        <label>新密码</label>
+                                        <input type="password" id="new-password" class="glass-input" placeholder="输入新密码">
+                                    </div>
+                                    <div class="input-group">
+                                        <label>确认新密码</label>
+                                        <input type="password" id="confirm-password" class="glass-input" placeholder="再次输入新密码">
+                                    </div>
+                                    <button type="submit" class="glass-button glass-button-primary">修改密码</button>
+                                    <p id="password-msg" class="text-secondary mt-sm" style="display:none;"></p>
+                                </form>
+                            </div>
+                        </div>
+
+                        <!-- Platform 登录提示 -->
+                        <div class="glass-card" id="platform-hint" style="display:none;">
+                            <div class="card-header">
+                                <h4 class="card-title">Platform 账号</h4>
+                            </div>
+                            <div class="card-body">
+                                <p class="text-secondary mb-md">
+                                    您当前正在使用 Platform 登录。如果您希望彻底退出，请
+                                    <a href="https://platform.firstentrance.lizidaren.cn/api/auth/logout-page"
+                                       target="_blank" style="color:var(--accent-red,#ff6b6b);text-decoration:none;">
+                                        退出 Platform 账号
+                                    </a>
+                                </p>
+                            </div>
+                        </div>
+
+                        <!-- 退出登录 -->
+                        <div class="glass-card">
+                            <div class="card-header">
+                                <h4 class="card-title">账户</h4>
+                            </div>
+                            <div class="card-body">
+                                <p class="text-secondary mb-md">退出登录后需要重新登录才能使用 FeClaw。</p>
+                                <button id="logout-btn" class="glass-button glass-button-danger">
+                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="margin-right:8px;">
+                                        <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
+                                        <polyline points="16 17 21 12 16 7"/>
+                                        <line x1="21" y1="12" x2="9" y2="12"/>
+                                    </svg>
+                                    退出登录
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>    <script>
+        // 修改密码
+        document.getElementById('password-form').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            var currentPw = document.getElementById('current-password').value;
+            var newPw = document.getElementById('new-password').value;
+            var confirmPw = document.getElementById('confirm-password').value;
+
+            if (!currentPw || !newPw) {
+                document.getElementById('password-msg').textContent = '请填写密码';
+                document.getElementById('password-msg').style.display = 'block';
+                return;
+            }
+            if (newPw !== confirmPw) {
+                document.getElementById('password-msg').textContent = '两次密码不一致';
+                document.getElementById('password-msg').style.display = 'block';
+                return;
+            }
+            if (newPw.length < 6) {
+                document.getElementById('password-msg').textContent = '密码至少 6 位';
+                document.getElementById('password-msg').style.display = 'block';
+                return;
+            }
+
+            var msgEl = document.getElementById('password-msg');
+            msgEl.textContent = '修改中...';
+            msgEl.style.display = 'block';
+            msgEl.style.color = 'var(--text-secondary)';
+
+            try {
+                var token = localStorage.getItem('feclaw_jwt');
+                var resp = await fetch('/api/user/change-password', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': 'Bearer ' + token
+                    },
+                    body: JSON.stringify({
+                        current_password: currentPw,
+                        new_password: newPw
+                    })
+                });
+                var data = await resp.json();
+                if (resp.ok) {
+                    msgEl.textContent = '✅ 密码已修改';
+                    msgEl.style.color = 'var(--success, #22c55e)';
+                    document.getElementById('current-password').value = '';
+                    document.getElementById('new-password').value = '';
+                    document.getElementById('confirm-password').value = '';
+                } else {
+                    msgEl.textContent = '❌ ' + (data.message || data.detail || '修改失败');
+                    msgEl.style.color = 'var(--danger, #ef4444)';
+                }
+            } catch(e) {
+                msgEl.textContent = '❌ 网络错误';
+                msgEl.style.color = 'var(--danger, #ef4444)';
+            }
+        });
+
+        // 检查是否为 Platform 登录
+        (function() {
+            var token = localStorage.getItem('feclaw_jwt');
+            if (token) {
+                try {
+                    var payload = JSON.parse(atob(token.split('.')[1]));
+                    if (payload.auth_method === 'platform') {
+                        document.getElementById('platform-hint').style.display = '';
+                    }
+                } catch(e) {}
+            }
+        })();
+
+        // 退出登录
+        document.getElementById('logout-btn').addEventListener('click', function() {
+            localStorage.removeItem('feclaw_jwt');
+            localStorage.removeItem('feclaw_jwt_expires');
+            localStorage.removeItem('feclaw_jwt_expires_at');
+            localStorage.removeItem('feclaw_agent_hash');
+            document.cookie = 'feclaw_jwt=; path=/; SameSite=Lax; max-age=0';
+            document.cookie = 'feclaw_jwt=; path=/; domain=.feclaw.lizidaren.cn; SameSite=Lax; max-age=0';
+            window.location.href = '/';
+        });
+    </script>
+</body>
+</html>

@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <script src="/static/js/auth.js"></script>
+    <script>
+        // 阻塞式检查认证，未认证则不渲染页面
+        Auth.checkAuthBeforeRender().then(authenticated => {
+            if (!authenticated) {
+                // 阻止页面渲染
+                document.write('<div style="display:none">');
+            }
+        });
+    </script>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FeClaw - 初始化</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: linear-gradient(135deg, #0f0f23 0%, #1a1a2e 100%);
+            color: #e0e0e0;
+            min-height: 100vh;
+            display: flex; align-items: center; justify-content: center;
+        }
+        .container { max-width: 500px; width: 100%; padding: 20px; }
+        .card {
+            background: #1a1a2e;
+            border-radius: 16px;
+            padding: 40px;
+            border: 1px solid #2a2a4a;
+        }
+        h1 { font-size: 24px; margin-bottom: 10px; text-align: center; }
+        p { color: #888; margin-bottom: 30px; text-align: center; }
+        .input-group { margin-bottom: 20px; }
+        label { display: block; margin-bottom: 8px; color: #888; font-size: 14px; }
+        input {
+            width: 100%;
+            padding: 12px 16px;
+            background: #0f0f1a;
+            border: 1px solid #2a2a4a;
+            border-radius: 8px;
+            color: #fff;
+            font-size: 16px;
+        }
+        input:focus { outline: none; border-color: #667eea; }
+        button {
+            width: 100%;
+            padding: 14px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            border: none;
+            border-radius: 8px;
+            color: white;
+            font-size: 16px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        button:hover { opacity: 0.9; }
+        .back { display: block; text-align: center; margin-top: 20px; color: #667eea; text-decoration: none; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="card">
+            <h1>🔐 验证身份</h1>
+            <p>请输入 Agent 发送给您的登录码</p>
+            <div class="input-group">
+                <label>6 位验证码</label>
+                <input type="text" id="totpInput" placeholder="000000" maxlength="6" autocomplete="off">
+            </div>
+            <button onclick="verify()">验证并登录</button>
+            <a href="/" class="back">← 返回主页</a>
+        </div>
+    </div>
+    <script>
+        const host = window.location.host;
+        const hashMatch = host.match(/^([a-f0-9]{4})\./);
+        const agentHash = hashMatch ? hashMatch[1] : null;
+        const urlParams = new URLSearchParams(window.location.search);
+        const totpParam = urlParams.get('totp');
+        
+        if (totpParam) {
+            document.getElementById('totpInput').value = totpParam;
+        }
+        
+        async function verify() {
+            const code = document.getElementById('totpInput').value;
+            if (code.length !== 6) {
+                alert('请输入 6 位验证码');
+                return;
+            }
+            
+            try {
+                const res = await fetch('/api/totp/verify', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ agent_hash: agentHash, code: code })
+                });
+                
+                if (res.ok) {
+                    const data = await res.json();
+                    // 使用 Auth.setAuth 存储认证信息
+                    Auth.setAuth(data.token, data.expires_at, { agent_hash: data.agent_hash });
+                    window.location.href = '/';
+                } else {
+                    const err = await res.json();
+                    alert('验证失败: ' + (err.detail || '未知错误'));
+                }
+            } catch (e) {
+                alert('请求失败: ' + e.message);
+            }
+        }
+        
+        document.getElementById('totpInput').addEventListener('keypress', e => {
+            if (e.key === 'Enter') verify();
+        });
+    </script>
+</body>
+</html>

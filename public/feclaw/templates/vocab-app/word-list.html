@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>词汇学习 - 词汇表</title>
+<style>
+:root {
+  --bg: #f0f4ff;
+  --card-bg: rgba(255,255,255,0.85);
+  --text: #1e293b;
+  --text-secondary: #64748b;
+  --accent: #2563eb;
+  --accent-hover: #1d4ed8;
+  --border: rgba(0,0,0,0.08);
+  --shadow: 0 4px 24px rgba(0,0,0,0.06);
+  --input-bg: rgba(255,255,255,0.7);
+  --tag-bg: #eff6ff;
+  --example-bg: #f8fafc;
+  --hover-bg: rgba(37,99,235,0.04);
+}
+@media (prefers-color-scheme: dark) {
+:root {
+  --bg: #0f172a;
+  --card-bg: rgba(30,41,59,0.85);
+  --text: #e2e8f0;
+  --text-secondary: #94a3b8;
+  --accent: #3b82f6;
+  --accent-hover: #60a5fa;
+  --border: rgba(255,255,255,0.08);
+  --shadow: 0 4px 24px rgba(0,0,0,0.3);
+  --input-bg: rgba(30,41,59,0.7);
+  --tag-bg: #1e3a5f;
+  --example-bg: #1e293b;
+  --hover-bg: rgba(59,130,246,0.08);
+}
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+  display: flex; flex-direction: column; align-items: center;
+  padding: 40px 20px;
+}
+.container { width: 100%; max-width: 640px; }
+.top-bar {
+  display: flex; justify-content: space-between; align-items: center;
+  margin-bottom: 24px;
+}
+.back-link {
+  color: var(--accent); text-decoration: none; font-weight: 600;
+}
+.back-link:hover { text-decoration: underline; }
+.page-title {
+  font-size: 1.6rem; font-weight: 700; text-align: center;
+}
+.search-row {
+  margin-bottom: 20px;
+}
+.search-row input {
+  width: 100%;
+  padding: 14px 18px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  font-size: 1rem;
+  background: var(--input-bg);
+  color: var(--text);
+  outline: none;
+  transition: border-color 0.2s;
+}
+.search-row input:focus { border-color: var(--accent); }
+.word-item {
+  background: var(--card-bg);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px 20px;
+  margin-bottom: 10px;
+  box-shadow: var(--shadow);
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.word-item:hover { background: var(--hover-bg); }
+.word-summary {
+  display: flex; justify-content: space-between; align-items: baseline;
+}
+.word-name {
+  font-size: 1.15rem; font-weight: 700;
+}
+.word-brief {
+  color: var(--text-secondary); font-size: 0.92rem;
+}
+.word-detail {
+  display: none;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+.word-detail.show { display: block; }
+.def-pos {
+  display: inline-block;
+  background: var(--tag-bg);
+  color: var(--accent);
+  padding: 2px 10px; border-radius: 6px;
+  font-size: 0.85rem; font-weight: 600;
+  margin-bottom: 6px;
+}
+.def-meaning { font-size: 1rem; margin-bottom: 6px; }
+.def-examples { margin-top: 6px; padding-left: 20px; }
+.def-examples li { color: var(--text-secondary); font-size: 0.9rem; margin-bottom: 3px; }
+.syn-tags { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+.syn-tag {
+  background: var(--tag-bg); color: var(--accent);
+  padding: 3px 10px; border-radius: 20px; font-size: 0.85rem;
+}
+.word-pron { color: var(--text-secondary); font-size: 0.9rem; margin-bottom: 8px; }
+.pagination {
+  display: flex; gap: 8px; justify-content: center; align-items: center;
+  margin-top: 24px;
+}
+.btn {
+  padding: 10px 20px;
+  border: none; border-radius: 12px;
+  font-size: 0.95rem; font-weight: 600; cursor: pointer;
+  transition: background 0.2s, transform 0.1s;
+  background: var(--card-bg);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid var(--border);
+  color: var(--text);
+}
+.btn:hover { background: var(--hover-bg); }
+.btn:active { transform: scale(0.97); }
+.btn:disabled { opacity: 0.4; cursor: default; }
+.page-info { color: var(--text-secondary); font-size: 0.9rem; }
+.empty-msg {
+  text-align: center; color: var(--text-secondary);
+  padding: 40px; font-size: 1.1rem;
+}
+.online-dot {
+  display: inline-block; width: 8px; height: 8px;
+  border-radius: 50%; margin-right: 6px;
+}
+.online-dot.loaded { background: #16a34a; }
+.online-dot.pending { background: #f59e0b; }
+.word-detail .loading-text {
+  color: var(--text-secondary); font-size: 0.9rem; padding: 8px 0;
+}
+@media (max-width: 640px) {
+  body { padding: 16px 12px; }
+  .word-item { padding: 14px 16px; }
+  .word-summary { flex-direction: column; gap: 4px; }
+}
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="top-bar">
+    <a href="." class="back-link">← 返回首页</a>
+  </div>
+  <h1 class="page-title">📋 词汇表</h1>
+
+  <div class="search-row">
+    <input type="text" id="filterInput" placeholder="搜索单词..." autofocus>
+  </div>
+
+  <div id="wordList"></div>
+  <div class="pagination" id="pagination"></div>
+</div>
+
+<script>
+const WORDS = [
+  "aberration", "benevolent", "cryptic", "dubious", "eloquent",
+  "futile", "gregarious", "hoist", "immutable", "jovial",
+  "kinetic", "lethargic", "mundane", "naive", "obsolete",
+  "pragmatic", "quaint", "resilient", "succinct", "tenacious",
+  "ubiquitous", "versatile", "whimsical", "yearning", "zeal",
+  "affinity", "brevity", "candor", "diligent", "empathy"
+];
+
+const PER_PAGE = 20;
+let currentPage = 1;
+let filterText = '';
+
+function getFilteredWords() {
+  if (!filterText) return WORDS;
+  const q = filterText.toLowerCase();
+  return WORDS.filter(w => w.toLowerCase().includes(q));
+}
+
+function getPageWords() {
+  const filtered = getFilteredWords();
+  const start = (currentPage - 1) * PER_PAGE;
+  return filtered.slice(start, start + PER_PAGE);
+}
+
+function getTotalPages() {
+  return Math.ceil(getFilteredWords().length / PER_PAGE);
+}
+
+function renderList() {
+  const words = getPageWords();
+  const container = document.getElementById('wordList');
+
+  if (!words.length) {
+    container.innerHTML = '<div class="empty-msg">没有匹配的单词</div>';
+    document.getElementById('pagination').innerHTML = '';
+    return;
+  }
+
+  container.innerHTML = words.map(w =>
+    `<div class="word-item" data-word="${w}">
+      <div class="word-summary">
+        <span class="word-name"><span class="online-dot pending"></span>${w}</span>
+        <span class="word-brief">点击查看详情</span>
+      </div>
+      <div class="word-detail"></div>
+    </div>`
+  ).join('');
+
+  document.querySelectorAll('.word-item').forEach(item => {
+    item.addEventListener('click', () => toggleDetail(item));
+  });
+}
+
+async function toggleDetail(item) {
+  const detail = item.querySelector('.word-detail');
+  const dot = item.querySelector('.online-dot');
+
+  if (detail.classList.contains('show')) {
+    detail.classList.remove('show');
+    return;
+  }
+
+  detail.classList.add('show');
+
+  if (detail.dataset.loaded === 'true') return;
+
+  const word = item.dataset.word;
+  detail.innerHTML = '<div class="loading-text">加载释义中...</div>';
+
+  try {
+    const res = await fetch('/vocab-app/api/query', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ word })
+    });
+    if (!res.ok) throw new Error('API error');
+    const data = await res.json();
+    renderDetail(detail, data);
+    detail.dataset.loaded = 'true';
+    dot.classList.remove('pending');
+    dot.classList.add('loaded');
+  } catch {
+    detail.innerHTML = '<div class="loading-text" style="color:#dc2626">加载失败，请重试</div>';
+    detail.dataset.loaded = 'false';
+  }
+}
+
+function renderDetail(el, data) {
+  let html = '';
+  if (data.pronunciation) {
+    html += `<div class="word-pron">${escapeHtml(data.pronunciation)}</div>`;
+  }
+  if (data.definitions && data.definitions.length) {
+    data.definitions.forEach(d => {
+      html += `<div style="margin-bottom:12px">
+        <span class="def-pos">${escapeHtml(d.part_of_speech)}</span>
+        <div class="def-meaning">${escapeHtml(d.meaning)}</div>`;
+      if (d.examples && d.examples.length) {
+        html += '<ul class="def-examples">' +
+          d.examples.map(e => `<li>${escapeHtml(e)}</li>`).join('') +
+          '</ul>';
+      }
+      html += '</div>';
+    });
+  }
+  if (data.synonyms && data.synonyms.length) {
+    html += '<div class="syn-tags">' +
+      data.synonyms.map(s => `<span class="syn-tag">${escapeHtml(s)}</span>`).join('') +
+      '</div>';
+  }
+  el.innerHTML = html;
+}
+
+function renderPagination() {
+  const total = getTotalPages();
+  const container = document.getElementById('pagination');
+
+  if (total <= 1) {
+    container.innerHTML = '';
+    return;
+  }
+
+  container.innerHTML = `
+    <button class="btn" id="prevBtn" ${currentPage === 1 ? 'disabled' : ''}>上一页</button>
+    <span class="page-info">${currentPage} / ${total}</span>
+    <button class="btn" id="nextBtn" ${currentPage === total ? 'disabled' : ''}>下一页</button>`;
+
+  document.getElementById('prevBtn').addEventListener('click', () => {
+    if (currentPage > 1) { currentPage--; updateView(); }
+  });
+  document.getElementById('nextBtn').addEventListener('click', () => {
+    if (currentPage < total) { currentPage++; updateView(); }
+  });
+}
+
+function updateView() {
+  renderList();
+  renderPagination();
+}
+
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+}
+
+document.getElementById('filterInput').addEventListener('input', e => {
+  filterText = e.target.value.trim();
+  currentPage = 1;
+  updateView();
+});
+
+// Init
+updateView();
+</script>
+</body>
+</html>

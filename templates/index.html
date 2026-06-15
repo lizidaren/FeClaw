@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FeClaw - 你的 AI 学习搭档</title>
+    <link rel="stylesheet" href="/static/css/base.css">
+    <link rel="stylesheet" href="/static/css/glass.css">
+    <link rel="stylesheet" href="/static/css/components.css">
+    <link rel="stylesheet" href="/static/css/layouts.css">
+    <link rel="stylesheet" href="/static/css/animations.css">
+    <link rel="stylesheet" href="/static/css/responsive.css">
+    <link rel="stylesheet" href="/static/css/themes.css">
+    <script src="/static/js/auth.js"></script>
+    <script>
+        (async function() {
+            var params = new URLSearchParams(window.location.search);
+            var token = params.get("token");
+            if (token) {
+                params.delete("token");
+                var newUrl = window.location.pathname + (params.toString() ? "?" + params.toString() : "");
+                window.history.replaceState({}, "", newUrl);
+                localStorage.setItem("feclaw_jwt", token);
+                document.cookie = "feclaw_jwt=" + token + "; path=/; SameSite=Lax; max-age=" + (60*60*24*7);
+                window.location.href = "/dashboard";
+            }
+        })();
+    </script>
+    <style>
+        .feature-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 1.5rem;
+        }
+        @media (max-width: 768px) {
+            .feature-grid { grid-template-columns: 1fr; }
+        }
+        .feature-card {
+            background: var(--bg-primary);
+            border: 1px solid var(--border-light);
+            border-radius: 16px;
+            padding: 1.5rem;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+        .feature-card:hover {
+            background: var(--bg-hover);
+            transform: translateY(-2px);
+        }
+        .feature-card .detail {
+            max-height: 0;
+            overflow: hidden;
+            transition: max-height 0.4s ease, opacity 0.3s ease;
+            opacity: 0;
+        }
+        .feature-card.expanded .detail {
+            max-height: 300px;
+            opacity: 1;
+            margin-top: 1rem;
+        }
+        .feature-card .toggle-icon {
+            transition: transform 0.3s ease;
+            display: inline-block;
+        }
+        .feature-card.expanded .toggle-icon {
+            transform: rotate(180deg);
+        }
+        .comparison-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.9rem;
+        }
+        .comparison-table th,
+        .comparison-table td {
+            padding: 0.75rem 1rem;
+            text-align: left;
+            border-bottom: 1px solid var(--border-subtle);
+            color: var(--text-primary);
+        }
+        .comparison-table th {
+            color: var(--text-muted);
+            font-weight: 500;
+            font-size: 0.8rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+        .comparison-table .check { color: #4ade80; }
+        .comparison-table .cross { color: var(--text-hint); }
+        .section-tag {
+            display: inline-block;
+            font-size: 0.85rem;
+            letter-spacing: 0.1em;
+            color: var(--text-secondary);
+            margin-bottom: 0.5rem;
+        }
+        .prompt-chips {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.75rem;
+            justify-content: center;
+        }
+        .prompt-chip {
+            background: var(--bg-primary);
+            border: 1px solid var(--border-light);
+            border-radius: 100px;
+            padding: 0.6rem 1.2rem;
+            color: var(--text-secondary);
+            font-size: 0.85rem;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .prompt-chip:hover {
+            background: rgba(74, 222, 128, 0.1);
+            border-color: rgba(74, 222, 128, 0.3);
+            color: #4ade80;
+        }
+        .hero-tagline {
+            font-size: 0.95rem;
+            color: var(--text-muted);
+            margin-top: 0.5rem;
+        }
+        .philosophy-text {
+            color: var(--text-secondary);
+            line-height: 1.8;
+        }
+        .philosophy-text strong {
+            color: var(--text-primary);
+        }
+        .detail-text {
+            color: var(--text-secondary);
+            font-size: 0.9rem;
+            line-height: 1.7;
+        }
+        .card-tagline {
+            color: var(--text-muted);
+            font-size: 0.85rem;
+            margin-top: 0.25rem;
+        }
+        .footer-text {
+            text-align: center;
+            color: var(--text-hint);
+            font-size: 0.8rem;
+        }
+        .subtitle-support {
+            font-size: 0.85rem;
+            color: var(--text-hint);
+            margin-top: 0.25rem;
+        }
+        @media (max-width: 768px) {
+            .hero {
+                padding-left: 12px !important;
+                padding-right: 12px !important;
+            }
+            .hero-title {
+                font-size: clamp(18px, 5vw, 22px) !important;
+            }
+            .hero-subtitle {
+                font-size: 15px !important;
+            }
+            .container {
+                padding-left: 8px !important;
+                padding-right: 8px !important;
+            }
+            .glass-button-lg {
+                padding: 8px 16px;
+                font-size: 0.85rem;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="page page-enter">
+        <!-- 导航栏 -->
+        <nav class="glass-nav">
+            <div class="container flex justify-between items-center">
+                <a href="/" class="navbar-brand">
+                    <span class="brand-icon">
+                        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M12 2L2 7l10 5 10-5-10-5z"/>
+                            <path d="M2 17l10 5 10-5"/>
+                            <path d="M2 12l10 5 10-5"/>
+                        </svg>
+                    </span>
+                    FeClaw
+                </a>
+                <div class="navbar-nav">
+                    {% if is_logged_in %}
+                    <a href="/dashboard" class="nav-link">控制台</a>
+                    <a href="/settings" class="nav-link">设置</a>
+                    {% else %}
+                    <a href="/login" class="nav-link">登录</a>
+                    {% endif %}
+                </div>
+            </div>
+        </nav>
+
+        <!-- Hero -->
+        <section class="section" style="padding-top:5rem;padding-bottom:2rem;">
+            <div class="container">
+                <div class="hero animate-slide-up" style="text-align:center;">
+                    <h1 class="hero-title" style="margin-bottom:0.25rem;">FeClaw - 你的 AI 学习搭档</h1>
+                    <p class="hero-subtitle" style="font-size:1.1rem;">
+                        让 AI 的浪潮，惠及每一个学生
+                    </p>
+                    <p class="hero-tagline">
+                        K-12 学习场景优化（目前主要针对高考）
+                    </p>
+                    <div class="flex justify-center gap-lg" style="margin-top:2rem;">
+                        {% if is_logged_in %}
+                        <a href="/dashboard" class="glass-button glass-button-primary glass-button-lg">进入控制台</a>
+                        {% else %}
+                        <a href="/login" class="glass-button glass-button-primary glass-button-lg">开始使用</a>
+                        <a href="/dashboard" class="glass-button glass-button-lg">了解更多</a>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- 设计哲学 -->
+        <section class="section">
+            <div class="container" style="max-width:720px;">
+                <div style="text-align:center;margin-bottom:2rem;">
+                    <span class="section-tag">🧠 设计哲学</span>
+                    <h2>为什么 FeClaw 这样做？</h2>
+                </div>
+                <div class="glass-card" style="padding:2rem;">
+                    <p class="philosophy-text" style="margin-bottom:1rem;">
+                        <strong>All in Text</strong> — 所有数据进入主模型前先文本化。查找处理都更高效。
+                    </p>
+                    <p class="philosophy-text">
+                        <strong>大小模型分步混排</strong> — 深度模型负责复杂推理，轻量模型处理简单任务。各司其职，复杂场景不降质，日常对话少等待。
+                    </p>
+                </div>
+            </div>
+        </section>
+
+        <!-- 核心特色 -->
+        <section class="section">
+            <div class="container" style="max-width:900px;">
+                <div style="text-align:center;margin-bottom:2rem;">
+                    <span class="section-tag">⭐ 核心特色</span>
+                    <h2>跟普通 AI 有什么不一样？</h2>
+                </div>
+                <div class="feature-grid">
+                    <div class="feature-card" onclick="this.classList.toggle('expanded')">
+                        <div style="display:flex;justify-content:space-between;align-items:center;">
+                            <span style="font-weight:600;font-size:1.05rem;color:var(--text-primary);">可持续记忆</span>
+                            <span class="toggle-icon" style="color:var(--text-muted);">▼</span>
+                        </div>
+                        <div class="card-tagline">不是每轮都从头开始</div>
+                        <div class="detail">
+                            <p class="detail-text">
+                                每次对话记录关键信息，每日自动提炼到长期记忆。
+                                下次回来，AI 还记得你上次的进度。不是堆历史消息，而是不断浓缩。
+                            </p>
+                        </div>
+                    </div>
+
+                    <div class="feature-card" onclick="this.classList.toggle('expanded')">
+                        <div style="display:flex;justify-content:space-between;align-items:center;">
+                            <span style="font-weight:600;font-size:1.05rem;color:var(--text-primary);">双搜索系统</span>
+                            <span class="toggle-icon" style="color:var(--text-muted);">▼</span>
+                        </div>
+                        <div class="card-tagline">知识库 + 联网，各取所长</div>
+                        <div class="detail">
+                            <p class="detail-text">
+                                查教材走内置知识库，查时事走多源联网搜索。
+                                自动路由，你只管问。
+                            </p>
+                        </div>
+                    </div>
+                </div></div>
+            </div>
+        </section>
+
+        <!-- 对比表格 -->
+        <section class="section">
+            <div class="container" style="max-width:800px;">
+                <div style="text-align:center;margin-bottom:2rem;">
+                    <span class="section-tag">🔥 对比</span>
+                    <h2>FeClaw vs 普通 AI</h2>
+                </div>
+                <div class="glass-card" style="padding:1.5rem;overflow-x:auto;">
+                    <table class="comparison-table">
+                        <thead>
+                            <tr>
+                                <th style="width:28%;"></th>
+                                <th style="width:36%;">普通 AI 聊天</th>
+                                <th style="width:36%;">FeClaw</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td style="font-weight:500;color:var(--text-primary);">核心架构</td>
+                                <td>单一模型，什么都是一次调完</td>
+                                <td><span class="check">✓</span> 大小模型分步混排，SmartRouter 自动分流</td>
+                            </tr>
+                            <tr>
+                                <td style="font-weight:500;color:var(--text-primary);">搜索</td>
+                                <td>联网搜什么算什么</td>
+                                <td><span class="check">✓</span> 教材知识库 + 三级联网搜索，双路互补</td>
+                            </tr>
+                            <tr>
+                                <td style="font-weight:500;color:var(--text-primary);">错题</td>
+                                <td><span class="cross">—</span> 手动拍照粘贴</td>
+                                <td><span class="check">✓</span> VLM 识别 + 自动比对，整理成文档</td>
+                            </tr>
+                            <tr>
+                                <td style="font-weight:500;color:var(--text-primary);">记忆</td>
+                                <td>每轮对话从零开始</td>
+                                <td><span class="check">✓</span> 跨会话持续记忆，日总结 + 长期提炼</td>
+                            </tr>
+                            <tr>
+                                <td style="font-weight:500;color:var(--text-primary);">工具</td>
+                                <td>纯聊天，最多读个文件</td>
+                                <td><span class="check">✓</span> 代码执行、HTML 渲染、文件管理、定时任务</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </section>
+
+        <!-- 试试这些 -->
+        <section class="section">
+            <div class="container" style="max-width:700px;">
+                <div style="text-align:center;margin-bottom:1.5rem;">
+                    <span class="section-tag">🚀 试试这些</span>
+                    <h2>不知道怎么开始？试试这些</h2>
+                </div>
+                <div class="prompt-chips">
+                    <span class="prompt-chip" onclick="navigateToChat('帮我整理一下这张试卷的错题')">📝 整理错题</span>
+                    <span class="prompt-chip" onclick="navigateToChat('用知识库查一下三角函数公式')">📚 查知识库</span>
+                    <span class="prompt-chip" onclick="navigateToChat('帮我搜索一下今年高考数学改革')">🔍 搜最新信息</span>
+                    <span class="prompt-chip" onclick="navigateToChat('生成一个函数图像的HTML演示')">🎨 概念可视化</span>
+                </div>
+                <p class="subtitle-support" style="margin-top:1.5rem;">
+                    需要先登录才能开始对话
+                </p>
+            </div>
+        </section>
+
+        <!-- Footer -->
+        <footer class="section" style="padding:2rem 0;">
+            <div class="container">
+                <p class="footer-text">FeClaw — MIT License</p>
+            </div>
+        </footer>
+    </div>
+
+    <script>
+        function navigateToChat(prompt) {
+            var token = localStorage.getItem("feclaw_jwt");
+            if (token) {
+                window.location.href = "/dashboard?prompt=" + encodeURIComponent(prompt);
+            } else {
+                window.location.href = "/login";
+            }
+        }
+    </script>
+</body>
+</html>

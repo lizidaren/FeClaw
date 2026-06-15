@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>FeClaw README</title>
+<style>
+body { background:#1e1e1e; color:#d4d4d4; font:14px/1.6 system-ui; max-width:900px; margin:0 auto; padding:20px; }
+pre { background:#252526; padding:12px; border-radius:6px; overflow:auto; }
+code { background:#333; padding:2px 5px; border-radius:3px; font-size:13px; }
+pre code { background:transparent; padding:0; }
+h1,h2,h3 { color:#569cd6; border-bottom:1px solid #333; padding-bottom:6px; }
+a { color:#4ec9b0; }
+table { border-collapse:collapse; width:100%; }
+th,td { border:1px solid #3c3c3c; padding:8px; text-align:left; }
+th { background:#252526; }
+blockquote { border-left:3px solid #569cd6; margin:0; padding:8px 16px; background:#252526; }
+</style></head>
+<body><div id="content"></div>
+<script src="/static/marked.min.js"></script>
+<script>
+fetch('/static/readme.md').then(r=>r.text()).then(md=>{
+    document.getElementById('content').innerHTML = marked.parse(md);
+});
+</script></body></html>

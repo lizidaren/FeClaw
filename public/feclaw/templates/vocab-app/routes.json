@@ -1,0 +1,17 @@
+{
+  "app_id": "vocab-app",
+  "version": "1.0",
+  "description": "英语词汇学习应用。查询单词、背单词学习、浏览词汇表。",
+  "routes": [
+    {"endpoint": "/", "type": "static", "file": "index.html", "middleware": []},
+    {"endpoint": "/learn", "type": "static", "file": "learn.html"},
+    {"endpoint": "/list", "type": "static", "file": "word-list.html"},
+    {"endpoint": "/api/query", "type": "ai", "subagent": {
+      "system_prompt": "你是英语词汇查询助手。用户发送一个单词，你返回结构化 JSON。格式: {\"word\": string, \"pronunciation\": string, \"definitions\": [{\"part_of_speech\": string, \"meaning\": string, \"examples\": [string]}], \"synonyms\": [string]}",
+      "tools": ["web_search"],
+      "tool_filter": {"allow": ["web_search"]},
+      "max_turns": 2,
+      "timeout": 30
+    }}
+  ]
+}

@@ -1,0 +1,872 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dashboard - FeClaw</title>
+    <!-- 液态玻璃风格 CSS -->
+    <link rel="stylesheet" href="/static/css/base.css">
+    <link rel="stylesheet" href="/static/css/glass.css">
+    <link rel="stylesheet" href="/static/css/components.css">
+    <link rel="stylesheet" href="/static/css/layouts.css">
+    <link rel="stylesheet" href="/static/css/animations.css">
+    <link rel="stylesheet" href="/static/css/responsive.css">
+    <link rel="stylesheet" href="/static/css/themes.css">
+    <!-- Modal 样式 -->
+    <style>
+        .modal-overlay {
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0,0,0,0.6);
+            backdrop-filter: blur(4px);
+            display: none;
+            align-items: center;
+            justify-content: center;
+            z-index: 10000;
+        }
+        .modal-card {
+            width: 420px;
+            max-width: 90vw;
+            padding: 0;
+            overflow: hidden;
+        }
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 20px 24px 0;
+        }
+        .modal-header h3 {
+            margin: 0;
+            font-size: 1.2rem;
+        }
+        .modal-close {
+            background: none;
+            border: none;
+            color: var(--text-muted, #999);
+            font-size: 1.2rem;
+            cursor: pointer;
+            padding: 4px 8px;
+            border-radius: 4px;
+        }
+        .modal-close:hover {
+            color: var(--text-primary, #fff);
+            background: rgba(255,255,255,0.1);
+        }
+        .modal-body {
+            padding: 20px 24px;
+        }
+        .modal-footer {
+            padding: 16px 24px;
+            display: flex;
+            justify-content: flex-end;
+            gap: 12px;
+            border-top: 1px solid rgba(255,255,255,0.08);
+        }
+        .form-group {
+            margin-bottom: 12px;
+        }
+        .form-label {
+            display: block;
+            margin-bottom: 6px;
+            font-size: var(--text-sm, 0.875rem);
+            color: var(--text-secondary, #ccc);
+        }
+        .text-danger {
+            color: #ff6b6b;
+            font-size: var(--text-sm, 0.875rem);
+            padding: 8px 12px;
+            background: rgba(255,107,107,0.1);
+            border-radius: 8px;
+        }
+        .success-icon {
+            width: 56px;
+            height: 56px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, #4ade80, #22d3ee);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.5rem;
+            color: #fff;
+            margin: 0 auto 16px;
+        }
+        .info-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin: 8px 0;
+            padding: 8px 12px;
+            background: rgba(255,255,255,0.05);
+            border-radius: 8px;
+        }
+        .info-label {
+            font-size: var(--text-sm, 0.875rem);
+            color: var(--text-muted, #999);
+            white-space: nowrap;
+        }
+        .info-value {
+            font-family: monospace;
+            font-size: 1rem;
+            color: var(--accent-blue, #60a5fa);
+            word-break: break-all;
+        }
+    </style>
+    <!-- 认证检查（必须在页面渲染前执行） -->
+    <script src="/static/js/auth.js"></script>
+    <script>
+        // 阻塞式认证检查，未登录直接跳转
+        (async function() {
+            const loggedIn = await Auth.checkAuthBeforeRender();
+            if (!loggedIn) {
+                // 阻止页面渲染，已自动跳转到登录页
+                document.write('<div style="display:flex;align-items:center;justify-content:center;height:100vh;background:#1a1a2e;color:#fff;font-family:sans-serif;"><p>正在跳转到登录页...</p></div>');
+            }
+        })();
+    </script>
+</head>
+<body>
+     <!-- 为横幅留出空间 -->
+    <div class="page page-enter">
+        <!-- 导航栏 -->
+        <nav class="glass-nav">
+            <div class="container flex justify-between items-center">
+                <a href="/" class="navbar-brand">
+                    <span class="brand-icon">
+                        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M12 2L2 7l10 5 10-5-10-5z"/>
+                            <path d="M2 17l10 5 10-5"/>
+                            <path d="M2 12l10 5 10-5"/>
+                        </svg>
+                    </span>
+                    FeClaw
+                </a>
+                <div class="navbar-nav">
+                    <a href="/dashboard" class="nav-link active">控制台</a>
+                    <a href="/settings" class="nav-link">设置</a>
+                </div>
+            </div>
+        </nav>
+
+        <!-- 主内容区 -->
+        <section class="section">
+            <div class="container">
+                <!-- 用户欢迎 -->
+                <div class="glass-card mb-lg animate-slide-up">
+                    <div class="flex justify-between items-center">
+                        <div class="flex items-center gap-lg">
+                            <div class="avatar avatar-lg" id="avatar-initials">U</div>
+                            <div>
+                                <h2 class="mb-sm"><span id="welcome-username">用户</span></h2>
+                                <p class="text-muted">今天是个好日子，开始新的 AI 旅程吧</p>
+                            </div>
+                        </div>
+                        <a href="#" onclick="openCreateModal();return false;" class="glass-button glass-button-primary">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <line x1="12" y1="5" x2="12" y2="19"/>
+                                <line x1="5" y1="12" x2="19" y2="12"/>
+                            </svg>
+                            创建新 Agent
+                        </a>
+                    </div>
+                </div>
+
+                <!-- 统计卡片 -->
+                <div class="grid grid-cols-1 gap-lg mb-lg stagger-children">
+                    <div class="glass-card hover-lift">
+                        <div class="flex items-center gap-md mb-md">
+                            <div class="glass-badge glass-badge-blue">
+                                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+                                </svg>
+                            </div>
+                            <span class="text-muted">总对话</span>
+                        </div>
+                        <p id="stat-conversations" class="text-primary text-3xl font-bold">--</p>
+                        <p id="stat-conversations-hint" class="text-hint mt-md" style="font-size: var(--text-xs);">加载中...</p>
+                    </div>
+
+                    
+                </div>
+
+                <!-- Agent 列表 -->
+                <div class="glass-panel mb-lg">
+                    <div class="flex justify-between items-center mb-lg">
+                        <h3>我的 Agent</h3>
+                        
+                    </div>
+
+                    <div class="grid grid-auto-fit gap-md" id="agent-cards">
+                        <p class="text-muted" style="grid-column:1/-1;text-align:center;padding:2rem;">正在加载 Agent...</p>
+
+                        <!-- 创建新 Agent 卡片 -->
+                        <div class="glass-card glass-card-transparent hover-lift flex items-center justify-center min-h-150" style="min-height: 150px; cursor: pointer;" onclick="openCreateModal();">
+                            <div class="flex flex-col items-center text-center">
+                                <div class="glass-badge mb-md" style="width: 48px; height: 48px; display: flex; align-items: center; justify-content: center;">
+                                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <line x1="12" y1="5" x2="12" y2="19"/>
+                                        <line x1="5" y1="12" x2="19" y2="12"/>
+                                    </svg>
+                                </div>
+                                <p class="text-secondary">创建新 Agent</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+
+            </div>
+        </section>
+
+        <!-- Footer -->
+        <footer class="footer">
+            <div class="container text-center">
+                <p class="text-muted">
+                    FeClaw
+                </p>
+            </div>
+        </footer>
+    </div>
+
+    <!-- 创建 Agent Modal -->
+    <div id="createAgentModal" class="modal-overlay">
+        <div class="glass-card modal-card">
+            <div class="modal-header">
+                <h3>创建新 Agent</h3>
+                <button class="modal-close" onclick="closeCreateModal()">✕</button>
+            </div>
+            <div class="modal-body">
+                <!-- 创建表单 -->
+                <div id="createStep-form">
+                    <div class="form-group">
+                        <label class="form-label">Agent 名称</label>
+                        <input type="text" id="agentNameInput" class="glass-input" placeholder="输入 Agent 名称..." maxlength="50">
+                    </div>
+                    <div id="createError" class="text-danger" style="display:none;"></div>
+                </div>
+                <!-- 创建成功 -->
+                <div id="createStep-success" style="display:none;">
+                    <div class="text-center">
+                        <div class="success-icon">✓</div>
+                        <h4 style="margin:0 0 8px;">Agent 创建成功！</h4>
+                        <p class="text-muted" style="margin:0 0 16px;">接下来配置 Agent 的人格与指令</p>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="glass-button" onclick="closeCreateModal()" id="createCancelBtn">取消</button>
+                <button class="glass-button glass-button-primary" onclick="submitCreateAgent()" id="createSubmitBtn">创建</button>
+                <button class="glass-button glass-button-primary" id="createDoneBtn" style="display:none;">继续配置</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // === Create Agent Modal ===
+        const createModalEl = document.getElementById('createAgentModal');
+
+        function openCreateModal() {
+            // Reset form to initial state
+            document.getElementById('createStep-form').style.display = 'block';
+            document.getElementById('createStep-success').style.display = 'none';
+            document.getElementById('createError').style.display = 'none';
+            document.getElementById('createError').textContent = '';
+            document.getElementById('agentNameInput').value = '';
+            document.getElementById('createSubmitBtn').style.display = '';
+            document.getElementById('createSubmitBtn').disabled = false;
+            document.getElementById('createSubmitBtn').textContent = '创建';
+            document.getElementById('createCancelBtn').style.display = '';
+            document.getElementById('createDoneBtn').style.display = 'none';
+            createModalEl.style.display = 'flex';
+            document.getElementById('agentNameInput').focus();
+        }
+
+        function closeCreateModal() {
+            createModalEl.style.display = 'none';
+            loadAgents(); // Refresh agent list
+        }
+
+        let _createAgentRef = null;  // preserved agent reference for init retry
+
+        async function submitCreateAgent() {
+            const name = document.getElementById('agentNameInput').value.trim();
+            const submitBtn = document.getElementById('createSubmitBtn');
+            const errorEl = document.getElementById('createError');
+
+            submitBtn.disabled = true;
+            submitBtn.textContent = '创建中...';
+            errorEl.style.display = 'none';
+
+            const token = localStorage.getItem('feclaw_jwt');
+            if (!token) { errorEl.textContent = '请先登录'; errorEl.style.display = 'block'; submitBtn.disabled = false; submitBtn.textContent = '创建'; return; }
+
+            try {
+                // Step 1: Create agent
+                const createResp = await fetch('/api/console/agents', {
+                    method: 'POST',
+                    headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name: name })
+                });
+                const createData = await createResp.json();
+                if (!createResp.ok) {
+                    throw new Error(createData.detail || '创建失败');
+                }
+                const agent = createData.agent;
+                _createAgentRef = agent;
+
+                // Step 2: Initialize agent
+                await doInitializeAgent(agent);
+
+            } catch(e) {
+                errorEl.textContent = e.message;
+                errorEl.style.display = 'block';
+                submitBtn.disabled = false;
+                submitBtn.textContent = '创建';
+                // If agent was created but init failed, offer retry
+                if (_createAgentRef && e.message.includes('初始化')) {
+                    submitBtn.textContent = '重试初始化';
+                    submitBtn.onclick = async function() {
+                        submitBtn.disabled = true;
+                        submitBtn.textContent = '初始化中...';
+                        errorEl.style.display = 'none';
+                        try {
+                            await doInitializeAgent(_createAgentRef);
+                        } catch(retryErr) {
+                            errorEl.textContent = retryErr.message;
+                            errorEl.style.display = 'block';
+                            submitBtn.disabled = false;
+                            submitBtn.textContent = '重试初始化';
+                        }
+                    };
+                }
+            }
+        }
+
+        async function doInitializeAgent(agent) {
+            const token = localStorage.getItem('feclaw_jwt');
+            const initResp = await fetch(`/api/console/agents/${agent.id}/initialize`, {
+                method: 'POST',
+                headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+                body: '{}'
+            });
+            const initData = await initResp.json();
+            if (!initResp.ok) {
+                throw new Error(initData.detail || '初始化失败');
+            }
+
+            // Show success and redirect to configure
+            document.getElementById('createStep-form').style.display = 'none';
+            document.getElementById('createStep-success').style.display = 'block';
+            document.getElementById('createSubmitBtn').style.display = 'none';
+            document.getElementById('createCancelBtn').style.display = 'none';
+            const doneBtn = document.getElementById('createDoneBtn');
+            doneBtn.style.display = '';
+            doneBtn.onclick = function() {
+                window.location.href = `/agent/${agent.hash}/configure`;
+            };
+            // Auto-redirect to configure page
+            setTimeout(() => {
+                window.location.href = `/agent/${agent.hash}/configure`;
+            }, 1500);
+        }
+
+        async function loadDashboard() {
+            const token = localStorage.getItem('feclaw_jwt');
+            const hintEls = {
+                conversations: document.getElementById('stat-conversations-hint'),
+                tokens: document.getElementById('stat-tokens-hint'),
+                agents: document.getElementById('stat-agents-hint'),
+                storage: document.getElementById('stat-storage-hint')
+            };
+            try {
+                const resp = await fetch('/api/console/status', {
+                    headers: { 'Authorization': `Bearer ${token}` }
+                });
+                const data = await resp.json();
+                document.getElementById('stat-conversations').textContent = data.conversations ?? '--';
+                document.getElementById('stat-tokens').textContent = data.tokens ?? '—';
+                document.getElementById('stat-agents').textContent = data.agents ?? '--';
+                document.getElementById('stat-storage').textContent = data.storage ?? '--';
+                // Populate hints from API if available
+                if (data.conversations_monthly) hintEls.conversations.textContent = '本月: ' + data.conversations_monthly;
+                else hintEls.conversations.textContent = '';
+                if (data.tokens_monthly) hintEls.tokens.textContent = '本月: ' + data.tokens_monthly;
+                else hintEls.tokens.textContent = '';
+                if (data.agents_detail) hintEls.agents.textContent = data.agents_detail;
+                else hintEls.agents.textContent = '';
+                if (data.storage_detail) hintEls.storage.textContent = data.storage_detail;
+                else hintEls.storage.textContent = '';
+            } catch(e) {
+                console.log('Dashboard data unavailable');
+                // Clear hints on failure
+                Object.values(hintEls).forEach(el => { if (el) el.textContent = ''; });
+            }
+        }
+        loadDashboard();
+
+        // 从 JWT 加载用户名
+        (function() {
+            var token = localStorage.getItem("feclaw_jwt");
+            if (token) {
+                try {
+                    var payload = JSON.parse(atob(token.split(".")[1]));
+                    var name = payload.username || payload.name || payload.sub || "用户";
+                    var el = document.getElementById("welcome-username");
+                    if (el) el.textContent = name;
+                    var avatar = document.getElementById("avatar-initials");
+                    if (avatar) avatar.textContent = name.charAt(0).toUpperCase();
+                } catch(e) {}
+            }
+        })();
+
+
+        // 从 JWT 加载用户名
+        (function() {
+            var token = localStorage.getItem("feclaw_jwt");
+            if (token) {
+                try {
+                    var payload = JSON.parse(atob(token.split(".")[1]));
+                    var name = payload.username || payload.name || payload.sub || "用户";
+                    var el = document.getElementById("welcome-username");
+                    if (el) el.textContent = name;
+                    var avatar = document.getElementById("avatar-initials");
+                    if (avatar) avatar.textContent = name.charAt(0).toUpperCase();
+                } catch(e) {}
+            }
+        })();
+
+
+        async function loadAgents() {
+            const token = localStorage.getItem('feclaw_jwt');
+            const container = document.getElementById('agent-cards');
+            try {
+                const resp = await fetch('/api/console/agents', {
+                    headers: { 'Authorization': `Bearer ${token}` }
+                });
+                const data = await resp.json();
+                const agents = data.agents || [];
+                // Remove loading text, keep create-new card
+                const createCard = container.querySelector('.glass-card-transparent');
+                container.innerHTML = '';
+                if (agents.length === 0) {
+                    container.innerHTML = '<p class="text-muted" style="grid-column:1/-1;text-align:center;padding:2rem;">暂无 Agent，点击下方创建</p>';
+                }
+                agents.forEach(agent => {
+                    const card = document.createElement('div');
+                    card.className = 'glass-card hover-lift';
+                    const initials = (agent.name || 'AG').substring(0, 2).toUpperCase();
+                    const statusClass = agent.status === 'initialized' && agent.configured_at ? 'glass-badge-green' : '';
+                    const statusText = agent.status === 'pending' ? '待初始化' : (agent.configured_at ? '运行中' : '待配置');
+                    card.innerHTML = `
+                        <div class="flex justify-between items-start mb-md">
+                            <div class="flex items-center gap-md">
+                                <div class="avatar avatar-sm bg-gradient-blue-purple">${initials}</div>
+                                <div>
+                                    <h4 class="text-primary mb-xs">${escapeHtml(agent.name || '未命名')}</h4>
+                                    <p class="text-muted" style="font-size: var(--text-xs);">${agent.hash || ''}</p>
+                                </div>
+                            </div>
+                            <div class="glass-badge ${statusClass}">${statusText}</div>
+                        </div>
+                        <p class="text-secondary mb-md" style="font-size: var(--text-sm);">${escapeHtml(agent.description || '')}</p>
+                        <div class="flex justify-between items-center">
+                            <div class="flex gap-sm">
+                                <span class="tag">Agent</span>
+                            </div>
+                            <div class="flex gap-sm">
+                                <a href="/chat?agent=${agent.id}" class="glass-button glass-button-sm">
+                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+                                    </svg>
+                                    对话
+                                </a>
+                                <a href="/agent/${agent.hash}/settings" class="glass-button btn-icon btn-icon-sm" title="配置">
+                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <circle cx="12" cy="12" r="1"/>
+                                        <circle cx="19" cy="12" r="1"/>
+                                        <circle cx="5" cy="12" r="1"/>
+                                    </svg>
+                                </a>
+                            </div>
+                        </div>`;
+                    container.appendChild(card);
+                });
+                if (createCard) container.appendChild(createCard);
+            } catch(e) {
+                container.innerHTML = '<p class="text-muted" style="grid-column:1/-1;text-align:center;padding:2rem;">Agent 数据加载失败</p>';
+            }
+        }
+
+        async function loadConversations() {
+            const token = localStorage.getItem('feclaw_jwt');
+            const container = document.getElementById('recent-conversations');
+            try {
+                const resp = await fetch('/api/chat/sessions', {
+                    headers: { 'Authorization': `Bearer ${token}` }
+                });
+                const sessions = await resp.json();
+                container.innerHTML = '';
+                if (!sessions || sessions.length === 0) {
+                    container.innerHTML = '<p class="text-muted" style="text-align:center;padding:2rem;">暂无对话记录</p>';
+                    return;
+                }
+                sessions.slice(0, 5).forEach(s => {
+                    const item = document.createElement('a');
+                    item.href = `/chat?session=${s.session_id}`;
+                    item.className = 'glass-card glass-card-sm hover-lift flex justify-between items-center';
+                    const initials = (s.topic || 'CH').substring(0, 2).toUpperCase();
+                    const updated = s.updated_at ? new Date(s.updated_at).toLocaleDateString('zh-CN') : '';
+                    item.innerHTML = `
+                        <div class="flex items-center gap-md">
+                            <div class="avatar avatar-sm">${initials}</div>
+                            <div>
+                                <p class="text-primary">${escapeHtml((s.last_message || s.topic || '对话').substring(0, 30))}</p>
+                                <p class="text-muted" style="font-size: var(--text-xs);">${updated}</p>
+                            </div>
+                        </div>
+                        <span class="glass-badge glass-badge-blue">${s.message_count || 0} 条</span>`;
+                    container.appendChild(item);
+                });
+            } catch(e) {
+                container.innerHTML = '<p class="text-muted" style="text-align:center;padding:2rem;">对话数据加载失败</p>';
+            }
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        loadAgents();
+        loadConversations();
+    </script>
+</body>
+</html            </div>
+        </section>
+
+        <!-- Footer -->
+        <footer class="footer">
+            <div class="container text-center">
+                <p class="text-muted">
+                    FeClaw
+                </p>
+            </div>
+        </footer>
+    </div>
+
+    <!-- 创建 Agent Modal -->
+    <div id="createAgentModal" class="modal-overlay">
+        <div class="glass-card modal-card">
+            <div class="modal-header">
+                <h3>创建新 Agent</h3>
+                <button class="modal-close" onclick="closeCreateModal()">✕</button>
+            </div>
+            <div class="modal-body">
+                <!-- 创建表单 -->
+                <div id="createStep-form">
+                    <div class="form-group">
+                        <label class="form-label">Agent 名称</label>
+                        <input type="text" id="agentNameInput" class="glass-input" placeholder="输入 Agent 名称..." maxlength="50">
+                    </div>
+                    <div id="createError" class="text-danger" style="display:none;"></div>
+                </div>
+                <!-- 创建成功 -->
+                <div id="createStep-success" style="display:none;">
+                    <div class="text-center">
+                        <div class="success-icon">✓</div>
+                        <h4 style="margin:0 0 8px;">Agent 创建成功！</h4>
+                        <p class="text-muted" style="margin:0 0 16px;">接下来配置 Agent 的人格与指令</p>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="glass-button" onclick="closeCreateModal()" id="createCancelBtn">取消</button>
+                <button class="glass-button glass-button-primary" onclick="submitCreateAgent()" id="createSubmitBtn">创建</button>
+                <button class="glass-button glass-button-primary" id="createDoneBtn" style="display:none;">继续配置</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // === Create Agent Modal ===
+        const createModalEl = document.getElementById('createAgentModal');
+
+        function openCreateModal() {
+            // Reset form to initial state
+            document.getElementById('createStep-form').style.display = 'block';
+            document.getElementById('createStep-success').style.display = 'none';
+            document.getElementById('createError').style.display = 'none';
+            document.getElementById('createError').textContent = '';
+            document.getElementById('agentNameInput').value = '';
+            document.getElementById('createSubmitBtn').style.display = '';
+            document.getElementById('createSubmitBtn').disabled = false;
+            document.getElementById('createSubmitBtn').textContent = '创建';
+            document.getElementById('createCancelBtn').style.display = '';
+            document.getElementById('createDoneBtn').style.display = 'none';
+            createModalEl.style.display = 'flex';
+            document.getElementById('agentNameInput').focus();
+        }
+
+        function closeCreateModal() {
+            createModalEl.style.display = 'none';
+            loadAgents(); // Refresh agent list
+        }
+
+        let _createAgentRef = null;  // preserved agent reference for init retry
+
+        async function submitCreateAgent() {
+            const name = document.getElementById('agentNameInput').value.trim();
+            const submitBtn = document.getElementById('createSubmitBtn');
+            const errorEl = document.getElementById('createError');
+
+            submitBtn.disabled = true;
+            submitBtn.textContent = '创建中...';
+            errorEl.style.display = 'none';
+
+            const token = localStorage.getItem('feclaw_jwt');
+            if (!token) { errorEl.textContent = '请先登录'; errorEl.style.display = 'block'; submitBtn.disabled = false; submitBtn.textContent = '创建'; return; }
+
+            try {
+                // Step 1: Create agent
+                const createResp = await fetch('/api/console/agents', {
+                    method: 'POST',
+                    headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name: name })
+                });
+                const createData = await createResp.json();
+                if (!createResp.ok) {
+                    throw new Error(createData.detail || '创建失败');
+                }
+                const agent = createData.agent;
+                _createAgentRef = agent;
+
+                // Step 2: Initialize agent
+                await doInitializeAgent(agent);
+
+            } catch(e) {
+                errorEl.textContent = e.message;
+                errorEl.style.display = 'block';
+                submitBtn.disabled = false;
+                submitBtn.textContent = '创建';
+                // If agent was created but init failed, offer retry
+                if (_createAgentRef && e.message.includes('初始化')) {
+                    submitBtn.textContent = '重试初始化';
+                    submitBtn.onclick = async function() {
+                        submitBtn.disabled = true;
+                        submitBtn.textContent = '初始化中...';
+                        errorEl.style.display = 'none';
+                        try {
+                            await doInitializeAgent(_createAgentRef);
+                        } catch(retryErr) {
+                            errorEl.textContent = retryErr.message;
+                            errorEl.style.display = 'block';
+                            submitBtn.disabled = false;
+                            submitBtn.textContent = '重试初始化';
+                        }
+                    };
+                }
+            }
+        }
+
+        async function doInitializeAgent(agent) {
+            const token = localStorage.getItem('feclaw_jwt');
+            const initResp = await fetch(`/api/console/agents/${agent.id}/initialize`, {
+                method: 'POST',
+                headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+                body: '{}'
+            });
+            const initData = await initResp.json();
+            if (!initResp.ok) {
+                throw new Error(initData.detail || '初始化失败');
+            }
+
+            // Show success and redirect to configure
+            document.getElementById('createStep-form').style.display = 'none';
+            document.getElementById('createStep-success').style.display = 'block';
+            document.getElementById('createSubmitBtn').style.display = 'none';
+            document.getElementById('createCancelBtn').style.display = 'none';
+            const doneBtn = document.getElementById('createDoneBtn');
+            doneBtn.style.display = '';
+            doneBtn.onclick = function() {
+                window.location.href = `/agent/${agent.hash}/configure`;
+            };
+            // Auto-redirect to configure page
+            setTimeout(() => {
+                window.location.href = `/agent/${agent.hash}/configure`;
+            }, 1500);
+        }
+
+        async function loadDashboard() {
+            const token = localStorage.getItem('feclaw_jwt');
+            const hintEls = {
+                conversations: document.getElementById('stat-conversations-hint'),
+                tokens: document.getElementById('stat-tokens-hint'),
+                agents: document.getElementById('stat-agents-hint'),
+                storage: document.getElementById('stat-storage-hint')
+            };
+            try {
+                const resp = await fetch('/api/console/status', {
+                    headers: { 'Authorization': `Bearer ${token}` }
+                });
+                const data = await resp.json();
+                document.getElementById('stat-conversations').textContent = data.conversations ?? '--';
+                document.getElementById('stat-tokens').textContent = data.tokens ?? '—';
+                document.getElementById('stat-agents').textContent = data.agents ?? '--';
+                document.getElementById('stat-storage').textContent = data.storage ?? '--';
+                // Populate hints from API if available
+                if (data.conversations_monthly) hintEls.conversations.textContent = '本月: ' + data.conversations_monthly;
+                else hintEls.conversations.textContent = '';
+                if (data.tokens_monthly) hintEls.tokens.textContent = '本月: ' + data.tokens_monthly;
+                else hintEls.tokens.textContent = '';
+                if (data.agents_detail) hintEls.agents.textContent = data.agents_detail;
+                else hintEls.agents.textContent = '';
+                if (data.storage_detail) hintEls.storage.textContent = data.storage_detail;
+                else hintEls.storage.textContent = '';
+            } catch(e) {
+                console.log('Dashboard data unavailable');
+                // Clear hints on failure
+                Object.values(hintEls).forEach(el => { if (el) el.textContent = ''; });
+            }
+        }
+        loadDashboard();
+
+        // 从 JWT 加载用户名
+        (function() {
+            var token = localStorage.getItem("feclaw_jwt");
+            if (token) {
+                try {
+                    var payload = JSON.parse(atob(token.split(".")[1]));
+                    var name = payload.username || payload.name || payload.sub || "用户";
+                    var el = document.getElementById("welcome-username");
+                    if (el) el.textContent = name;
+                    var avatar = document.getElementById("avatar-initials");
+                    if (avatar) avatar.textContent = name.charAt(0).toUpperCase();
+                } catch(e) {}
+            }
+        })();
+
+
+        // 从 JWT 加载用户名
+        (function() {
+            var token = localStorage.getItem("feclaw_jwt");
+            if (token) {
+                try {
+                    var payload = JSON.parse(atob(token.split(".")[1]));
+                    var name = payload.username || payload.name || payload.sub || "用户";
+                    var el = document.getElementById("welcome-username");
+                    if (el) el.textContent = name;
+                    var avatar = document.getElementById("avatar-initials");
+                    if (avatar) avatar.textContent = name.charAt(0).toUpperCase();
+                } catch(e) {}
+            }
+        })();
+
+
+        async function loadAgents() {
+            const token = localStorage.getItem('feclaw_jwt');
+            const container = document.getElementById('agent-cards');
+            try {
+                const resp = await fetch('/api/console/agents', {
+                    headers: { 'Authorization': `Bearer ${token}` }
+                });
+                const data = await resp.json();
+                const agents = data.agents || [];
+                // Remove loading text, keep create-new card
+                const createCard = container.querySelector('.glass-card-transparent');
+                container.innerHTML = '';
+                if (agents.length === 0) {
+                    container.innerHTML = '<p class="text-muted" style="grid-column:1/-1;text-align:center;padding:2rem;">暂无 Agent，点击下方创建</p>';
+                }
+                agents.forEach(agent => {
+                    const card = document.createElement('div');
+                    card.className = 'glass-card hover-lift';
+                    const initials = (agent.name || 'AG').substring(0, 2).toUpperCase();
+                    const statusClass = agent.status === 'initialized' && agent.configured_at ? 'glass-badge-green' : '';
+                    const statusText = agent.status === 'pending' ? '待初始化' : (agent.configured_at ? '运行中' : '待配置');
+                    card.innerHTML = `
+                        <div class="flex justify-between items-start mb-md">
+                            <div class="flex items-center gap-md">
+                                <div class="avatar avatar-sm bg-gradient-blue-purple">${initials}</div>
+                                <div>
+                                    <h4 class="text-primary mb-xs">${escapeHtml(agent.name || '未命名')}</h4>
+                                    <p class="text-muted" style="font-size: var(--text-xs);">${agent.hash || ''}</p>
+                                </div>
+                            </div>
+                            <div class="glass-badge ${statusClass}">${statusText}</div>
+                        </div>
+                        <p class="text-secondary mb-md" style="font-size: var(--text-sm);">${escapeHtml(agent.description || '')}</p>
+                        <div class="flex justify-between items-center">
+                            <div class="flex gap-sm">
+                                <span class="tag">Agent</span>
+                            </div>
+                            <div class="flex gap-sm">
+                                <a href="/chat?agent=${agent.id}" class="glass-button glass-button-sm">
+                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+                                    </svg>
+                                    对话
+                                </a>
+                                <a href="/agent/${agent.hash}/settings" class="glass-button btn-icon btn-icon-sm" title="配置">
+                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <circle cx="12" cy="12" r="1"/>
+                                        <circle cx="19" cy="12" r="1"/>
+                                        <circle cx="5" cy="12" r="1"/>
+                                    </svg>
+                                </a>
+                            </div>
+                        </div>`;
+                    container.appendChild(card);
+                });
+                if (createCard) container.appendChild(createCard);
+            } catch(e) {
+                container.innerHTML = '<p class="text-muted" style="grid-column:1/-1;text-align:center;padding:2rem;">Agent 数据加载失败</p>';
+            }
+        }
+
+        async function loadConversations() {
+            const token = localStorage.getItem('feclaw_jwt');
+            const container = document.getElementById('recent-conversations');
+            try {
+                const resp = await fetch('/api/chat/sessions', {
+                    headers: { 'Authorization': `Bearer ${token}` }
+                });
+                const sessions = await resp.json();
+                container.innerHTML = '';
+                if (!sessions || sessions.length === 0) {
+                    container.innerHTML = '<p class="text-muted" style="text-align:center;padding:2rem;">暂无对话记录</p>';
+                    return;
+                }
+                sessions.slice(0, 5).forEach(s => {
+                    const item = document.createElement('a');
+                    item.href = `/chat?session=${s.session_id}`;
+                    item.className = 'glass-card glass-card-sm hover-lift flex justify-between items-center';
+                    const initials = (s.topic || 'CH').substring(0, 2).toUpperCase();
+                    const updated = s.updated_at ? new Date(s.updated_at).toLocaleDateString('zh-CN') : '';
+                    item.innerHTML = `
+                        <div class="flex items-center gap-md">
+                            <div class="avatar avatar-sm">${initials}</div>
+                            <div>
+                                <p class="text-primary">${escapeHtml((s.last_message || s.topic || '对话').substring(0, 30))}</p>
+                                <p class="text-muted" style="font-size: var(--text-xs);">${updated}</p>
+                            </div>
+                        </div>
+                        <span class="glass-badge glass-badge-blue">${s.message_count || 0} 条</span>`;
+                    container.appendChild(item);
+                });
+            } catch(e) {
+                container.innerHTML = '<p class="text-muted" style="text-align:center;padding:2rem;">对话数据加载失败</p>';
+            }
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        loadAgents();
+        loadConversations();
+    </script>
+</body>
+</html>

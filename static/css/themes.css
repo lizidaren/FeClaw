@@ -1,0 +1,214 @@
+/* ============================================
+ * Themes CSS - 主题样式
+ * 包含：深色主题、浅色主题、主题切换
+ * ============================================ */
+
+/* 默认深色主题 (已在 base.css 中定义) */
+/* 无需额外定义，变量已设置 */
+
+/* 浅色主题 */
+[data-theme="light"] {
+    --bg-gradient-start: #f0f4f8;
+    --bg-gradient-end: #e2e8f0;
+    --bg-primary: rgba(255, 255, 255, 0.7);
+    --bg-secondary: rgba(255, 255, 255, 0.85);
+    --bg-hover: rgba(255, 255, 255, 0.95);
+
+    --text-primary: #1a1a2e;
+    --text-secondary: rgba(26, 26, 46, 0.8);
+    --text-muted: rgba(26, 26, 46, 0.6);
+    --text-hint: rgba(26, 26, 46, 0.4);
+
+    --border-subtle: rgba(26, 26, 46, 0.1);
+    --border-light: rgba(26, 26, 46, 0.15);
+    --border-strong: rgba(26, 26, 46, 0.2);
+
+    --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.05);
+    --shadow-md: 0 8px 32px rgba(0, 0, 0, 0.1);
+    --shadow-lg: 0 16px 48px rgba(0, 0, 0, 0.15);
+    --shadow-glow: 0 0 20px rgba(0, 217, 255, 0.2);
+}
+
+[data-theme="light"] body {
+    background: linear-gradient(135deg, var(--bg-gradient-start), var(--bg-gradient-end));
+}
+
+[data-theme="light"] .glass-card::before {
+    background: linear-gradient(90deg, transparent, rgba(26, 26, 46, 0.1), transparent);
+}
+
+/* 高对比度主题 */
+[data-theme="high-contrast"] {
+    --bg-gradient-start: #000000;
+    --bg-gradient-end: #0a0a0a;
+    --bg-primary: rgba(255, 255, 255, 0.1);
+    --bg-secondary: rgba(255, 255, 255, 0.15);
+    --bg-hover: rgba(255, 255, 255, 0.2);
+
+    --text-primary: #ffffff;
+    --text-secondary: rgba(255, 255, 255, 0.9);
+    --text-muted: rgba(255, 255, 255, 0.8);
+    --text-hint: rgba(255, 255, 255, 0.7);
+
+    --border-subtle: rgba(255, 255, 255, 0.3);
+    --border-light: rgba(255, 255, 255, 0.4);
+    --border-strong: rgba(255, 255, 255, 0.5);
+
+    --accent-blue: #00ffff;
+    --accent-red: #ff0000;
+    --accent-green: #00ff00;
+}
+
+/* 蓝色强调主题 */
+[data-theme="blue"] {
+    --bg-gradient-start: #0a1929;
+    --bg-gradient-end: #0d2137;
+    --accent-blue: #4fc3f7;
+}
+
+/* 紫色强调主题 */
+[data-theme="purple"] {
+    --bg-gradient-start: #1a1a2e;
+    --bg-gradient-end: #2d1b4e;
+    --accent-blue: #a78bfa;
+}
+
+/* 绿色强调主题 */
+[data-theme="green"] {
+    --bg-gradient-start: #0d1f0d;
+    --bg-gradient-end: #1a2f1a;
+    --accent-blue: #4ade80;
+}
+
+/* 主题切换按钮 */
+.theme-toggle {
+    position: fixed;
+    bottom: var(--spacing-lg);
+    right: var(--spacing-lg);
+    z-index: 1000;
+    background: var(--bg-secondary);
+    backdrop-filter: blur(var(--glass-blur));
+    -webkit-backdrop-filter: blur(var(--glass-blur));
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-full);
+    padding: var(--spacing-md);
+    cursor: pointer;
+    transition: all var(--transition-normal);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 48px;
+    height: 48px;
+}
+
+.theme-toggle:hover {
+    background: var(--bg-hover);
+    transform: scale(1.1);
+}
+
+.theme-toggle svg {
+    width: 24px;
+    height: 24px;
+    color: var(--text-secondary);
+    transition: color var(--transition-normal);
+}
+
+.theme-toggle:hover svg {
+    color: var(--text-primary);
+}
+
+/* 主题选择器面板 */
+.theme-selector {
+    background: var(--bg-primary);
+    backdrop-filter: blur(var(--glass-blur));
+    -webkit-backdrop-filter: blur(var(--glass-blur));
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-lg);
+    padding: var(--spacing-lg);
+    position: fixed;
+    bottom: calc(var(--spacing-lg) + 60px);
+    right: var(--spacing-lg);
+    z-index: 999;
+    display: none;
+    flex-direction: column;
+    gap: var(--spacing-md);
+    animation: slideUp var(--transition-normal);
+}
+
+.theme-selector.show {
+    display: flex;
+}
+
+.theme-option {
+    display: flex;
+    align-items: center;
+    gap: var(--spacing-md);
+    padding: var(--spacing-sm) var(--spacing-md);
+    border-radius: var(--radius-md);
+    cursor: pointer;
+    transition: background var(--transition-normal);
+    color: var(--text-secondary);
+}
+
+.theme-option:hover {
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+}
+
+.theme-option.active {
+    background: rgba(0, 217, 255, 0.1);
+    color: var(--accent-blue);
+}
+
+.theme-preview {
+    width: 24px;
+    height: 24px;
+    border-radius: var(--radius-sm);
+    border: 2px solid var(--border-subtle);
+}
+
+.theme-preview-dark {
+    background: linear-gradient(135deg, #1a1a2e, #16213e);
+}
+
+.theme-preview-light {
+    background: linear-gradient(135deg, #f0f4f8, #e2e8f0);
+}
+
+.theme-preview-blue {
+    background: linear-gradient(135deg, #0a1929, #0d2137);
+}
+
+.theme-preview-purple {
+    background: linear-gradient(135deg, #1a1a2e, #2d1b4e);
+}
+
+.theme-preview-green {
+    background: linear-gradient(135deg, #0d1f0d, #1a2f1a);
+}
+
+/* 系统主题跟随 */
+@media (prefers-color-scheme: light) {
+    :root:not([data-theme]) {
+        --bg-gradient-start: #f0f4f8;
+        --bg-gradient-end: #e2e8f0;
+        --bg-primary: rgba(255, 255, 255, 0.7);
+        --bg-secondary: rgba(255, 255, 255, 0.85);
+        --bg-hover: rgba(255, 255, 255, 0.95);
+        --text-primary: #1a1a2e;
+        --text-secondary: rgba(26, 26, 46, 0.8);
+        --text-muted: rgba(26, 26, 46, 0.6);
+        --text-hint: rgba(26, 26, 46, 0.4);
+        --border-subtle: rgba(26, 26, 46, 0.1);
+        --border-light: rgba(26, 26, 46, 0.15);
+        --border-strong: rgba(26, 26, 46, 0.2);
+    }
+}
+
+/* 过渡效果 */
+.theme-transition,
+.theme-transition *,
+.theme-transition *::before,
+.theme-transition *::after {
+    transition: all var(--transition-slow) !important;
+}

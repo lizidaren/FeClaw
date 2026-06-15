@@ -1,0 +1,1113 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Manim WASM — Pyodide 数学动画</title>
+<style>
+:root {
+  --bg: #0d1117;
+  --bg2: #161b22;
+  --bg3: #21262d;
+  --border: #30363d;
+  --accent: #58a6ff;
+  --accent2: #d29922;
+  --text: #c9d1d9;
+  --text2: #8b949e;
+  --green: #3fb950;
+  --red: #f85149;
+  --yellow: #d29922;
+  --purple: #bc8cff;
+  --font: 'SF Mono', 'Fira Code', 'JetBrains Mono', 'Cascadia Code', Consolas, monospace;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* ─── Header ─── */
+.header {
+  background: var(--bg2);
+  border-bottom: 1px solid var(--border);
+  padding: 12px 24px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-shrink: 0;
+}
+.header-left { display: flex; align-items: center; gap: 14px; }
+.header-left h1 { font-size: 18px; font-weight: 600; }
+.header-left h1 span { color: var(--accent); }
+.header-left .subtitle { font-size: 12px; color: var(--text2); }
+.header-right { display: flex; align-items: center; gap: 10px; }
+
+/* Status badge */
+#statusBadge {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 12px; padding: 4px 12px;
+  border-radius: 20px;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  color: var(--text2);
+  transition: all .3s;
+}
+#statusBadge.loaded { color: var(--green); border-color: var(--green); }
+#statusBadge.error { color: var(--red); border-color: var(--red); }
+#statusBadge.running { color: var(--yellow); border-color: var(--yellow); }
+.status-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--text2); display: inline-block;
+}
+#statusBadge.loaded .status-dot { background: var(--green); }
+#statusBadge.error .status-dot { background: var(--red); }
+#statusBadge.running .status-dot { animation: pulse 0.8s infinite; background: var(--yellow); }
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+
+/* ─── Scene Bar ─── */
+.scene-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 24px;
+  background: var(--bg2);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+.scene-bar .label { font-size: 12px; color: var(--text2); margin-right: 6px; }
+.scene-btn {
+  padding: 5px 14px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text2);
+  cursor: pointer;
+  font-size: 12px;
+  transition: all .15s;
+  white-space: nowrap;
+}
+.scene-btn:hover { border-color: var(--accent); color: var(--text); background: rgba(88,166,255,.08); }
+.scene-btn.active {
+  background: var(--accent); border-color: var(--accent); color: #fff;
+}
+
+/* ─── Main Layout ─── */
+.main {
+  display: flex;
+  height: calc(100vh - 90px);
+}
+@media (max-width: 860px) {
+  .main { flex-direction: column; }
+}
+
+/* ─── Code Panel ─── */
+.code-panel {
+  width: 45%;
+  min-width: 360px;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--border);
+  background: #0d1117;
+}
+.code-panel .panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 16px;
+  background: var(--bg2);
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--text2);
+  flex-shrink: 0;
+}
+.code-panel .panel-header .actions { display: flex; gap: 8px; }
+
+#runBtn {
+  padding: 5px 18px;
+  border: none;
+  border-radius: 6px;
+  background: var(--green);
+  color: #0d1117;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity .15s, transform .1s;
+  display: flex; align-items: center; gap: 6px;
+}
+#runBtn:hover { opacity: .9; }
+#runBtn:active { transform: scale(.96); }
+#runBtn:disabled { opacity: .4; cursor: not-allowed; }
+
+#codeEditor {
+  flex: 1;
+  resize: none;
+  border: none;
+  outline: none;
+  background: #0d1117;
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 13px;
+  line-height: 1.6;
+  padding: 16px;
+  tab-size: 2;
+  white-space: pre;
+  overflow: auto;
+}
+#codeEditor:focus { background: #0d1117; }
+#codeEditor::placeholder { color: var(--text2); opacity: .5; }
+
+/* ─── Canvas Panel ─── */
+.canvas-panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  background: #0a0a0a;
+  position: relative;
+  overflow: hidden;
+}
+.canvas-panel .panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 16px;
+  background: var(--bg2);
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--text2);
+  flex-shrink: 0;
+}
+
+.canvas-area {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  overflow: hidden;
+}
+#renderCanvas {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+
+/* ─── Overlay / Loading ─── */
+.overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  background: rgba(13,17,23,.85);
+  z-index: 10;
+  transition: opacity .4s;
+}
+.overlay.hidden { opacity: 0; pointer-events: none; }
+
+.progress-ring { position: relative; width: 80px; height: 80px; margin-bottom: 20px; }
+.progress-ring svg { transform: rotate(-90deg); }
+.progress-ring circle {
+  fill: none;
+  stroke-width: 4;
+  cx: 40; cy: 40; r: 36;
+}
+.progress-ring .bg { stroke: var(--bg3); }
+.progress-ring .fg {
+  stroke: var(--accent);
+  stroke-linecap: round;
+  stroke-dasharray: 226.2;
+  stroke-dashoffset: 226.2;
+  transition: stroke-dashoffset .5s;
+}
+.overlay .progress-text { font-size: 14px; color: var(--text2); margin-top: 8px; }
+.overlay .progress-detail { font-size: 12px; color: var(--text2); margin-top: 4px; opacity: .7; }
+
+/* ─── Error ─── */
+#errorOutput {
+  display: none;
+  padding: 10px 16px;
+  background: rgba(248,81,73,.1);
+  border-top: 1px solid var(--red);
+  color: var(--red);
+  font-family: var(--font);
+  font-size: 12px;
+  line-height: 1.5;
+  max-height: 120px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  flex-shrink: 0;
+}
+#errorOutput.visible { display: block; }
+
+/* ─── Progress bar (Pyodide loading) ─── */
+#loadProgress {
+  display: none;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+#loadProgress .bar-track {
+  height: 4px;
+  background: var(--bg3);
+  border-radius: 2px;
+  overflow: hidden;
+}
+#loadProgress .bar-fill {
+  height: 100%;
+  width: 0%;
+  background: var(--accent);
+  transition: width .3s;
+  border-radius: 2px;
+}
+#loadProgress .bar-label {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--text2);
+  margin-bottom: 4px;
+}
+
+/* ─── Log output ─── */
+#logOutput {
+  display: none;
+  padding: 8px 16px;
+  background: var(--bg2);
+  border-top: 1px solid var(--border);
+  font-family: var(--font);
+  font-size: 11px;
+  color: var(--text2);
+  max-height: 80px;
+  overflow: auto;
+  flex-shrink: 0;
+  line-height: 1.5;
+}
+#logOutput.visible { display: block; }
+#logOutput .log-entry { opacity: .8; }
+#logOutput .log-entry.error { color: var(--red); }
+#logOutput .log-entry.warn { color: var(--yellow); }
+#logOutput .log-entry.info { color: var(--accent); }
+
+/* ─── Scrollbar ─── */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--bg3); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--border); }
+
+/* ─── Mobile ─── */
+@media (max-width: 768px) {
+  body {
+    overflow-y: auto;
+    overflow-x: hidden;
+    height: auto;
+    min-height: 100vh;
+  }
+
+  .header {
+    flex-direction: column;
+    gap: 8px;
+    padding: 10px 14px;
+    text-align: center;
+  }
+  .header-left { flex-direction: column; gap: 4px; }
+  .header-left h1 { font-size: 16px; }
+  .header-left .subtitle { font-size: 11px; }
+
+  .scene-bar {
+    padding: 6px 10px;
+    gap: 4px;
+    justify-content: center;
+  }
+  .scene-bar .label { font-size: 11px; margin-right: 0; }
+  .scene-btn {
+    padding: 4px 10px;
+    font-size: 11px;
+  }
+
+  .main {
+    flex-direction: column;
+    height: auto;
+  }
+
+  .code-panel {
+    width: 100%;
+    min-width: unset;
+    max-width: 100%;
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+    height: 50vh;
+    min-height: 300px;
+  }
+
+  .canvas-panel {
+    height: 50vh;
+    min-height: 300px;
+  }
+
+  #codeEditor {
+    font-size: 12px;
+    padding: 10px;
+  }
+
+  .code-panel .panel-header,
+  .canvas-panel .panel-header {
+    padding: 6px 10px;
+    font-size: 11px;
+  }
+
+  #runBtn {
+    padding: 4px 12px;
+    font-size: 12px;
+  }
+
+  #replayBtn {
+    padding: 4px 12px !important;
+    font-size: 12px !important;
+  }
+
+  .canvas-area {
+    overflow: auto;
+  }
+
+  #errorOutput {
+    font-size: 11px;
+    max-height: 80px;
+  }
+
+  #logOutput {
+    font-size: 10px;
+    max-height: 60px;
+  }
+}
+</style>
+</head>
+<body>
+
+<!-- ─── Header ─── -->
+<header class="header">
+  <div class="header-left">
+    <h1>🧪 Manim <span>WASM</span></h1>
+    <span class="subtitle">Pyodide-powered · 浏览器内运行</span>
+  </div>
+  <div class="header-right">
+    <span id="statusBadge"><span class="status-dot"></span><span id="statusText">初始化中...</span></span>
+  </div>
+</header>
+
+<!-- ─── Scene Bar ─── -->
+<div class="scene-bar">
+  <span class="label">📐 示例场景</span>
+  <button class="scene-btn active" data-scene="square_to_circle">◻→◯ 方变圆</button>
+  <button class="scene-btn" data-scene="function_graph">📈 函数图像</button>
+  <button class="scene-btn" data-scene="latex_demo">∑ 公式动画</button>
+  <button class="scene-btn" data-scene="vectors">➡ 向量场</button>
+  <button class="scene-btn" data-scene="custom">✏️ 自定义</button>
+</div>
+
+<!-- ─── Main ─── -->
+<div class="main">
+  <!-- Code Panel -->
+  <div class="code-panel">
+    <div class="panel-header">
+      <span>🐍 Python / Manim 代码</span>
+      <div class="actions">
+        <button id="runBtn">▶ 运行</button>
+        <button id="replayBtn" style="display:none;padding:8px 16px;background:var(--accent);border:none;border-radius:6px;color:#fff;cursor:pointer;font-size:13px">🔄 重播</button>
+      </div>
+    </div>
+    <textarea id="codeEditor" spellcheck="false" placeholder="在此编写 Manim 代码..."></textarea>
+  </div>
+
+  <!-- Canvas Panel -->
+  <div class="canvas-panel">
+    <div class="panel-header">
+      <span>🎬 动画渲染区</span>
+      <span id="renderInfo" style="font-size:11px;color:var(--text2)">等待运行...</span>
+    </div>
+    <div class="canvas-area">
+      <div id="progressOverlay" class="overlay">
+        <div class="progress-ring">
+          <svg width="80" height="80">
+            <circle class="bg" cx="40" cy="40" r="36"/>
+            <circle class="fg" id="progressRing" cx="40" cy="40" r="36"/>
+          </svg>
+        </div>
+        <div class="progress-text" id="progressText">正在加载 Pyodide WASM...</div>
+        <div class="progress-detail" id="progressDetail">初始化 Python 运行时</div>
+      </div>
+      <canvas id="renderCanvas" width="960" height="540"></canvas>
+    </div>
+    <div id="errorOutput"></div>
+    <div id="logOutput"></div>
+  </div>
+</div>
+
+<!-- ─── Pyodide ─── -->
+<script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js" id="MathJax-script"></script>
+<script src="https://cdn.jsdelivr.net/pyodide/v0.27.7/full/pyodide.js"></script>
+
+<script>
+// =========================================================================
+// Scene Presets
+// =========================================================================
+const SCENES = {
+  square_to_circle: `from manim import *
+
+class MyScene(Scene):
+    def construct(self):
+        # 创建一个正方形并变换为圆形
+        square = Square(side_length=2, color=BLUE)
+        circle = Circle(radius=1.5, color=RED)
+
+        self.play(Create(square))
+        self.wait(0.5)
+        self.play(Transform(square, circle))
+        self.wait(0.5)
+        self.play(square.animate.set_fill(RED, opacity=0.5))
+        self.wait(0.5)
+        title = MathTex(r"\\\\text{Square } \\\\to \\\\text{ Circle}")
+        title.to_edge(UP)
+        self.play(Write(title))
+        self.wait(1)`,
+
+  function_graph: `from manim import *
+import math
+
+class MyScene(Scene):
+    def construct(self):
+        # 坐标轴与函数图像
+        axes = Axes(
+            x_range=[-3, 3, 1],
+            y_range=[-2, 2, 1],
+            axis_config={"color": BLUE},
+        )
+        axes_labels = axes.get_axis_labels(x_label="x", y_label="y")
+
+        # sin 函数
+        sin_graph = axes.plot(
+            lambda x: math.sin(x),
+            x_range=[-3, 3],
+            color=YELLOW,
+        )
+        sin_label = MathTex(r"y = \\\\sin(x)").next_to(sin_graph, UR, buff=0.3)
+
+        # cos 函数
+        cos_graph = axes.plot(
+            lambda x: math.cos(x),
+            x_range=[-3, 3],
+            color=RED,
+        )
+        cos_label = MathTex(r"y = \\\\cos(x)").next_to(cos_graph, DR, buff=0.3)
+
+        self.play(Create(axes), Write(axes_labels))
+        self.play(Create(sin_graph), Write(sin_label))
+        self.wait(0.5)
+        self.play(Create(cos_graph), Write(cos_label))
+        self.wait(1)
+
+        title = MathTex(r"\\\\text{Trigonometric Functions}")
+        title.to_edge(UP)
+        self.play(Write(title))
+        self.wait(1)`,
+
+  latex_demo: `from manim import *
+
+class MyScene(Scene):
+    def construct(self):
+        # LaTeX 公式动画
+        eq1 = MathTex(r"E = mc^2", color=YELLOW)
+        eq1.scale(2)
+
+        eq2 = MathTex(
+            r"\\\\int_a^b f(x)\\\\,dx = F(b) - F(a)",
+            color=BLUE
+        )
+        eq2.scale(1.8)
+
+        eq3 = MathTex(
+            r"\\\\frac{-b \\\\pm \\\\sqrt{b^2 - 4ac}}{2a}",
+            color=GREEN
+        )
+        eq3.scale(1.8)
+
+        eq4 = MathTex(
+            r"\\\\sum_{n=1}^{\\\\infty} \\\\frac{1}{n^2} = \\\\frac{\\\\pi^2}{6}",
+            color=PURPLE
+        )
+        eq4.scale(1.6)
+
+        self.play(Write(eq1))
+        self.wait(0.8)
+        self.play(TransformMatchingShapes(eq1, eq2))
+        self.wait(0.8)
+        self.play(TransformMatchingShapes(eq2, eq3))
+        self.wait(0.8)
+        self.play(TransformMatchingShapes(eq3, eq4))
+        self.wait(1)
+
+        title = MathTex(r"\\\\text{Beautiful Equations}")
+        title.to_edge(UP)
+        self.play(Write(title))
+        self.wait(1)`,
+
+  vectors: `from manim import *
+
+class MyScene(Scene):
+    def construct(self):
+        # 向量场示例
+        plane = NumberPlane(
+            x_range=[-5, 5, 1],
+            y_range=[-4, 4, 1],
+            background_line_style={
+                "stroke_color": BLUE_D,
+                "stroke_width": 1,
+                "stroke_opacity": 0.3,
+            },
+        )
+        self.add(plane)
+
+        # 向量场: F(x,y) = (-y, x) 旋转场
+        vector_field = VectorField(
+            lambda p: np.array([-p[1], p[0], 0]),
+            color=YELLOW,
+        )
+        self.play(Create(vector_field))
+        self.wait(0.5)
+
+        # 添加一个圆上的点
+        dot = Dot(color=RED)
+        dot.move_to(np.array([2, 0, 0]))
+        self.add(dot)
+
+        # 沿圆周运动
+        path = ParametricFunction(
+            lambda t: np.array([2*np.cos(t), 2*np.sin(t), 0]),
+            t_range=[0, TAU],
+            color=RED,
+            stroke_width=2,
+        )
+        self.play(MoveAlongPath(dot, path), run_time=3)
+        self.wait(0.5)
+
+        title = MathTex(r"\\\\text{Vector Field: } \\\\vec{F} = (-y, x)")
+        title.to_edge(UP)
+        self.play(Write(title))
+        self.wait(1)`,
+};
+
+// =========================================================================
+// State
+// =========================================================================
+let pyodide = null;
+let isRunning = false;
+let isLoading = true;
+let renderedFrameCount = 0;
+
+const canvas = document.getElementById('renderCanvas');
+const ctx = canvas.getContext('2d');
+// Frame buffer for animation playback
+let allFrames = [];
+let frameCount = 0;
+let animationPlaying = false;
+let animationTimer = null;
+let currentFrameIndex = 0;
+const editor = document.getElementById('codeEditor');
+const runBtn = document.getElementById('runBtn');
+const replayBtn = document.getElementById('replayBtn');
+const errorOutput = document.getElementById('errorOutput');
+const logOutput = document.getElementById('logOutput');
+const statusText = document.getElementById('statusText');
+const statusBadge = document.getElementById('statusBadge');
+const overlay = document.getElementById('progressOverlay');
+const progressText = document.getElementById('progressText');
+const progressDetail = document.getElementById('progressDetail');
+const progressRing = document.getElementById('progressRing');
+const renderInfo = document.getElementById('renderInfo');
+
+// =========================================================================
+// Logging
+// =========================================================================
+function log(type, msg) {
+  console.log(`[MANIM-WASM][${type.toUpperCase()}] ${msg}`);
+  const div = document.createElement('div');
+  div.className = `log-entry ${type}`;
+  div.textContent = `[${type.toUpperCase()}] ${msg}`;
+  logOutput.appendChild(div);
+  logOutput.scrollTop = logOutput.scrollHeight;
+  logOutput.classList.add('visible');
+}
+
+// =========================================================================
+// Canvas Rendering
+// =========================================================================
+function clearCanvas(bgColor) {
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  const c = bgColor || [0, 0, 0];
+  ctx.fillStyle = `rgba(${c[0]*255}, ${c[1]*255}, ${c[2]*255}, 1)`;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+}
+
+// Listen for frame data from manim-web
+canvas.addEventListener('frame-emit', async (event) => {
+  const dataArray = event.detail;
+  if (!dataArray) { console.log('[MANIM-WASM][FRAME] frame-emit fired but event.detail is null/undefined'); return; }
+
+  // Update frame count for progress feedback
+  renderedFrameCount++;
+  if (renderedFrameCount === 1) {
+    console.log('[MANIM-WASM][FRAME] First frame-emit received! Frame data types:', dataArray.map(d => d.type));
+  }
+  if (renderedFrameCount % 5 === 0) {
+    renderInfo.textContent = '渲染中... ' + renderedFrameCount + ' 帧';
+    console.log('[MANIM-WASM][FRAME] Frame #' + renderedFrameCount + ' rendered');
+  }
+
+  // Buffer frame data for playback (deep-clone to avoid mutation)
+  try {
+    allFrames.push(JSON.parse(JSON.stringify(dataArray)));
+  } catch (cloneErr) {
+    console.warn('[MANIM-WASM][FRAME] Failed to clone frame data:', cloneErr);
+  }
+
+  for (const data of dataArray) {
+    try {
+      if (data.type === 'BackgroundData') {
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        const [r, g, b] = data.background_color;
+        const a = data.background_opacity;
+        ctx.fillStyle = `rgba(${r * 255}, ${g * 255}, ${b * 255}, ${a})`;
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+      } else if (data.type === 'VMobjectData') {
+        ctx.setTransform(...data.transform);
+        ctx.beginPath();
+
+        if (data.points.length === 0) continue;
+
+        for (const subpath of data.points) {
+          const [startX, startY] = subpath[0][0];
+          const [endX, endY] = subpath[subpath.length - 1][3];
+          ctx.moveTo(startX, startY);
+
+          for (const bezierTuple of subpath) {
+            const [[_x0, _y0], [x1, y1], [x2, y2], [x3, y3]] = bezierTuple;
+            ctx.bezierCurveTo(x1, y1, x2, y2, x3, y3);
+          }
+
+          if ((startX - endX) * (startX - endX) + (startY - endY) * (startY - endY) < 1e-6) {
+            ctx.closePath();
+          }
+        }
+
+        // Stroke
+        const strokeRgbas = data.stroke_rgbas;
+        if (strokeRgbas && strokeRgbas.length > 0) {
+          if (strokeRgbas.length === 1) {
+            const [sr, sg, sb, sa] = strokeRgbas[0];
+            ctx.strokeStyle = `rgba(${sr*255}, ${sg*255}, ${sb*255}, ${sa})`;
+          } else {
+            const gs = data.gradient_start_and_end_points;
+            const grad = ctx.createLinearGradient(
+              gs[0][0], gs[0][1], gs[1][0], gs[1][1]
+            );
+            for (let i = 0; i < strokeRgbas.length; i++) {
+              const [sr, sg, sb, sa] = strokeRgbas[i];
+              grad.addColorStop(i / (strokeRgbas.length - 1), `rgba(${sr*255}, ${sg*255}, ${sb*255}, ${sa})`);
+            }
+            ctx.strokeStyle = grad;
+          }
+          if (data.stroke_width > 0) {
+            ctx.lineWidth = data.stroke_width / 100;
+            ctx.stroke();
+          }
+        }
+
+        // Fill
+        const fillRgbas = data.fill_rgbas;
+        if (fillRgbas && fillRgbas.length > 0) {
+          if (fillRgbas.length === 1) {
+            const [fr, fg, fb, fa] = fillRgbas[0];
+            ctx.fillStyle = `rgba(${fr*255}, ${fg*255}, ${fb*255}, ${fa})`;
+          } else {
+            const gs = data.gradient_start_and_end_points;
+            const grad = ctx.createLinearGradient(
+              gs[0][0], gs[0][1], gs[1][0], gs[1][1]
+            );
+            for (let i = 0; i < fillRgbas.length; i++) {
+              const [fr, fg, fb, fa] = fillRgbas[i];
+              grad.addColorStop(i / (fillRgbas.length - 1), `rgba(${fr*255}, ${fg*255}, ${fb*255}, ${fa})`);
+            }
+            ctx.fillStyle = grad;
+          }
+          ctx.fill();
+        }
+      } else if (data.type === 'AbstractImageData') {
+        ctx.setTransform(...data.transform);
+        const bitmap = await createImageBitmap(data.image_data);
+        ctx.imageSmoothingEnabled = false;
+        ctx.drawImage(bitmap, 0, 0);
+      }
+    } catch (e) {
+      console.warn('Render error:', e);
+    }
+  }
+});
+
+// =========================================================================
+// Load Pyodide
+// =========================================================================
+function setProgress(pct, text, detail) {
+  const circumference = 226.2;
+  const offset = circumference - (pct / 100) * circumference;
+  progressRing.style.strokeDashoffset = offset;
+  if (text) progressText.textContent = text;
+  if (detail) progressDetail.textContent = detail;
+}
+
+async function loadPyodideRuntime() {
+  console.log('[MANIM-WASM][INIT] loadPyodideRuntime() called');
+  try {
+    setProgress(10, '正在加载 Pyodide WASM...', '下载 Python 运行时 (~10MB)');
+    log('info', 'Starting Pyodide load...');
+    console.log('[MANIM-WASM][INIT] Step 1: Calling globalThis.loadPyodide()...');
+
+    // Create pyodide with progress handler
+    window.pyodide = await globalThis.loadPyodide({
+      indexURL: 'https://cdn.jsdelivr.net/pyodide/v0.27.7/full/',
+      fullStdLib: false,
+      stdin: () => '',
+      stdout: (text) => log('info', text),
+      stderr: (text) => log('warn', text),
+    });
+    pyodide = window.pyodide;
+    console.log('[MANIM-WASM][INIT] Pyodide loaded OK. pyodide=', !!pyodide, 'type=', typeof pyodide);
+
+    setProgress(50, '正在安装 Python 依赖...', '载入 micropip');
+    log('info', 'Pyodide loaded, installing micropip...');
+    console.log('[MANIM-WASM][INIT] Step 2: Loading micropip package...');
+
+    await pyodide.loadPackage('micropip');
+    console.log('[MANIM-WASM][INIT] micropip loaded OK.');
+
+    setProgress(65, '正在安装 manim-web...', '从 COS 安装 (~400KB)');
+    log('info', 'Installing manim-web from COS...');
+    console.log('[MANIM-WASM][INIT] Step 3: Installing manim-web via micropip (COS)...');
+
+    await pyodide.runPythonAsync(`
+import micropip
+micropip.install("https://web-1257148458.cos.ap-guangzhou.myqcloud.com/webshare/manim_wasm/manim_web-0.1.8-py3-none-any.whl")
+    `);
+    console.log('[MANIM-WASM][INIT] manim-web installed OK.');
+
+    setProgress(90, '正在验证安装...', '检查 manim-web 版本');
+    log('info', 'manim-web installed successfully');
+    console.log('[MANIM-WASM][INIT] Step 4: Verifying manim-web import...');
+
+    await pyodide.runPythonAsync(`
+import manim
+# Quick init to ensure everything works
+from manim import *
+import sys
+print(f"Python {sys.version}")
+print(f"manim-web loaded successfully")
+    `);
+    console.log('[MANIM-WASM][INIT] manim-web import verified OK.');
+
+    setProgress(100, '就绪 ✓', 'Pyodide + manim-web 已加载');
+    log('info', 'Pyodide + manim-web ready');
+    console.log('[MANIM-WASM][INIT] All ready! Setting UI to loaded state.');
+
+    statusText.textContent = '就绪';
+    statusBadge.className = 'loaded';
+    isLoading = false;
+    runBtn.disabled = false;
+
+    // Hide overlay after brief delay
+    setTimeout(() => {
+      overlay.classList.add('hidden');
+    }, 500);
+
+    // Load default scene
+    loadScene('square_to_circle');
+  } catch (err) {
+    console.error('[MANIM-WASM][INIT] FAILED:', err);
+    console.error('[MANIM-WASM][INIT] Error name:', err.name);
+    console.error('[MANIM-WASM][INIT] Error message:', err.message);
+    console.error('[MANIM-WASM][INIT] Error stack:', err.stack);
+    setProgress(0, '加载失败', err.message || '未知错误');
+    statusText.textContent = '错误';
+    statusBadge.className = 'error';
+    errorOutput.textContent = 'Pyodide 初始化失败: ' + (err.message || err);
+    errorOutput.classList.add('visible');
+    log('error', 'Pyodide init error: ' + (err.message || String(err)));
+  }
+}
+
+// =========================================================================
+// Playback
+// =========================================================================
+let playbackAnimId = null;
+let playbackRunning = false;
+
+// Play back buffered frames with requestAnimationFrame
+function playFrames(fps = 30) {
+  console.log('[MANIM-WASM][PLAY] playFrames(' + fps + ') called. playbackRunning=' + playbackRunning + ' allFrames.length=' + allFrames.length);
+  if (playbackRunning || allFrames.length === 0) return;
+  playbackRunning = true;
+
+  const totalFrames = allFrames.length;
+  const frameDuration = 1000 / fps;
+  let currentFrame = 0;
+  let lastTimestamp = 0;
+
+  console.log('[MANIM-WASM][PLAY] Starting playback of ' + totalFrames + ' frames @ ' + fps + 'fps');
+  renderInfo.textContent = '播放中: 0/' + totalFrames;
+
+  function drawFrame(frameIndex) {
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    const dataArray = allFrames[frameIndex];
+    for (const data of dataArray) {
+      if (data.type === 'BackgroundData') {
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        const [r, g, b] = data.background_color;
+        ctx.fillStyle = 'rgb(' + (r*255|0) + ',' + (g*255|0) + ',' + (b*255|0) + ')';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+      } else if (data.type === 'VMobjectData') {
+        ctx.setTransform(...data.transform);
+        ctx.beginPath();
+        for (const subpath of data.points) {
+          const [startX, startY] = subpath[0][0];
+          const [endX, endY] = subpath[subpath.length - 1][3];
+          ctx.moveTo(startX, startY);
+          for (const bezierTuple of subpath) {
+            const [[_x0, _y0], [x1, y1], [x2, y2], [x3, y3]] = bezierTuple;
+            ctx.bezierCurveTo(x1, y1, x2, y2, x3, y3);
+          }
+          if ((startX - endX)*(startX - endX) + (startY - endY)*(startY - endY) < 1e-6) ctx.closePath();
+        }
+        const sRgbas = data.stroke_rgbas;
+        if (sRgbas && sRgbas.length > 0) {
+          if (sRgbas.length === 1) {
+            const [sr, sg, sb, sa] = sRgbas[0];
+            ctx.strokeStyle = 'rgba(' + (sr*255|0) + ',' + (sg*255|0) + ',' + (sb*255|0) + ',' + sa + ')';
+          }
+          if (data.stroke_width > 0) {
+            ctx.lineWidth = data.stroke_width / 100;
+            ctx.stroke();
+          }
+        }
+        const fRgbas = data.fill_rgbas;
+        if (fRgbas && fRgbas.length > 0) {
+          const [fr, fg, fb, fa] = fRgbas[0];
+          ctx.fillStyle = 'rgba(' + (fr*255|0) + ',' + (fg*255|0) + ',' + (fb*255|0) + ',' + fa + ')';
+          ctx.fill();
+        }
+      }
+    }
+  }
+
+  function animate(timestamp) {
+    if (!lastTimestamp) lastTimestamp = timestamp;
+    const elapsed = timestamp - lastTimestamp;
+
+    if (elapsed >= frameDuration) {
+      drawFrame(currentFrame);
+      currentFrame++;
+      lastTimestamp = timestamp;
+      if (currentFrame % 15 === 0 || currentFrame === totalFrames) {
+        renderInfo.textContent = '播放中: ' + currentFrame + '/' + totalFrames;
+      }
+    }
+
+    if (currentFrame < totalFrames) {
+      playbackAnimId = requestAnimationFrame(animate);
+    } else {
+      playbackRunning = false;
+      renderInfo.textContent = '播放完成 ✓ (' + totalFrames + ' 帧)';
+      console.log('[MANIM-WASM][PLAY] Playback complete. ' + totalFrames + ' frames shown.');
+    }
+  }
+
+  playbackAnimId = requestAnimationFrame(animate);
+}
+
+function stopPlayback() {
+  console.log('[MANIM-WASM][PLAY] stopPlayback() called. playbackAnimId=' + playbackAnimId);
+  if (playbackAnimId !== null) {
+    cancelAnimationFrame(playbackAnimId);
+    playbackAnimId = null;
+  }
+  playbackRunning = false;
+}
+
+// =========================================================================
+// Run Scene
+// =========================================================================
+async function runScene() {
+  console.log('[MANIM-WASM][RUN] runScene() called. isRunning=' + isRunning + ' pyodide=' + !!pyodide);
+  if (isRunning || !pyodide) {
+    console.warn('[MANIM-WASM][RUN] BLOCKED: isRunning=' + isRunning + ' pyodide=' + !!pyodide);
+    return;
+  }
+
+  isRunning = true;
+  runBtn.disabled = true;
+  runBtn.textContent = '⏳ 渲染中...';
+  stopPlayback();
+  replayBtn.style.display = 'none';
+  allFrames = [];
+  renderedFrameCount = 0;
+  errorOutput.classList.remove('visible');
+  errorOutput.textContent = '';
+  statusText.textContent = '运行中';
+  statusBadge.className = 'running';
+  renderInfo.textContent = '正在渲染...';
+  // Yield a frame so the browser paints the UI before we block on Pyodide
+  await new Promise(resolve => requestAnimationFrame(resolve));
+
+  const code = editor.value;
+  console.log('[MANIM-WASM][RUN] Code length:', code.length, 'chars, starting Pyodide execution...');
+  if (!code || !code.trim()) {
+    console.warn('[MANIM-WASM][RUN] Empty code! Aborting.');
+    renderInfo.textContent = '代码为空';
+    isRunning = false;
+    runBtn.disabled = false;
+    runBtn.textContent = '▶ 运行';
+    statusText.textContent = '就绪';
+    statusBadge.className = 'loaded';
+    return;
+  }
+
+  try {
+    // Clear canvas to black before rendering
+    clearCanvas([0, 0, 0]);
+    console.log('[MANIM-WASM][RUN] Canvas cleared.');
+
+    // Inject canvas element reference and config, then execute user code + render
+    console.log('[MANIM-WASM][RUN] Running user code in Pyodide...');
+    await pyodide.runPythonAsync(`
+import js, asyncio
+from manim import *
+
+# Inject JS-side canvas + event type into Python globals
+canvas = js.document.getElementById("renderCanvas")
+frame_event_type = "frame-emit"
+print("[PY] canvas ref and frame_event_type set up OK")
+
+# Lower resolution for faster WASM rendering
+config.pixel_height = 540
+config.pixel_width = 960
+config.frame_rate = 15
+print(f"[PY] Config: {config.pixel_width}x{config.pixel_height} @ {config.frame_rate}fps")
+
+${code}
+
+print("[PY] MyScene defined. Instantiating scene...")
+scene = MyScene()
+print("[PY] Calling scene.init_element(canvas, frame_event_type)...")
+scene.init_element(canvas, frame_event_type)
+print("[PY] Calling scene.render()...")
+scene.render()
+print("[PY] scene.render() completed!")
+
+`);
+    console.log('[MANIM-WASM][RUN] Pyodide execution complete. allFrames.length =', allFrames.length);
+
+    renderInfo.textContent = '渲染完成, ' + allFrames.length + ' 帧';
+    if (allFrames.length > 0) {
+      replayBtn.style.display = 'inline-block';
+      log('info', 'Scene rendered: ' + allFrames.length + ' frames');
+      console.log('[MANIM-WASM][RUN] Starting playback of', allFrames.length, 'frames...');
+      playFrames(24);
+    } else {
+      console.warn('[MANIM-WASM][RUN] WARNING: No frames captured! frame-emit may not have fired.');
+      log('warn', 'No frames captured from frame-emit event');
+    }
+  } catch (err) {
+    const errMsg = err.message || String(err);
+    console.error('[MANIM-WASM][RUN] Error:', err);
+    console.error('[MANIM-WASM][RUN] Stack:', err.stack);
+    errorOutput.textContent = '运行错误:\n' + errMsg;
+    errorOutput.classList.add('visible');
+    renderInfo.textContent = '运行失败';
+    log('error', 'Scene error: ' + errMsg);
+  } finally {
+    console.log('[MANIM-WASM][RUN] Cleaning up...');
+    isRunning = false;
+    runBtn.disabled = false;
+    runBtn.textContent = '▶ 运行';
+    statusText.textContent = '就绪';
+    statusBadge.className = 'loaded';
+  }
+}
+
+// =========================================================================
+// Scene Management
+// =========================================================================
+function loadScene(name) {
+  if (name === 'custom') {
+    editor.value = '';
+    editor.placeholder = '编写你自己的 Manim 场景...';
+    return;
+  }
+
+  const code = SCENES[name];
+  if (code) {
+    editor.value = code;
+    editor.placeholder = '在此编写 Manim 代码...';
+  }
+
+  // Update active button
+  document.querySelectorAll('.scene-btn').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.scene === name);
+  });
+}
+
+// =========================================================================
+// Event Listeners
+// =========================================================================
+document.querySelectorAll('.scene-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    loadScene(btn.dataset.scene);
+  });
+});
+
+runBtn.addEventListener('click', runScene);
+replayBtn.addEventListener('click', () => playFrames(24));
+
+// Keyboard shortcuts: Ctrl+Enter / Cmd+Enter to run
+editor.addEventListener('keydown', (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+    e.preventDefault();
+    runScene();
+  }
+});
+
+// Resize canvas to fill container proportionally
+function resizeCanvas() {
+  const container = canvas.parentElement;
+  const rect = container.getBoundingClientRect();
+  // Keep internal resolution at 1920x1080, just CSS scale
+  canvas.style.maxWidth = `${rect.width}px`;
+  canvas.style.maxHeight = `${rect.height}px`;
+}
+
+window.addEventListener('resize', resizeCanvas);
+setTimeout(resizeCanvas, 100);
+
+// =========================================================================
+// Init
+// =========================================================================
+overlay.classList.remove('hidden');
+loadPyodideRuntime();
+</script>
+</body>
+</html>

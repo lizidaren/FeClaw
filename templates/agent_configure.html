@@ -1,0 +1,1885 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Agent 配置 - FeClaw (内测中)</title>
+    <link rel="stylesheet" href="/static/css/base.css">
+    <link rel="stylesheet" href="/static/css/glass.css">
+    <link rel="stylesheet" href="/static/css/components.css">
+    <link rel="stylesheet" href="/static/css/layouts.css">
+    <link rel="stylesheet" href="/static/css/animations.css">
+    <link rel="stylesheet" href="/static/css/responsive.css">
+    <link rel="stylesheet" href="/static/css/themes.css">
+    <style>
+        /* ===== Dual-panel layout ===== */
+        /* ===== Root layout: full viewport, no scroll ===== */
+        .page.page-enter { height: 100vh; overflow: hidden; display: flex; flex-direction: column; }
+        section.section { flex: 1; overflow: hidden; padding: var(--spacing-md) 0; }
+        section.section > .container { height: 100%; display: flex; flex-direction: column; }
+        section.section > .container > .text-center { flex-shrink: 0; }
+        
+        .config-body {
+            display: flex;
+            gap: var(--spacing-lg);
+            flex: 1;
+            min-height: 0;
+            overflow: hidden;
+        }
+
+        /* ===== Chat panel (left) ===== */
+        .chat-panel {
+            width: 420px;
+            min-width: 320px;
+            max-width: 480px;
+            display: flex;
+            flex-direction: column;
+            background: var(--bg-primary);
+            border: 1px solid var(--border-subtle);
+            border-radius: var(--radius-lg);
+            overflow: hidden;
+            height: 100%;
+            transition: width 0.2s, min-width 0.2s;
+        }
+        .chat-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 12px 16px;
+            border-bottom: 1px solid var(--border-subtle);
+            flex-shrink: 0;
+        }
+        .chat-header-text {
+            font-size: 0.85rem;
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+        .chat-clear-btn {
+            background: none;
+            border: none;
+            color: var(--text-secondary);
+            cursor: pointer;
+            font-size: 0.7rem;
+            padding: 2px 8px;
+            border-radius: var(--radius-sm);
+            transition: all 0.15s;
+            opacity: 0.6;
+        }
+        .chat-clear-btn:hover { opacity: 1; background: rgba(255,59,48,0.1); color: #ff6b6b; }
+
+        .chat-messages {
+            flex: 1;
+            overflow-y: auto;
+            padding: 12px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        /* ===== Message bubbles ===== */
+        .message {
+            max-width: 85%;
+            padding: 8px 12px;
+            border-radius: var(--radius-md);
+            font-size: 0.8rem;
+            line-height: 1.5;
+            word-wrap: break-word;
+            white-space: pre-wrap;
+            animation: msgIn 0.2s ease-out;
+        }
+        @keyframes msgIn {
+            from { opacity: 0; transform: translateY(4px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .message.user {
+            align-self: flex-end;
+            background: var(--accent-blue);
+            color: #fff;
+            border-bottom-right-radius: 4px;
+        }
+
+        .message.ai {
+            all: initial;
+            display: block;
+            align-self: flex-start;
+            background: var(--bg-secondary);
+            color: var(--text-primary);
+            max-width: 85%;
+            padding: 10px 14px;
+            border-radius: var(--radius-md);
+            border-bottom-left-radius: 4px;
+            font-size: 0.85rem;
+            line-height: 1.6;
+            word-break: break-word;
+            white-space: normal;
+            writing-mode: horizontal-tb;
+            text-orientation: mixed;
+        }
+        .message.ai code {
+            background: rgba(255,255,255,0.08);
+            border-radius: 3px;
+            padding: 1px 4px;
+            font-size: 0.8em;
+            font-family: 'Fira Code', 'Consolas', monospace;
+        }
+        .message.ai pre {
+            background: rgba(0,0,0,0.2);
+            border-radius: 6px;
+            padding: 10px;
+            overflow-x: auto;
+            font-size: 0.78em;
+            margin: 0.5em 0;
+        }
+        .message.ai pre code { background: none; padding: 0; }
+        .message.ai strong { color: var(--accent-blue); }
+        .message.ai p { margin: 0; font-size: inherit; line-height: inherit; }
+        .message.ai .msg-label {
+            display: block;
+            font-size: 0.65rem;
+            color: var(--text-secondary);
+            margin-bottom: 4px;
+        }
+
+        .message.tool {
+            align-self: center;
+            background: rgba(255,255,255,0.04);
+            border: 1px solid var(--border-subtle);
+            color: var(--text-secondary);
+            font-size: 0.75rem;
+            padding: 6px 14px;
+            border-radius: 20px;
+            text-align: center;
+            max-width: 90%;
+        }
+        .message.tool .tool-actions {
+            display: flex;
+            gap: 6px;
+            justify-content: center;
+            margin-top: 6px;
+        }
+        .message.tool .tool-btn {
+            padding: 3px 6px;
+            font-size: 0.65rem;
+            border-radius: 12px;
+            border: 1px solid var(--border-subtle);
+            background: var(--bg-secondary);
+            color: var(--text-secondary);
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+        .message.tool .tool-btn:hover { border-color: var(--accent-blue); color: var(--text-primary); }
+        .message.tool .tool-btn.applied {
+            border-color: var(--accent-green);
+            color: var(--accent-green);
+            cursor: default;
+        }
+
+        /* ===== Typing indicator ===== */
+        .typing-dots {
+            display: inline-flex;
+            align-items: center;
+            gap: 3px;
+        }
+        .typing-dots span {
+            width: 5px;
+            height: 5px;
+            border-radius: 50%;
+            background: var(--text-secondary);
+            animation: dotPulse 1.4s infinite ease-in-out both;
+        }
+        .typing-dots span:nth-child(1) { animation-delay: -0.32s; }
+        .typing-dots span:nth-child(2) { animation-delay: -0.16s; }
+        .typing-dots span:nth-child(3) { animation-delay: 0s; }
+        @keyframes dotPulse {
+            0%, 80%, 100% { transform: scale(0.6); opacity: 0.4; }
+            40% { transform: scale(1); opacity: 1; }
+        }
+
+        /* ===== Chat input ===== */
+        .chat-input-area {
+            border-top: 1px solid var(--border-subtle);
+            padding: 10px 12px;
+            flex-shrink: 0;
+        }
+        .chat-input-row {
+            display: flex;
+            gap: 8px;
+            align-items: flex-end;
+        }
+        .chat-input-row textarea {
+            flex: 1;
+            min-width: 0;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-subtle);
+            border-radius: var(--radius-md);
+            padding: 8px 10px;
+            color: var(--text-primary);
+            font-size: 0.8rem;
+            font-family: inherit;
+            resize: none;
+            line-height: 1.4;
+            max-height: 120px;
+        }
+        .chat-input-row textarea:focus {
+            outline: none;
+            border-color: var(--accent-blue);
+        }
+        .chat-input-row textarea::placeholder { color: var(--text-secondary); opacity: 0.6; }
+        .chat-send-btn {
+            padding: 8px 16px;
+            font-size: 0.8rem;
+            white-space: nowrap;
+            flex-shrink: 0;
+        }
+        .chat-send-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+        /* ===== Editor panel (right) ===== */
+        .editor-panel {
+            flex: 1;
+            min-width: 0;
+            overflow-y: auto;
+            padding-right: var(--spacing-sm);
+        }
+
+        /* ===== Mobile tab bar ===== */
+        .tab-bar {
+            display: none;
+            gap: 4px;
+            padding: 8px 0;
+            position: sticky;
+            top: 60px;
+            z-index: 10;
+            background: var(--bg-primary);
+        }
+        .tab-btn {
+            flex: 1;
+            padding: 8px 12px;
+            text-align: center;
+            font-size: 0.8rem;
+            border: 1px solid var(--border-subtle);
+            border-radius: var(--radius-md);
+            background: transparent;
+            color: var(--text-secondary);
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+        .tab-btn.active {
+            background: var(--accent-blue);
+            color: #fff;
+            border-color: var(--accent-blue);
+        }
+        .tab-btn:hover:not(.active) { border-color: var(--accent-blue); color: var(--text-primary); }
+
+        /* ===== Existing preserved styles ===== */
+        .config-layout { display: flex; flex-direction: column; gap: var(--spacing-lg); }
+        .config-form { min-width: 0; }
+
+        @keyframes bannerFadeIn {
+            from { opacity: 0; transform: translateY(-8px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .unconfigured-banner {
+            display: flex;
+            align-items: center;
+            gap: var(--spacing-sm);
+            background: rgba(255, 193, 7, 0.15);
+            border: 1px solid rgba(255, 193, 7, 0.4);
+            border-radius: var(--radius-md);
+            padding: 10px 16px;
+            margin: 0 0 var(--spacing-md) 0;
+            font-size: 0.85rem;
+            color: var(--text-primary);
+            position: relative;
+            animation: bannerFadeIn 0.3s ease-out;
+        }
+        .unconfigured-banner .banner-close {
+            margin-left: auto;
+            background: none;
+            border: none;
+            color: var(--text-secondary);
+            font-size: 1.2rem;
+            cursor: pointer;
+            line-height: 1;
+            padding: 0 4px;
+        }
+        .unconfigured-banner .banner-close:hover { color: var(--text-primary); }
+        .form-textarea {
+            width: 100%;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-subtle);
+            border-radius: var(--radius-md);
+            padding: var(--spacing-sm) var(--spacing-md);
+            color: var(--text-primary);
+            font-size: 0.825rem;
+            font-family: 'Fira Code', 'Consolas', 'Monaco', monospace;
+            resize: vertical;
+            line-height: 1.5;
+            overflow: hidden;
+        }
+        .form-textarea.initial-height { min-height: 0; }
+        .form-textarea:focus {
+            outline: none;
+            border-color: var(--accent-blue);
+            box-shadow: 0 0 0 2px rgba(0, 217, 255, 0.15);
+        }
+        .form-textarea.hidden-bootstrap {
+            position: absolute;
+            width: 1px; height: 1px;
+            padding: 0; margin: -1px;
+            overflow: hidden;
+            clip: rect(0,0,0,0);
+            border: 0;
+        }
+        .form-textarea.soul { min-height: 180px; }
+        .form-textarea.identity { min-height: 140px; }
+        .form-textarea.user { min-height: 120px; }
+        .section-label {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: var(--spacing-xs);
+        }
+        .section-label h4 {
+            margin: 0;
+            font-size: 0.85rem;
+            color: var(--text-primary);
+        }
+        .char-count {
+            font-size: 0.7rem;
+            color: var(--text-secondary);
+        }
+        .agent-info-grid {
+            display: grid;
+            grid-template-columns: auto 1fr;
+            gap: var(--spacing-xs) var(--spacing-md);
+            align-items: center;
+        }
+        .agent-info-grid .label { font-size: 0.8rem; color: var(--text-secondary); }
+        .agent-info-grid .value {
+            font-size: 0.85rem;
+            color: var(--text-primary);
+            font-family: monospace;
+        }
+        .config-sections { margin-top: var(--spacing-md); }
+        .config-section { margin-bottom: var(--spacing-md); }
+        .btn-group-bar {
+            display: flex;
+            gap: var(--spacing-md);
+            justify-content: flex-end;
+            padding-top: var(--spacing-md);
+            border-top: 1px solid var(--border-subtle);
+            margin-top: var(--spacing-lg);
+        }
+        .btn-group-bar .glass-button {
+            padding: 7px 16px;
+            font-size: 0.8rem;
+        }
+        .section {
+            padding: var(--spacing-md) 0;
+        }
+
+        /* Scrollbar styling */
+        .chat-messages::-webkit-scrollbar { width: 4px; }
+        .chat-messages::-webkit-scrollbar-track { background: transparent; }
+        .chat-messages::-webkit-scrollbar-thumb { background: var(--border-subtle); border-radius: 4px; }
+        .chat-messages::-webkit-scrollbar-thumb:hover { background: var(--text-secondary); }
+
+        /* ===== Responsive ===== */
+        @media (max-width: 768px) {
+            .config-body { flex-direction: column; }
+            .chat-panel {
+                width: 100%;
+                min-width: 0;
+                max-width: 100%;
+                height: 100%;
+                max-height: none;
+                position: static;
+            }
+            .chat-panel.mobile-hidden { display: none !important; }
+            .editor-panel.mobile-hidden { display: none !important; }
+            .tab-bar { display: flex; }
+        }
+        @media (min-width: 769px) {
+            .editor-panel.mobile-hidden { display: block; }
+            .chat-panel.mobile-hidden { display: flex; }
+        }
+
+        @media (max-width: 640px) {
+            .agent-info-grid {
+                grid-template-columns: 1fr;
+                gap: var(--spacing-xs);
+            }
+            .config-section { margin-bottom: var(--spacing-sm); }
+            .unconfigured-banner {
+                margin: 0 0 var(--spacing-sm) 0;
+                font-size: 0.8rem;
+                padding: 8px 12px;
+            }
+            .btn-group-bar {
+                flex-direction: column;
+                gap: var(--spacing-sm);
+            }
+            .btn-group-bar .glass-button { width: 100%; text-align: center; }
+        }
+
+        /* ===== Processing indicator ===== */
+        .processing-indicator {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+            margin-top: 6px;
+            animation: fadeIn 0.2s ease-out;
+        }
+        .processing-indicator .pulse {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: var(--accent-blue);
+            animation: dotPulse 1.4s infinite ease-in-out both;
+        }
+
+        /* ===== Highlight effect for diff view ===== */
+        @keyframes highlightPulse {
+            0% { box-shadow: 0 0 0 0 rgba(0, 217, 255, 0.6); }
+            70% { box-shadow: 0 0 0 6px rgba(0, 217, 255, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(0, 217, 255, 0); }
+        }
+        .form-textarea.highlight-diff {
+            border-color: var(--accent-blue) !important;
+            animation: highlightPulse 1s ease-out;
+        }
+        /* ===== Diff modal ===== */
+        .modal-overlay {
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0,0,0,0.6);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 1000;
+            animation: fadeIn 0.2s ease-out;
+        }
+        .modal-content {
+            background: var(--bg-primary);
+            border: 1px solid var(--border-subtle);
+            border-radius: var(--radius-lg);
+            width: 90%;
+            max-width: 900px;
+            max-height: 85vh;
+            display: flex;
+            flex-direction: column;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+            animation: modalSlideIn 0.2s ease-out;
+        }
+        @keyframes modalSlideIn {
+            from { opacity: 0; transform: translateY(20px) scale(0.97); }
+            to { opacity: 1; transform: translateY(0) scale(1); }
+        }
+        @keyframes fadeIn {
+            from { opacity: 0; }
+            to { opacity: 1; }
+        }
+        .modal-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 14px 20px;
+            border-bottom: 1px solid var(--border-subtle);
+            font-size: 0.9rem;
+            font-weight: 600;
+        }
+        .modal-header button {
+            background: none;
+            border: none;
+            color: var(--text-secondary);
+            font-size: 1.3rem;
+            cursor: pointer;
+            padding: 0 4px;
+            line-height: 1;
+        }
+        .modal-header button:hover { color: var(--text-primary); }
+        .modal-body {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            padding: 16px 20px;
+            flex: 1;
+            min-height: 0;
+            overflow: hidden;
+        }
+        .diff-panel {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            min-width: 0;
+        }
+        .diff-label {
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+            margin-bottom: 6px;
+            font-weight: 600;
+        }
+        .diff-panel pre {
+            flex: 1;
+            max-height: 180px;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-subtle);
+            border-radius: var(--radius-md);
+            padding: 12px;
+            margin: 0;
+            overflow: auto;
+            font-size: 0.78rem;
+            font-family: 'Fira Code', 'Consolas', monospace;
+            line-height: 1.5;
+            white-space: pre-wrap;
+            word-break: break-all;
+        }
+        .diff-panel:first-child pre {
+            border-color: rgba(255,107,107,0.3);
+        }
+        .diff-panel:last-child pre {
+            border-color: rgba(74,222,128,0.3);
+        }
+        .modal-footer {
+            display: flex;
+            gap: 8px;
+            justify-content: flex-end;
+            padding: 12px 20px;
+            border-top: 1px solid var(--border-subtle);
+        }
+        .modal-footer .glass-button {
+            padding: 6px 14px;
+            font-size: 0.8rem;
+        }
+    </style>
+    <script src="/static/js/auth.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/markdown-it@14/dist/markdown-it.min.js"></script>
+    <script>
+        (async function() {
+            const loggedIn = await Auth.checkAuthBeforeRender();
+            if (!loggedIn) {
+                document.write('<div style="display:flex;align-items:center;justify-content:center;height:100vh;background:#1a1a2e;color:#fff;font-family:sans-serif;"><p>正在跳转到登录页...</p></div>');
+            }
+        })();
+    </script>
+</head>
+<body>
+    <div class="page page-enter">
+        <!-- 导航栏 -->
+        <nav class="glass-nav">
+            <div class="container flex justify-between items-center">
+                <a href="/" class="navbar-brand">
+                    <span class="brand-icon">
+                        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M12 2L2 7l10 5 10-5-10-5z"/>
+                            <path d="M2 17l10 5 10-5"/>
+                            <path d="M2 12l10 5 10-5"/>
+                        </svg>
+                    </span>
+                    FeClaw
+                </a>
+                <div class="navbar-nav">
+                    <a href="https://{{ agent_hash }}.feclaw.lizidaren.cn" class="nav-link">控制台</a>
+                    <a href="https://{{ agent_hash }}.feclaw.lizidaren.cn/chat" class="nav-link">聊天</a>
+                    <a href="https://{{ agent_hash }}.feclaw.lizidaren.cn/files" class="nav-link">文件</a>
+                    <a href="https://{{ agent_hash }}.feclaw.lizidaren.cn/settings" class="nav-link">设置</a>
+                </div>
+            </div>
+        </nav>
+
+        <!-- 主内容区 -->
+        <section class="section">
+            <div class="container">
+                <div class="text-center mb-xl">
+                    <h2>Agent 配置</h2>
+                    <p class="text-secondary">为 Agent <code>{{ agent_hash }}</code> 设置人格与指令</p>
+                </div>
+
+                <!-- 未配置提示横幅 -->
+                <div id="unconfiguredBanner" class="unconfigured-banner" style="display:none;">
+                    <span>⚠️</span>
+                    <span>请先完成 Agent 配置（填写人格与指令）后再使用其他功能</span>
+                    <button onclick="dismissBanner()" class="banner-close">&times;</button>
+                </div>
+
+                <!-- 移动端 Tab 栏 -->
+                <div class="tab-bar" id="tabBar">
+                    <button class="tab-btn active" data-tab="chat">💬 对话</button>
+                    <button class="tab-btn" data-tab="edit">📝 编辑</button>
+                </div>
+
+                <!-- 双栏布局 -->
+                <div class="config-body">
+                    <!-- AI 聊天面板（左） -->
+                    <div class="chat-panel" id="chatPanel">
+                        <div class="chat-header">
+                            <span class="chat-header-text">✨ AI 配置助手</span>
+                            <button class="chat-clear-btn" onclick="clearChatHistory()" title="清除聊天记录">🗑️ 清除</button>
+                        </div>
+                        <div class="chat-messages" id="chatMessages"></div>
+                        <div class="chat-input-area">
+                            <div class="chat-input-row">
+                                <textarea id="chatInput" rows="2" placeholder="输入你的需求..." onkeydown="onChatKeydown(event)"></textarea>
+                                <button class="glass-button glass-button-primary chat-send-btn" onclick="sendMessage()" id="sendBtn">发送</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 编辑器面板（右） -->
+                    <div class="editor-panel" id="editorPanel">
+                        <!-- Agent 信息 -->
+                        <div class="glass-card mb-lg">
+                            <h4 class="mb-md">Agent 信息</h4>
+                            <div class="agent-info-grid">
+                                <span class="label">Agent Hash</span>
+                                <span class="value" id="agentHash">{{ agent_hash }}</span>
+                                <span class="label">名称</span>
+                                <span class="value" id="agentName">加载中...</span>
+                                <span class="label">状态</span>
+                                <span class="value" id="agentStatus">加载中...</span>
+                            </div>
+                        </div>
+
+                        <!-- Persona / SOUL.md -->
+                        <div class="config-section">
+                            <div class="section-label">
+                                <h4>SOUL.md — 人格定义</h4>
+                                <span class="char-count" id="soulCount">0 字</span>
+                            </div>
+                            <textarea class="form-textarea soul initial-height" id="soulInput" placeholder="Agent 的性格、身份、行为准则..." oninput="saveEditorContent();updateCounts();autoGrow(this)"></textarea>
+                        </div>
+
+                        <!-- identity.md -->
+                        <div class="config-section">
+                            <div class="section-label">
+                                <h4>identity.md — 身份卡（角色、专长、职责）</h4>
+                                <span class="char-count" id="identityCount">0 字</span>
+                            </div>
+                            <textarea class="form-textarea identity initial-height" id="identityInput" placeholder="Agent 的角色、专长、职责..." oninput="saveEditorContent();updateCounts();autoGrow(this)"></textarea>
+                        </div>
+
+                        <!-- user.md -->
+                        <div class="config-section">
+                            <div class="section-label">
+                                <h4>user.md — 用户画像（用户偏好、背景信息）</h4>
+                                <span class="char-count" id="userCount">0 字</span>
+                            </div>
+                            <textarea class="form-textarea user initial-height" id="userInput" placeholder="用户的偏好、背景、期望..." oninput="saveEditorContent();updateCounts();autoGrow(this)"></textarea>
+                        </div>
+
+                        <!-- BOOTSTRAP.md (hidden — written by backend during save) -->
+                        <textarea class="form-textarea hidden-bootstrap" id="bootstrapInput" readonly></textarea>
+
+                        <!-- 底部按钮 -->
+                        <div class="btn-group-bar">
+                            <button class="glass-button" onclick="clearEditorContent()" style="margin-right:auto;">清除</button>
+                            <button class="glass-button" onclick="cancelConfig()">取消</button>
+                            <button class="glass-button glass-button-primary" onclick="saveConfig()" id="saveBtn">完成初始化</button>
+                        </div>
+                        <div id="saveStatus" style="display:none;" class="mt-md"></div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Footer -->
+        <footer class="footer">
+            <div class="container text-center">
+                <p class="text-muted">FeClaw Agent 配置 · {{ agent_hash }}</p>
+            </div>
+        </footer>
+    </div>
+
+    <!-- ===== Diff Modal ===== -->
+    <div id="diffModal" class="modal-overlay" style="display:none;">
+        <div class="modal-content">
+            <div class="modal-header">
+                <span>对比差异 — <span id="diffFileName"></span></span>
+                <button onclick="closeDiffModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="diff-panel">
+                    <div class="diff-label">原文</div>
+                    <pre id="diffOldContent"></pre>
+                </div>
+                <div class="diff-panel">
+                    <div class="diff-label">新内容</div>
+                    <pre id="diffNewContent"></pre>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="glass-button" onclick="closeDiffModal()">关闭</button>
+                <button class="glass-button glass-button-primary" id="diffApplyBtn" onclick="applyEditFromDiff()">✅ 批准更改</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const AGENT_HASH = '{{ agent_hash }}';
+        const STORAGE_EDITOR_KEY = 'config_editor_' + AGENT_HASH;
+
+        // ========== Message state ==========
+        let messages = [];
+        let pendingEdits = [];
+        let editIdCounter = 0;
+        let isSending = false;
+        let renderLog = [];
+        let _loadingRenderLog = false;
+        // File name → textarea ID mapping
+        const FILE_TEXTAREA_MAP = {
+            'soul.md': 'soulInput',
+            'identity.md': 'identityInput',
+            'user.md': 'userInput',
+        };
+        const FILE_LABEL_MAP = {
+            'soul.md': 'SOUL.md',
+            'identity.md': 'identity.md',
+            'user.md': 'user.md',
+        };
+        const FILE_LIST = ['soul.md', 'identity.md', 'user.md'];
+
+        // ===== Tool definitions (sent to LLM) =====
+        const TOOLS = [
+            {
+                type: "function",
+                function: {
+                    name: "read_file",
+                    description: "读取配置文件当前内容",
+                    parameters: {
+                        type: "object",
+                        properties: {
+                            file: { type: "string", "enum": FILE_LIST }
+                        },
+                        required: ["file"]
+                    }
+                }
+            },
+            {
+                type: "function",
+                function: {
+                    name: "edit_file",
+                    description: "替换式编辑文件中的指定内容",
+                    parameters: {
+                        type: "object",
+                        properties: {
+                            file: { type: "string", "enum": FILE_LIST },
+                            old_string: { type: "string", description: "被替换的原文" },
+                            new_string: { type: "string", description: "替换后的新内容" }
+                        },
+                        required: ["file", "old_string", "new_string"]
+                    }
+                }
+            },
+            {
+                type: "function",
+                function: {
+                    name: "write_file",
+                    description: "完全覆盖写入文件全部内容",
+                    parameters: {
+                        type: "object",
+                        properties: {
+                            file: { type: "string", "enum": FILE_LIST },
+                            content: { type: "string", description: "新的完整内容" }
+                        },
+                        required: ["file", "content"]
+                    }
+                }
+            },
+            {
+                type: "function",
+                function: {
+                    name: "web_search",
+                    description: "搜索互联网获取信息",
+                    parameters: {
+                        type: "object",
+                        properties: {
+                            query: { type: "string", description: "搜索关键词" }
+                        },
+                        required: ["query"]
+                    }
+                }
+            }
+        ];
+
+        // ========== System prompt builder ==========
+        function buildSystemPrompt() {
+            const soul = document.getElementById('soulInput').value;
+            const identity = document.getElementById('identityInput').value;
+            const user = document.getElementById('userInput').value;
+            return `你是一位 Agent 配置助手，帮助用户编写三个配置文件：
+1. soul.md — Agent 的人格定义（性格、身份、行为准则）
+2. identity.md — Agent 的身份卡（角色、专长、职责）
+3. user.md — 用户画像（用户偏好、背景信息）
+
+你拥有以下工具：
+- read_file: 读取当前配置文件内容
+- edit_file: 编辑文件（替换式修改），用户需要确认后才生效
+- write_file: 覆盖写入文件全部内容，用户需要确认后才生效
+- web_search: 搜索互联网获取参考信息
+
+注意：edit_file 和 write_file 只是建议修改，不会自动生效。你需要等待用户点击"应用更改"按钮。
+
+当前配置状态：
+- soul.md: ${soul ? '（已有内容，共 ' + soul.length + ' 字）' : '（空）'}
+- identity.md: ${identity ? '（已有内容，共 ' + identity.length + ' 字）' : '（空）'}
+- user.md: ${user ? '（已有内容，共 ' + user.length + ' 字）' : '（空）'}
+
+请主动询问用户的需求，帮助用户创建和完善配置文件。`;
+        }
+
+        // ========== Page initialization ==========
+        document.addEventListener('DOMContentLoaded', () => {
+            // Tab switching via event listeners
+            document.querySelectorAll('.tab-btn').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    switchMobileTab(btn.dataset.tab);
+                });
+            });
+
+            // Restore editor content from localStorage
+            console.log('[DEBUG] restoreEditorContent called');
+            restoreEditorContent();
+
+            // Desktop: ensure both panels visible
+            if (window.innerWidth > 768) {
+                document.getElementById('chatPanel').style.display = '';
+                document.getElementById('editorPanel').style.display = '';
+            } else {
+                switchMobileTab('chat');
+            }
+            // Handle window resize (mobile ↔ desktop)
+            let resizeTimer;
+            let prevWidth = window.innerWidth;
+            window.addEventListener('resize', () => {
+                clearTimeout(resizeTimer);
+                resizeTimer = setTimeout(() => {
+                    const newWidth = window.innerWidth;
+                    // Only act when width crosses the 768 boundary (ignore height-only resizes like keyboard)
+                    if ((prevWidth <= 768 && newWidth > 768) || (prevWidth > 768 && newWidth <= 768)) {
+                        if (newWidth > 768) {
+                            document.getElementById('chatPanel').style.display = '';
+                            document.getElementById('editorPanel').style.display = '';
+                        } else {
+                            switchMobileTab('chat');
+                        }
+                    }
+                    prevWidth = newWidth;
+                }, 200);
+            });
+            loadAgentInfo();
+            restoreEditorContent();
+            loadConfig();
+            // Focus chat input
+            document.getElementById('chatInput').focus();
+        });
+
+        // ========== Agent info loading ==========
+        async function loadAgentInfo() {
+            const token = localStorage.getItem('feclaw_jwt');
+            try {
+                const resp = await fetch(`/api/agent/info?agent_hash=${AGENT_HASH}`, {
+                    headers: { 'Authorization': `Bearer ${token}` }
+                });
+                if (resp.ok) {
+                    const data = await resp.json();
+                    document.getElementById('agentName').textContent = data.name || '未命名';
+                    document.getElementById('agentStatus').textContent = data.status || '未知';
+                }
+            } catch(e) {
+                console.error('Failed to load agent info', e);
+            }
+        }
+
+        // ========== Config loading ==========
+        async function loadConfig() {
+            const token = localStorage.getItem('feclaw_jwt');
+            try {
+                const resp = await fetch(`/api/agent/${AGENT_HASH}/config`, {
+                    headers: { 'Authorization': `Bearer ${token}` }
+                });
+                if (resp.ok) {
+                    const data = await resp.json();
+                    console.log('[DEBUG] loadConfig response:', data.status, 'soul=', (data.soul || '').length);
+                    if (data.status === 'success') {
+                        // 只有服务器有内容时才覆盖（避免异步返回时空数据覆盖 localStorage 刚恢复的内容）
+                        if (data.soul) document.getElementById('soulInput').value = data.soul;
+                        else console.log('[DEBUG] loadConfig: NOT overwriting soul (empty on server)');
+                        if (data.identity) document.getElementById('identityInput').value = data.identity;
+                        if (data.user) document.getElementById('userInput').value = data.user;
+                        // 同步到 localStorage + 调整高度
+                        saveEditorContent();
+                        updateCounts();
+                        ['soulInput','identityInput','userInput'].forEach(id => autoGrow(document.getElementById(id)));
+
+                        // Auto-send welcome message if all sections are empty
+                        if (!data.soul && !data.identity && !data.user) {
+                            showWelcomeMessage();
+                        }
+                        // Show welcome for returning agents with empty chat
+                        if (!document.querySelector('#chatMessages .message')) {
+                            showWelcomeMessage();
+                        }
+                    }
+                }
+            } catch(e) {
+                console.error('Failed to load config', e);
+            }
+        }
+
+        let welcomeShown = false;
+        function showWelcomeMessage() {
+            if (welcomeShown) return;
+            welcomeShown = true;
+            const container = document.getElementById('chatMessages');
+            const bubble = document.createElement('div');
+            bubble.className = 'message ai';
+            bubble.innerHTML = '<span class="msg-label">🤖 AI 配置助手</span>' + renderMarkdown('欢迎！让我来帮助你创建 Agent。\n\n说说你希望它是什么身份？有什么样的说话风格？');
+            container.appendChild(bubble);
+            container.scrollTop = container.scrollHeight;
+            recordRender('ai_welcome');
+        }
+
+        // ========== Unconfigured banner ==========
+        (function() {
+            const params = new URLSearchParams(window.location.search);
+            if (params.get('reason') === 'unconfigured') {
+                const banner = document.getElementById('unconfiguredBanner');
+                if (banner) banner.style.display = 'flex';
+            }
+        })();
+        function dismissBanner() {
+            const banner = document.getElementById('unconfiguredBanner');
+            if (banner) banner.style.display = 'none';
+        }
+
+        // ========== Textarea utilities ==========
+        function autoGrow(el) {
+            el.style.height = 'auto';
+            el.style.height = el.scrollHeight + 'px';
+        }
+        function updateCounts() {
+            document.getElementById('soulCount').textContent = document.getElementById('soulInput').value.length + ' 字';
+            document.getElementById('identityCount').textContent = document.getElementById('identityInput').value.length + ' 字';
+            document.getElementById('userCount').textContent = document.getElementById('userInput').value.length + ' 字';
+        }
+
+        // ========== Mobile tab switching ==========
+        function switchMobileTab(tab) {
+            const chatPanel = document.getElementById('chatPanel');
+            const editorPanel = document.getElementById('editorPanel');
+            const btns = document.querySelectorAll('.tab-btn');
+            if (!chatPanel || !editorPanel) return;
+            btns.forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
+            if (window.innerWidth <= 768) {
+                if (tab === 'chat') {
+                    chatPanel.style.display = 'flex';
+                    editorPanel.style.display = 'none';
+                } else {
+                    chatPanel.style.display = 'none';
+                    editorPanel.style.display = 'block';
+                }
+            }
+        }
+
+        // ========== Chat input ==========
+        function onChatKeydown(e) {
+            if (e.key === 'Enter' && e.shiftKey) {
+                e.preventDefault();
+                sendMessage();
+            }
+        }
+
+        // ========== Send message ==========
+        async function sendMessage() {
+            if (isSending) return;
+            const input = document.getElementById('chatInput');
+            const text = input.value.trim();
+            if (!text) return;
+
+            input.value = '';
+            autoGrow(input);
+            isSending = true;
+
+            // Add user message
+            addUserMessage(text);
+
+            // Build system prompt with current content
+            const systemPrompt = buildSystemPrompt();
+
+            // Initialize or reset messages for this conversation
+            if (messages.length === 0) {
+                messages.push({ role: "system", content: systemPrompt });
+            } else {
+                // Update system message content to reflect current state
+                messages[0] = { role: "system", content: systemPrompt };
+            }
+
+            messages.push({ role: "user", content: text });
+            saveChatHistory();
+
+            const sendBtn = document.getElementById('sendBtn');
+            sendBtn.disabled = true;
+            sendBtn.textContent = '...';
+
+            try {
+                await chatLoop();
+            } catch (e) {
+                console.error('Chat error:', e);
+                if (e.name === 'AbortError') {
+                    addToolMessage('⚠️ 请求超时（60s），请重试');
+                } else {
+                    addToolMessage('⚠️ 出错了：' + e.message);
+                }
+            }
+
+            sendBtn.disabled = false;
+            sendBtn.textContent = '发送';
+            isSending = false;
+        }
+
+        // ========== Chat loop (stream + tool execution) ==========
+        async function chatLoop() {
+            let iterationCount = 0;
+            const MAX_ITERATIONS = 10;
+
+            while (iterationCount < MAX_ITERATIONS) {
+                iterationCount++;
+
+                // Create AI message bubble for streaming
+                const aiBubble = addAiMessageBubble();
+
+                // SSE stream
+                const { fullContent, toolCalls } = await streamChat(aiBubble);
+
+                if (toolCalls.length === 0) {
+                    // Pure text response — done
+                    hideProcessingIndicator();
+                    updateAiBubble(aiBubble, fullContent || '(无回复)');
+                    messages.push({ role: "assistant", content: fullContent || '' });
+                    saveChatHistory();
+                    return;
+                }
+
+                // Has tool calls — finalize the AI bubble
+                updateAiBubble(aiBubble, fullContent || '');
+                showProcessingIndicator(aiBubble);
+
+                // Build assistant message with tool_calls
+                const assistantMsg = { role: "assistant", content: fullContent || null, tool_calls: toolCalls };
+                messages.push(assistantMsg);
+
+                // Execute each tool
+                const toolResults = [];
+                for (const tc of toolCalls) {
+                    const result = await executeToolCall(tc);
+                    toolResults.push(result);
+                    messages.push({ role: "tool", content: result.content, tool_call_id: tc.id });
+                }
+
+                // Render tool messages
+                for (const tr of toolResults) {
+                    renderToolResult(tr);
+                }
+
+                // Continue loop to send tool results back to LLM
+            }
+
+            if (iterationCount >= MAX_ITERATIONS) {
+                hideProcessingIndicator();
+                addToolMessage('⚠️ 工具调用次数过多，已自动停止');
+            }
+        }
+
+        // ========== SSE streaming ==========
+        async function streamChat(aiBubble) {
+            const token = localStorage.getItem('feclaw_jwt');
+
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 60000);
+
+            try {
+            const resp = await fetch(`/api/agent/${AGENT_HASH}/chat`, {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${token}`,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    messages: messages,
+                    tools: TOOLS,
+                    stream: true
+                }),
+                signal: controller.signal
+            });
+
+            if (!resp.ok) {
+                const errText = await resp.text();
+                throw new Error(`API error (${resp.status}): ${errText}`);
+            }
+
+            const reader = resp.body.getReader();
+            const decoder = new TextDecoder();
+            let fullContent = '';
+            let partialToolCalls = {};
+            let buffer = '';
+
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+
+                buffer += decoder.decode(value, { stream: true });
+                const lines = buffer.split('\n');
+                // Keep the last potentially incomplete line in the buffer
+                buffer = lines.pop() || '';
+
+                for (const line of lines) {
+                    const trimmed = line.trim();
+                    if (!trimmed.startsWith('data: ')) continue;
+
+                    const data = trimmed.slice(6);
+                    if (data === '[DONE]') continue;
+
+                    try {
+                        const parsed = JSON.parse(data);
+                        const delta = parsed.choices?.[0]?.delta;
+                        if (!delta) continue;
+
+                        // Text content
+                        if (delta.content) {
+                            fullContent += delta.content;
+                            updateAiBubble(aiBubble, fullContent);
+                        }
+
+                        // Tool calls (partial deltas)
+                        if (delta.tool_calls) {
+                            for (const tc of delta.tool_calls) {
+                                const idx = tc.index;
+                                if (!partialToolCalls[idx]) {
+                                    partialToolCalls[idx] = {
+                                        id: tc.id || '',
+                                        type: tc.type || 'function',
+                                        function: { name: '', arguments: '' }
+                                    };
+                                }
+                                if (tc.id) partialToolCalls[idx].id = tc.id;
+                                if (tc.function) {
+                                    if (tc.function.name) partialToolCalls[idx].function.name += tc.function.name;
+                                    if (tc.function.arguments) partialToolCalls[idx].function.arguments += tc.function.arguments;
+                                }
+                            }
+                        }
+                    } catch (e) {
+                        // Skip unparseable chunks
+                    }
+                }
+            }
+
+            // Process remaining buffer
+            if (buffer.trim()) {
+                const trimmed = buffer.trim();
+                if (trimmed.startsWith('data: ')) {
+                    const data = trimmed.slice(6);
+                    if (data !== '[DONE]') {
+                        try {
+                            const parsed = JSON.parse(data);
+                            const delta = parsed.choices?.[0]?.delta;
+                            if (delta) {
+                                if (delta.content) {
+                                    fullContent += delta.content;
+                                    updateAiBubble(aiBubble, fullContent);
+                                }
+                                if (delta.tool_calls) {
+                                    for (const tc of delta.tool_calls) {
+                                        const idx = tc.index;
+                                        if (!partialToolCalls[idx]) {
+                                            partialToolCalls[idx] = {
+                                                id: tc.id || '',
+                                                type: tc.type || 'function',
+                                                function: { name: '', arguments: '' }
+                                            };
+                                        }
+                                        if (tc.id) partialToolCalls[idx].id = tc.id;
+                                        if (tc.function) {
+                                            if (tc.function.name) partialToolCalls[idx].function.name += tc.function.name;
+                                            if (tc.function.arguments) partialToolCalls[idx].function.arguments += tc.function.arguments;
+                                        }
+                                    }
+                                }
+                            }
+                        } catch (e) {}
+                    }
+                }
+            }
+
+            // Convert partial tool calls to completed array
+            const toolCalls = Object.values(partialToolCalls)
+                .filter(tc => tc.function.name)
+                .map(tc => ({
+                    id: tc.id || ('call_' + Math.random().toString(36).slice(2, 10)),
+                    type: tc.type,
+                    function: {
+                        name: tc.function.name,
+                        arguments: tc.function.arguments
+                    }
+                }));
+
+            return { fullContent, toolCalls };
+            } finally {
+                clearTimeout(timeoutId);
+            }
+        }
+
+        // ========== Execute a single tool call ==========
+        async function executeToolCall(toolCall) {
+            const { name, arguments: argsStr } = toolCall.function;
+            let args;
+            try {
+                args = JSON.parse(argsStr);
+            } catch (e) {
+                return {
+                    type: name,
+                    file: '',
+                    query: '',
+                    content: `参数解析失败: ${e.message}`,
+                    edit: null
+                };
+            }
+
+            switch (name) {
+                case 'read_file':
+                    return executeReadFile(args);
+                case 'edit_file':
+                    return executeEditFile(args, toolCall.id);
+                case 'write_file':
+                    return executeWriteFile(args, toolCall.id);
+                case 'web_search':
+                    return executeWebSearch(args);
+                default:
+                    return {
+                        type: name,
+                        file: '',
+                        query: '',
+                        content: `未知工具: ${name}`,
+                        edit: null
+                    };
+            }
+        }
+
+        async function executeReadFile(args) {
+            const file = args.file;
+            const ta = document.getElementById(FILE_TEXTAREA_MAP[file]);
+            const content = ta ? ta.value : '';
+            return {
+                type: 'read_file',
+                file: file,
+                query: '',
+                content: content || '(空)',
+                edit: null,
+                status: 'done',
+                detail: `${FILE_LABEL_MAP[file] || file} (${content.length} 字)`
+            };
+        }
+
+        async function executeWebSearch(args) {
+            const query = args.query;
+            const token = localStorage.getItem('feclaw_jwt');
+            
+            // Show searching indicator immediately
+            const container = document.getElementById('chatMessages');
+            const searchBubble = document.createElement('div');
+            searchBubble.className = 'message tool';
+            searchBubble.textContent = `🔍 正在搜索 "${query}"...`;
+            container.appendChild(searchBubble);
+            container.scrollTop = container.scrollHeight;
+            
+            try {
+                const resp = await fetch(`/api/agent/${AGENT_HASH}/search?q=${encodeURIComponent(query)}`, {
+                    headers: { 'Authorization': `Bearer ${token}` }
+                });
+                const data = await resp.json();
+                const results = data.results || [];
+                const content = results.slice(0, 5).map(r =>
+                    `- ${r.title}: ${r.snippet}`
+                ).join('\n');
+                
+                // Update indicator to done
+                searchBubble.textContent = `✅ 搜索完成 (${results.length}条结果)`;
+                
+                return {
+                    type: 'web_search',
+                    file: '',
+                    query: query,
+                    content: content || '(无搜索结果)',
+                    edit: null,
+                    status: 'done',
+                    detail: `${results.length} 条结果`
+                };
+            } catch (e) {
+                searchBubble.textContent = '❌ 搜索失败';
+                return {
+                    type: 'web_search',
+                    file: '',
+                    query: query,
+                    content: `搜索失败: ${e.message}`,
+                    edit: null,
+                    status: 'error',
+                    detail: '搜索失败'
+                };
+            }
+        }
+
+        function executeEditFile(args, toolCallId) {
+            const file = args.file;
+            const edit = {
+                id: ++editIdCounter,
+                toolCallId: toolCallId || '',
+                file: file,
+                type: 'edit',
+                oldString: args.old_string,
+                newString: args.new_string,
+                applied: false
+            };
+            pendingEdits.push(edit);
+            return {
+                type: 'edit_file',
+                file: file,
+                query: '',
+                content: `已记录编辑建议：替换 ${FILE_LABEL_MAP[file] || file} 中的内容，等待用户确认`,
+                edit: edit,
+                status: 'pending',
+                detail: FILE_LABEL_MAP[file] || file
+            };
+        }
+
+        function executeWriteFile(args, toolCallId) {
+            const file = args.file;
+            const edit = {
+                id: ++editIdCounter,
+                toolCallId: toolCallId || '',
+                file: file,
+                type: 'write',
+                oldString: null,
+                newString: args.content,
+                applied: false
+            };
+            pendingEdits.push(edit);
+            return {
+                type: 'write_file',
+                file: file,
+                query: '',
+                content: `已记录写入建议：覆盖 ${FILE_LABEL_MAP[file] || file} 全部内容，等待用户确认`,
+                edit: edit,
+                status: 'pending',
+                detail: FILE_LABEL_MAP[file] || file
+            };
+        }
+
+        // ========== Render tool result in chat ==========
+        function renderToolResult(tr) {
+            const container = document.getElementById('chatMessages');
+
+            // web_search 指示器已在 executeWebSearch 中渲染了
+            if (tr.type === 'web_search') return;
+            const bubble = document.createElement('div');
+            bubble.className = 'message tool';
+            if (tr.type === 'read_file') {
+                bubble.innerHTML = `📖 已读取 ${tr.detail}`;
+                recordRender('tool_read', { detail: tr.detail });
+            } else if (tr.type === 'edit_file' || tr.type === 'write_file') {
+                const edit = tr.edit;
+                const action = tr.type === 'edit_file' ? '修改' : '重写';
+                bubble.innerHTML = `
+                    <div>[${action}] ${tr.detail}</div>
+                    <div class="tool-actions">
+                        <button class="tool-btn" onclick="viewDiff(${edit.id})" title="对比差异">📄 对比差异</button>
+                        <button class="tool-btn" id="applyBtn_${edit.id}" onclick="applyEdit(${edit.id})" title="批准更改">✅ 批准更改</button>
+                    </div>
+                `;
+                recordRender('tool_edit', { editId: edit.id });
+            } else {
+                bubble.textContent = tr.content;
+                recordRender('tool_status', { text: tr.content });
+            }
+
+            container.appendChild(bubble);
+            container.scrollTop = container.scrollHeight;
+        }
+
+        // ========== Apply edit ==========
+        function applyEdit(editId) {
+            const edit = pendingEdits.find(e => e.id === editId);
+            if (!edit || edit.applied) return;
+
+            const ta = document.getElementById(FILE_TEXTAREA_MAP[edit.file]);
+            if (!ta) return;
+
+            if (edit.type === 'write') {
+                // Full replacement
+                ta.value = edit.newString;
+            } else if (edit.type === 'edit') {
+                // Replace old_string with new_string
+                const idx = ta.value.indexOf(edit.oldString);
+                if (idx === -1) {
+                    const errorContainer = document.getElementById('chatMessages');
+                    const errMsg = document.createElement('div');
+                    errMsg.className = 'message tool';
+                    errMsg.textContent = '⚠️ 未在 ' + FILE_LABEL_MAP[edit.file] + ' 中找到匹配的原文，无法应用更改';
+                    errorContainer.appendChild(errMsg);
+                    // Notify LLM that the edit failed so it can retry with correct old_string
+                    const errorContent = `编辑失败：未在 ${FILE_LABEL_MAP[edit.file]} 中找到指定的原文。请用 read_file 重新读取文件内容，确认原文后重新编辑。`;
+                    messages.push({ role: "tool", content: errorContent, tool_call_id: edit.toolCallId || '' });
+                    saveChatHistory();
+                    return;
+                }
+                ta.value = ta.value.replaceAll(edit.oldString, edit.newString);
+            }
+
+            edit.applied = true;
+            autoGrow(ta);
+            updateCounts();
+            saveEditorContent();
+
+            // Update button
+            const btn = document.getElementById('applyBtn_' + editId);
+            if (btn) {
+                btn.textContent = '✅ 已应用';
+                btn.classList.add('applied');
+                btn.disabled = true;
+            }
+
+            // Add status message (no scroll)
+            const container = document.getElementById('chatMessages');
+            const msg = document.createElement('div');
+            msg.className = 'message tool';
+            msg.textContent = '✅ 已应用修改至 ' + FILE_LABEL_MAP[edit.file];
+            container.appendChild(msg);
+        }
+
+        // ========== View diff (modal) ==========
+        let currentDiffEditId = null;
+
+        function viewDiff(editId) {
+            const edit = pendingEdits.find(e => e.id === editId);
+            if (!edit) return;
+
+            currentDiffEditId = editId;
+            document.getElementById('diffFileName').textContent = FILE_LABEL_MAP[edit.file] || edit.file;
+
+            if (edit.type === 'edit') {
+                document.getElementById('diffOldContent').textContent = edit.oldString;
+            } else {
+                const ta = document.getElementById(FILE_TEXTAREA_MAP[edit.file]);
+                document.getElementById('diffOldContent').textContent = ta ? ta.value : '(空)';
+            }
+            document.getElementById('diffNewContent').textContent = edit.newString;
+
+            const applyBtn = document.getElementById('diffApplyBtn');
+            if (edit.applied) {
+                applyBtn.textContent = '✅ 已应用';
+                applyBtn.disabled = true;
+            } else {
+                applyBtn.textContent = '✅ 批准更改';
+                applyBtn.disabled = false;
+            }
+
+            document.getElementById('diffModal').style.display = 'flex';
+        }
+
+        function closeDiffModal() {
+            document.getElementById('diffModal').style.display = 'none';
+            currentDiffEditId = null;
+        }
+
+        function applyEditFromDiff() {
+            if (currentDiffEditId === null) return;
+            applyEdit(currentDiffEditId);
+            const edit = pendingEdits.find(e => e.id === currentDiffEditId);
+            if (edit && edit.applied) {
+                document.getElementById('diffApplyBtn').textContent = '✅ 已应用';
+                document.getElementById('diffApplyBtn').disabled = true;
+            }
+        }
+
+        // ========== Add message to chat UI ==========
+        function addUserMessage(text) {
+            const container = document.getElementById('chatMessages');
+            const bubble = document.createElement('div');
+            bubble.className = 'message user';
+            bubble.textContent = text;
+            container.appendChild(bubble);
+            container.scrollTop = container.scrollHeight;
+            recordRender('user');
+        }
+
+        function addAiMessageBubble() {
+            const container = document.getElementById('chatMessages');
+            const bubble = document.createElement('div');
+            bubble.className = 'message ai';
+            bubble.innerHTML = '<span class="msg-label">🤖 AI 配置助手</span><span class="typing-dots"><span></span><span></span><span></span></span>';
+            container.appendChild(bubble);
+            container.scrollTop = container.scrollHeight;
+            recordRender('ai');
+            return bubble;
+        }
+
+        function updateAiBubble(bubble, text) {
+            if (!bubble) return;
+            bubble.innerHTML = '<span class="msg-label">🤖 AI 配置助手</span>' + renderMarkdown(text);
+            const container = document.getElementById('chatMessages');
+            container.scrollTop = container.scrollHeight;
+        }
+
+        let processingIndicatorId = null;
+
+        function showProcessingIndicator(afterBubble) {
+            hideProcessingIndicator();
+            const el = document.createElement('div');
+            el.className = 'message tool processing-indicator';
+            el.id = 'chatProcessingIndicator';
+            el.innerHTML = '<span class="pulse"></span> 🤔 正在处理...';
+            if (afterBubble && afterBubble.parentNode) {
+                afterBubble.parentNode.insertBefore(el, afterBubble.nextSibling);
+            } else {
+                document.getElementById('chatMessages').appendChild(el);
+            }
+            const container = document.getElementById('chatMessages');
+            container.scrollTop = container.scrollHeight;
+        }
+
+        function hideProcessingIndicator() {
+            const el = document.getElementById('chatProcessingIndicator');
+            if (el) el.remove();
+        }
+
+        // ========== Markdown renderer ==========
+        function renderMarkdown(text) {
+            if (!text) return '';
+            if (typeof window.markdownit !== 'undefined') {
+                const md = window.markdownit({ html: false, breaks: true, linkify: true });
+                md.disable('table');
+                return md.render(text);
+            }
+            // fallback: safe escape + <br>
+            const el = document.createElement('div');
+            el.textContent = text;
+            return el.innerHTML.replace(/\n/g, '<br>');
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.appendChild(document.createTextNode(text));
+            return div.innerHTML;
+        }
+
+        // ========== Editor content persistence (localStorage) ==========
+        function saveEditorContent() {
+            try {
+                const data = {
+                    soul: document.getElementById('soulInput').value,
+                    identity: document.getElementById('identityInput').value,
+                    user: document.getElementById('userInput').value
+                };
+                console.log('[DEBUG] saveEditorContent: soul=' + data.soul.length + ' identity=' + data.identity.length + ' user=' + data.user.length);
+                localStorage.setItem(STORAGE_EDITOR_KEY, JSON.stringify(data));
+            } catch(e) { /* quota exceeded */ }
+        }
+
+        function restoreEditorContent() {
+            try {
+                const saved = localStorage.getItem(STORAGE_EDITOR_KEY);
+                console.log('[DEBUG] restoreEditorContent: key=' + STORAGE_EDITOR_KEY + ' found=' + !!saved);
+                if (!saved) return;
+                const data = JSON.parse(saved);
+                console.log('[DEBUG] restoreEditorContent: soul=' + (data.soul || '').length + ' identity=' + (data.identity || '').length + ' user=' + (data.user || '').length);
+                if (data.soul) document.getElementById('soulInput').value = data.soul;
+                if (data.identity) document.getElementById('identityInput').value = data.identity;
+                if (data.user) document.getElementById('userInput').value = data.user;
+            } catch(e) { /* ignore */ }
+        }
+
+        function clearEditorContent() {
+            if (!confirm('确定清除所有编辑器内容？')) return;
+            ['soulInput', 'identityInput', 'userInput'].forEach(id => {
+                document.getElementById(id).value = '';
+            });
+            localStorage.removeItem(STORAGE_EDITOR_KEY);
+            updateCounts();
+            addToolMessage('🗑️ 已清除编辑器内容');
+        }
+
+        function addToolMessage(text) {
+            const container = document.getElementById('chatMessages');
+            const bubble = document.createElement('div');
+            bubble.className = 'message tool';
+            bubble.textContent = text;
+            container.appendChild(bubble);
+            container.scrollTop = container.scrollHeight;
+        }
+
+        // ========== Save config ==========
+        async function saveConfig() {
+            const soul = document.getElementById('soulInput').value.trim();
+            const identity = document.getElementById('identityInput').value.trim();
+            const user = document.getElementById('userInput').value.trim();
+            const saveBtn = document.getElementById('saveBtn');
+            const statusEl = document.getElementById('saveStatus');
+
+            if (!soul && !identity && !user) {
+                showStatus('请至少填写一项配置内容', 'error');
+                return;
+            }
+
+            saveBtn.disabled = true;
+            saveBtn.textContent = '初始化中...';
+            statusEl.style.display = 'none';
+
+            const token = localStorage.getItem('feclaw_jwt');
+
+            try {
+                const resp = await fetch(`/api/agent/${AGENT_HASH}/configure`, {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `Bearer ${token}`,
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ soul, identity, user })
+                });
+                const data = await resp.json();
+                if (resp.ok) {
+                    // Clean up localStorage (configuration is now persisted server-side)
+                    localStorage.removeItem(getChatStorageKey());
+                    localStorage.removeItem(getChatStorageKey() + '_edits');
+                    localStorage.removeItem(getChatStorageKey() + '_log');
+                    localStorage.removeItem(STORAGE_EDITOR_KEY);
+                    showStatus('✅ 初始化完成！正在跳转...', 'success');
+                    setTimeout(() => {
+                        window.location.href = `https://${AGENT_HASH}.feclaw.lizidaren.cn`;
+                    }, 1200);
+                } else {
+                    showStatus('❌ 保存失败: ' + (data.detail || '未知错误'), 'error');
+                }
+            } catch(e) {
+                showStatus('❌ 保存失败: ' + e.message, 'error');
+            }
+
+            saveBtn.disabled = false;
+            saveBtn.textContent = '完成初始化';
+        }
+
+        function showStatus(msg, type) {
+            const el = document.getElementById('saveStatus');
+            el.textContent = msg;
+            el.className = 'mt-md';
+            el.style.display = 'block';
+            if (type === 'error') {
+                el.style.color = 'var(--accent-red)';
+                el.style.background = 'rgba(255,107,107,0.1)';
+                el.style.padding = '12px 16px';
+                el.style.borderRadius = '12px';
+            } else {
+                el.style.color = 'var(--accent-green)';
+                el.style.background = 'rgba(74,222,128,0.1)';
+                el.style.padding = '12px 16px';
+                el.style.borderRadius = '12px';
+            }
+        }
+
+        // ========== Cancel ==========
+        function cancelConfig() {
+            window.location.href = `https://${AGENT_HASH}.feclaw.lizidaren.cn`;
+        }
+
+        // ========== Render log for ordered replay ==========
+        function recordRender(type, data = {}) {
+            if (_loadingRenderLog) return;
+            renderLog.push({ type, ...data });
+        }
+
+        // ========== Chat history (localStorage) ==========
+        function getChatStorageKey() {
+            return 'config_chat_' + AGENT_HASH;
+        }
+
+        function saveChatHistory() {
+            try {
+                const serializable = messages.map(m => ({
+                    role: m.role,
+                    content: m.content,
+                    tool_call_id: m.tool_call_id,
+                    name: m.name
+                }));
+                localStorage.setItem(getChatStorageKey(), JSON.stringify(serializable));
+                // Persist pending edits
+                const editsData = pendingEdits.map(e => ({
+                    id: e.id,
+                    toolCallId: e.toolCallId,
+                    file: e.file,
+                    type: e.type,
+                    oldString: e.oldString,
+                    newString: e.newString,
+                    applied: e.applied
+                }));
+                localStorage.setItem(getChatStorageKey() + '_edits', JSON.stringify(editsData));
+                // Persist render log for ordered replay
+                localStorage.setItem(getChatStorageKey() + '_log', JSON.stringify(renderLog));
+            } catch(e) { /* quota exceeded, ignore */ }
+        }
+
+        function loadChatHistory() {
+            try {
+                const saved = localStorage.getItem(getChatStorageKey());
+                if (!saved) return;
+                const parsed = JSON.parse(saved);
+                if (!Array.isArray(parsed) || parsed.length === 0) return;
+                messages.length = 0;
+                pendingEdits.length = 0;
+                renderLog.length = 0;
+                for (const m of parsed) {
+                    messages.push(m);
+                }
+
+                // Restore pending edits
+                const editsSaved = localStorage.getItem(getChatStorageKey() + '_edits');
+                if (editsSaved) {
+                    const editsData = JSON.parse(editsSaved);
+                    if (Array.isArray(editsData)) {
+                        for (const edit of editsData) {
+                            pendingEdits.push(edit);
+                        }
+                        // Update counter to avoid ID conflicts
+                        editIdCounter = Math.max(...pendingEdits.map(e => e.id), 0);
+                    }
+                }
+
+                // Restore render log for ordered replay
+                let log = [];
+                const logSaved = localStorage.getItem(getChatStorageKey() + '_log');
+                if (logSaved) {
+                    try { log = JSON.parse(logSaved); } catch(e) {}
+                }
+
+                if (log.length > 0) {
+                    // Replay renders in exact original order
+                    _loadingRenderLog = true;
+                    const userMessages = messages.filter(m => m.role === 'user');
+                    const aiMessages = messages.filter(m => m.role === 'assistant');
+                    let userIdx = 0;
+                    let aiIdx = 0;
+
+                    // Allow welcome message to render during replay
+                    welcomeShown = false;
+
+                    for (const entry of log) {
+                        if (entry.type === 'user') {
+                            const msg = userMessages[userIdx++];
+                            if (msg) addUserMessage(msg.content || '');
+                        } else if (entry.type === 'ai') {
+                            const msg = aiMessages[aiIdx++];
+                            if (msg) {
+                                const b = addAiMessageBubble();
+                                updateAiBubble(b, msg.content || '');
+                            }
+                        } else if (entry.type === 'ai_welcome') {
+                            // Only renders if welcomeShown is still false
+                            showWelcomeMessage();
+                        } else if (entry.type === 'tool_edit') {
+                            const edit = pendingEdits.find(e => e.id === entry.editId);
+                            if (edit) {
+                                renderToolResult({
+                                    type: edit.type === 'edit' ? 'edit_file' : 'write_file',
+                                    file: edit.file,
+                                    query: '',
+                                    content: '',
+                                    edit: edit,
+                                    status: edit.applied ? 'done' : 'pending',
+                                    detail: FILE_LABEL_MAP[edit.file] || edit.file
+                                });
+                            }
+                        } else if (entry.type === 'tool_read') {
+                            addToolMessage('📖 已读取 ' + (entry.detail || ''));
+                        } else if (entry.type === 'tool_status') {
+                            if (entry.text) addToolMessage(entry.text);
+                        }
+                    }
+
+                    // Mark already-applied buttons
+                    for (const edit of pendingEdits.filter(e => e.applied)) {
+                        const btn = document.getElementById('applyBtn_' + edit.id);
+                        if (btn) {
+                            btn.textContent = '✅ 已应用';
+                            btn.classList.add('applied');
+                            btn.disabled = true;
+                        }
+                    }
+
+                    _loadingRenderLog = false;
+                    // Restore renderLog to match what was just replayed
+                    renderLog.length = 0;
+                    for (const entry of log) {
+                        renderLog.push(entry);
+                    }
+                } else {
+                    // Fallback: old behavior (no renderLog — legacy data)
+                    renderLog.length = 0;
+                    for (const m of parsed) {
+                        if (m.role === 'user') {
+                            addUserMessage(m.content || '');
+                        } else if (m.role === 'assistant' && m.content) {
+                            const b = addAiMessageBubble();
+                            updateAiBubble(b, m.content);
+                        }
+                    }
+                    // Restore pending edits and re-render tool bubbles
+                    const editsSaved2 = localStorage.getItem(getChatStorageKey() + '_edits');
+                    if (editsSaved2) {
+                        const editsData2 = JSON.parse(editsSaved2);
+                        if (Array.isArray(editsData2)) {
+                            for (const edit of editsData2) {
+                                pendingEdits.push(edit);
+                                renderToolResult({
+                                    type: edit.type === 'edit' ? 'edit_file' : 'write_file',
+                                    file: edit.file,
+                                    query: '',
+                                    content: '',
+                                    edit: edit,
+                                    status: edit.applied ? 'done' : 'pending',
+                                    detail: FILE_LABEL_MAP[edit.file] || edit.file
+                                });
+                            }
+                            for (const edit of pendingEdits.filter(e => e.applied)) {
+                                const btn = document.getElementById('applyBtn_' + edit.id);
+                                if (btn) {
+                                    btn.textContent = '✅ 已应用';
+                                    btn.classList.add('applied');
+                                    btn.disabled = true;
+                                }
+                            }
+                            editIdCounter = Math.max(...pendingEdits.map(e => e.id), 0);
+                        }
+                    }
+                }
+            } catch(e) { console.warn('Failed to load chat history', e); }
+        }
+
+        function clearChatHistory() {
+            if (!confirm('确定清除聊天记录？')) return;
+            localStorage.removeItem(getChatStorageKey());
+            localStorage.removeItem(getChatStorageKey() + '_edits');
+            localStorage.removeItem(getChatStorageKey() + '_log');
+            messages.length = 0;
+            pendingEdits.length = 0;
+            renderLog.length = 0;
+            document.getElementById('chatMessages').innerHTML = '';
+            updateCounts();
+            welcomeShown = false;
+            showWelcomeMessage();
+        }
+
+        // Call loadChatHistory after page setup
+        loadChatHistory();
+    </script>
+</body>
+</html>

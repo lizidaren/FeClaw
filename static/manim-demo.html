@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>manim-web 演示 — FeClaw</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #111; color: #eee; }
+.header { background: #1a1a2e; padding: 20px 24px; display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+.header h1 { font-size: 20px; font-weight: 600; color: #e94560; }
+.header p { font-size: 13px; color: #888; }
+.scene-select { display: flex; gap: 8px; padding: 12px 24px; background: #16213e; overflow-x: auto; flex-wrap: wrap; }
+.scene-btn { padding: 8px 18px; border: 1px solid #333; border-radius: 20px; background: transparent; color: #ccc; cursor: pointer; font-size: 13px; transition: all .2s; white-space: nowrap; }
+.scene-btn:hover { border-color: #e94560; color: #fff; }
+.scene-btn.active { background: #e94560; border-color: #e94560; color: #fff; }
+.main { display: flex; gap: 0; height: calc(100vh - 110px); }
+.canvas-area { flex: 1; display: flex; align-items: center; justify-content: center; background: #0a0a0a; min-height: 400px; position: relative; overflow: hidden; }
+#container { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; }
+.loading { position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%); color: #555; font-size: 14px; }
+.code-panel { width: 380px; min-width: 380px; background: #1a1a2e; border-left: 1px solid #333; display: flex; flex-direction: column; }
+.code-panel .code-header { padding: 12px 16px; border-bottom: 1px solid #333; font-size: 13px; color: #888; display: flex; justify-content: space-between; }
+.code-panel pre { flex: 1; overflow: auto; padding: 16px; font-size: 12px; line-height: 1.6; font-family: 'JetBrains Mono', 'Fira Code', monospace; color: #ccc; white-space: pre-wrap; word-break: break-word; }
+.code-panel code .kw { color: #c792ea; }
+.code-panel code .fn { color: #82aaff; }
+.code-panel code .str { color: #c3e88d; }
+.code-panel code .cm { color: #546e7a; }
+.code-panel code .num { color: #f78c6c; }
+@media (max-width: 768px) { .main { flex-direction: column; } .code-panel { width: 100%; min-width: auto; height: 300px; } }
+</style>
+<!-- v5 -->
+</head>
+<body>
+
+<div class="header">
+  <h1>🧪 manim-web</h1>
+  <p>Manim 数学动画引擎的浏览器版 — TypeScript 原生实现，无需服务端渲染</p>
+</div>
+
+<div class="scene-select" id="sceneSelect"></div>
+
+<div class="main">
+  <div class="canvas-area">
+    <div id="container"></div>
+    <div class="loading" id="loading">加载中…</div>
+  </div>
+  <div class="code-panel">
+    <div class="code-header">
+      <span>📄 场景代码</span>
+      <span style="color:#555;font-size:11px">manim-web API</span>
+    </div>
+    <pre><code id="codeDisplay"></code></pre>
+  </div>
+</div>
+
+
+<script type="module">
+import {
+  Scene, ThreeDScene, Circle, Square, Rectangle, Triangle, Polygon, Arrow, Arc, Star,
+  Text, MathTex, Tex, Paragraph,
+  Axes, NumberPlane, FunctionGraph, ParametricFunction,
+  Sphere, Cube, Cylinder, Torus, ThreeDAxes,
+  Create, Transform, FadeIn, FadeOut, Write, GrowFromCenter,
+  AnimationGroup, LaggedStart, Rotate,
+  BLUE, RED, GREEN, YELLOW, PURPLE, ORANGE, TEAL, WHITE, GRAY,
+} from "https://web-1257148458.cos.ap-guangzhou.myqcloud.com/webshare/manim_wasm/manim-web.browser.js";
+
+const scenes = {};
+
+// ── Scene 1: 基础几何 ──
+scenes.basic_geometry = {
+  label: '⚪ 基础几何',
+  code: `// 圆形、正方形、三角形
+const circle = new Circle({ color: BLUE });
+const square = new Square({ color: RED });
+const triangle = new Triangle({ color: GREEN });
+await scene.play(new Create(circle));
+await scene.play(new Transform(circle, square));
+scene.remove(square); // Transform 不会自动移除目标
+await scene.play(new Transform(circle, triangle));
+scene.remove(triangle);`,
+  async run(container) {
+    const scene = new Scene(container, { width: 600, height: 400 });
+    const circle = new Circle({ color: BLUE });
+    const square = new Square({ color: RED });
+    const triangle = new Triangle({ color: GREEN });
+    await scene.play(new Create(circle));
+    await scene.play(new Transform(circle, square));
+    scene.remove(square);
+    await scene.play(new Transform(circle, triangle));
+    scene.remove(triangle);
+    await scene.wait(1);
+  }
+};
+
+// ── Scene 2: 函数图像 ──
+scenes.function_graph = {
+  label: '📈 函数图像',
+  code: `// 正弦函数 + 导数
+const axes = new Axes();
+const plane = new NumberPlane();
+const sin = new FunctionGraph(
+  x => Math.sin(x),
+  { color: BLUE }
+);
+const cos = new FunctionGraph(
+  x => Math.cos(x),
+  { color: RED }
+);
+await scene.play(new Create(plane));
+await scene.play(new Write(axes));
+await scene.play(new Create(sin));
+await scene.play(new Transform(sin, cos));`,
+  async run(container) {
+    const scene = new Scene(container, { width: 600, height: 400 });
+    const plane = new NumberPlane();
+    const axes = new Axes();
+    const sin = new FunctionGraph({ func: x => Math.sin(x), color: BLUE });
+    const cos = new FunctionGraph({ func: x => Math.cos(x), color: RED });
+    await scene.play(new Create(plane));
+    await scene.play(new Write(axes));
+    await scene.play(new Create(sin));
+    await scene.wait(0.5);
+    await scene.play(new Transform(sin, cos, ));
+    await scene.wait(1);
+  }
+};
+
+// ── Scene 3: LaTeX 公式 ──
+scenes.latex_demo = {
+  label: '📐 LaTeX 公式',
+  code: `// 数学公式动画
+const tex1 = new MathTex({ latex: "e^{\\\\pi} + 1 = 0" });
+const tex2 = new MathTex({ latex: "e^{\\pi} \\int_a^b f(x)\\,dx" });
+await scene.play(new Write(tex1));
+await scene.play(new Transform(tex1, tex2));`,
+  async run(container) {
+    const scene = new Scene(container, { width: 600, height: 400 });
+    const tex1 = new MathTex({ latex: "e^{i\\pi} + 1 = 0" });
+    const tex2 = new MathTex({ latex: "\\int_a^b f(x)\\,dx = F(b) - F(a)" });
+    await scene.play(new Write(tex1));
+    await scene.wait(1);
+    await scene.play(new Transform(tex1, tex2));
+    await scene.wait(1.5);
+  }
+};
+
+// ── Scene 4: 3D 立体 ──
+scenes.three_d = {
+  label: '🧊 3D 立体',
+  code: `// 3D 几何体（可拖拽旋转视角）
+const axes = new ThreeDAxes();
+const sphere = new Sphere({ color: BLUE });
+const cube = new Cube({ color: RED });
+// 先显示球体，再变成正方体
+await scene.play(new Create(sphere));
+await scene.play(new Transform(sphere, cube));`,
+  async run(container) {
+    const scene = new ThreeDScene(container, { width: 600, height: 400 });
+    const axes = new ThreeDAxes();
+    const sphere = new Sphere({ color: BLUE });
+    const cube = new Cube({ color: RED });
+    await scene.play(new Create(axes));
+    await scene.wait(0.3);
+    await scene.play(new Create(sphere));
+    await scene.wait(1);
+    await scene.play(new Transform(sphere, cube));
+    await scene.wait(1.5);
+  }
+};
+
+// ── Scene 5: 动画序列 ──
+scenes.animation_sequence = {
+  label: '🎬 动画序列',
+  code: `// 交错动画：圆、方、三角依次出现
+const shapes = [
+  new Circle({ color: BLUE }),
+  new Square({ color: RED }),
+  new Triangle({ color: GREEN }),
+];
+// 使用 LaggedStart 交错
+await scene.play(new LaggedStart(
+  shapes.map(s => new GrowFromCenter(s)),
+  0.3
+));`,
+  async run(container) {
+    const scene = new Scene(container, { width: 600, height: 400 });
+    const shapes = [
+      new Circle({ color: BLUE, radius: 0.8 }).moveTo([-2.5, 0, 0]),
+      new Square({ color: RED, sideLength: 1.5 }).moveTo([0, 0, 0]),
+      new Triangle({ color: GREEN }).moveTo([2.5, -0.25, 0]),
+    ];
+    await scene.play(new LaggedStart(
+      shapes.map(s => new GrowFromCenter(s)),
+      0.3
+    ));
+    await scene.wait(1.5);
+  }
+};
+
+// ── Scene 6: 旋转动画 ──
+scenes.rotation = {
+  label: '🔄 旋转动画',
+  code: `// 星形旋转 + 圆形轨道
+const star = new Star({ color: YELLOW });
+const orbit = new Circle({ color: GRAY, radius: 2 });
+await scene.play(new Create(orbit));
+await scene.play(new GrowFromCenter(star));
+await scene.play(new Rotate(star, { angle: Math.PI * 2 }));`,
+  async run(container) {
+    const scene = new Scene(container, { width: 600, height: 400 });
+    const star = new Star({ color: YELLOW, points: 5 });
+    const orbit = new Circle({ color: GRAY, radius: 2 });
+    await scene.play(new Create(orbit));
+    await scene.play(new GrowFromCenter(star));
+    await scene.play(new Rotate(star, { angle: Math.PI * 2 }));
+    await scene.wait(1);
+  }
+};
+
+// ── UI ──
+const sceneSelect = document.getElementById('sceneSelect');
+const container = document.getElementById('container');
+const codeDisplay = document.getElementById('codeDisplay');
+const loading = document.getElementById('loading');
+let currentScene = null;
+
+function createButtons() {
+  Object.entries(scenes).forEach(([key, s]) => {
+    const btn = document.createElement('button');
+    btn.className = 'scene-btn';
+    btn.textContent = s.label;
+    btn.onclick = () => runScene(key);
+    sceneSelect.appendChild(btn);
+  });
+}
+
+async function runScene(key) {
+  const s = scenes[key];
+  if (!s) return;
+
+  loading.style.display = 'block';
+  container.innerHTML = '';
+  codeDisplay.textContent = s.code;
+
+  document.querySelectorAll('.scene-btn').forEach(b => b.classList.remove('active'));
+  event.target.classList.add('active');
+
+  try {
+    await s.run(container);
+    loading.style.display = 'none';
+  } catch(e) {
+    loading.textContent = '❌ 渲染出错: ' + e.message + ' (详见控制台)';
+    console.error('manim-web error:', e);
+    if(e.stack) console.error(e.stack);
+  }
+}
+
+createButtons();
+// 默认加载第一个场景
+window.addEventListener('error', (ev) => {
+  loading.textContent = '❌ ' + (ev.error?.message || ev.message || 'Unknown error');
+  console.error('Global error:', ev);
+});
+window.addEventListener('unhandledrejection', (ev) => {
+  loading.textContent = '❌ ' + (ev.reason?.message || 'Unhandled rejection');
+  console.error('Unhandled rejection:', ev.reason);
+});
+const firstBtn = sceneSelect.querySelector('.scene-btn');
+if (firstBtn) {
+  firstBtn.classList.add('active');
+  loading.style.display = 'block';
+  const key = Object.keys(scenes)[0];
+  codeDisplay.textContent = scenes[key].code;
+  try {
+    await scenes[key].run(container);
+    loading.style.display = 'none';
+  } catch(e) {
+    loading.textContent = '❌ ' + (e.message || e);
+    console.error('Scene error:', e);
+  }
+}
+</script>
+</body>
+</html>

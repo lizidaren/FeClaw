@@ -1,0 +1,15 @@
+[Unit]
+Description=FeClaw sandbox network namespace
+Documentation=https://github.com/lch/FeClaw/docs/sandbox_network_isolation.md
+Before=feclaw-backend.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/libexec/feclaw/init_sandbox_netns.sh
+ExecStop=/usr/local/libexec/feclaw/cleanup_sandbox_netns.sh
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

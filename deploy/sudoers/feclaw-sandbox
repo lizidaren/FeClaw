@@ -1,0 +1,23 @@
+# /etc/sudoers.d/feclaw-sandbox
+# FeClaw 沙箱网络隔离 — sudo 权限控制
+#
+# 仅允许后端用户以 root 执行以下命令：
+# 1. ip netns exec feclaw-sandbox bwrap ...（沙箱执行）
+# 2. ip netns list（检查 netns 状态）
+# 3. iptables（应该不需要但保留调试用）
+#
+# 安全说明：
+# - 命令路径写死，无法通过 $PATH 劫持
+# - bwrap 自身受 seccomp 约束
+# - 后端无法通过 sudo 执行任意命令
+#
+# 警告：
+# - bwrap * 通配符允许任意 bwrap 参数，包括 --bind / / 逃逸
+# - 后续应升级为更精确的匹配规则
+#
+# 安装：
+#   sudo cp deploy/sudoers/feclaw-sandbox /etc/sudoers.d/feclaw-sandbox
+#   sudo chmod 440 /etc/sudoers.d/feclaw-sandbox
+
+lch ALL=(root) NOPASSWD: /usr/bin/ip netns exec feclaw-sandbox /usr/bin/bwrap *
+lch ALL=(root) NOPASSWD: /usr/bin/ip netns list

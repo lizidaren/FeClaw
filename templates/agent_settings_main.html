@@ -1,0 +1,836 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FeClaw 设置</title>
+    <script src="/static/js/auth.js"></script>
+    <script>
+        (async function() {
+            const loggedIn = await Auth.checkAuthBeforeRender();
+            if (!loggedIn) {
+                document.write('<div style="display:flex;align-items:center;justify-content:center;height:100vh;background:#0f0f23;color:#fff;font-family:sans-serif;"><p>正在跳转到登录页...</p></div>');
+            }
+        })();
+    </script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: #0f0f23;
+            color: #e0e0e0;
+            min-height: 100vh;
+        }
+        .header {
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            padding: 15px 30px;
+            display: flex; justify-content: space-between; align-items: center;
+            border-bottom: 1px solid #2a2a4a;
+        }
+        .header h1 { font-size: 18px; color: #fff; display: flex; align-items: center; gap: 10px; }
+        .header .agent { color: #888; font-size: 14px; }
+        .header button {
+            padding: 8px 16px;
+            background: rgba(255,255,255,0.1);
+            color: white;
+            border: 1px solid rgba(255,255,255,0.2);
+            border-radius: 6px;
+            cursor: pointer;
+        }
+        .page-layout { display: flex; max-width: 1400px; margin: 0 auto; min-height: calc(100vh - 60px); }
+        .sidebar {
+            width: 220px; flex-shrink: 0;
+            background: #1a1a2e;
+            border-right: 1px solid #2a2a4a;
+            padding: 20px 0;
+        }
+        .sidebar-item {
+            padding: 12px 24px; cursor: pointer;
+            display: flex; align-items: center; gap: 10px;
+            color: #888; transition: all 0.2s;
+            border-left: 3px solid transparent;
+        }
+        .sidebar-item:hover { color: #e0e0e0; background: rgba(102,126,234,0.05); }
+        .sidebar-item.active {
+            color: #fff; background: rgba(102,126,234,0.1);
+            border-left-color: #667eea;
+        }
+        .main-content { flex: 1; padding: 30px; overflow-y: auto; }
+        .section { display: none; }
+        .section.active { display: block; }
+        .section h2 { font-size: 20px; margin-bottom: 24px; }
+
+        .card {
+            background: #1a1a2e;
+            border-radius: 12px; padding: 24px; margin-bottom: 20px;
+            border: 1px solid #2a2a4a;
+        }
+        .card h3 { font-size: 16px; margin-bottom: 16px; display: flex; align-items: center; gap: 8px; }
+        .form-group { margin-bottom: 16px; }
+        .form-group label { display: block; margin-bottom: 6px; color: #888; font-size: 14px; }
+        .form-group input, .form-group textarea {
+            width: 100%; padding: 10px 14px;
+            background: #0f0f1a; border: 1px solid #2a2a4a;
+            border-radius: 8px; color: #fff; font-size: 14px;
+        }
+        .form-group input:focus, .form-group textarea:focus { outline: none; border-color: #667eea; }
+        .form-group textarea { min-height: 80px; resize: vertical; font-family: inherit; }
+        .form-group input[readonly] { color: #888; cursor: default; }
+
+        .btn {
+            padding: 10px 24px; border: none; border-radius: 8px;
+            cursor: pointer; font-size: 14px; transition: opacity 0.2s;
+        }
+        .btn:hover { opacity: 0.9; }
+        .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        .btn-primary { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; }
+        .btn-danger { background: #e74c3c; color: white; }
+        .btn-sm { padding: 6px 14px; font-size: 13px; }
+        .btn-outline { background: transparent; border: 1px solid #2a2a4a; color: #e0e0e0; }
+
+        .toast {
+            position: fixed; top: 20px; right: 20px; z-index: 9999;
+            padding: 14px 24px; border-radius: 8px;
+            opacity: 0; transform: translateY(-20px);
+            transition: all 0.3s; font-size: 14px;
+        }
+        .toast.show { opacity: 1; transform: translateY(0); }
+        .toast.success { background: #27ae60; color: white; }
+        .toast.error { background: #e74c3c; color: white; }
+
+        .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; margin-bottom: 20px; }
+        .stat-card {
+            background: #0f0f1a; border-radius: 10px; padding: 20px;
+            text-align: center; border: 1px solid #2a2a4a;
+        }
+        .stat-card .value { font-size: 28px; font-weight: 600; color: #667eea; }
+        .stat-card .label { font-size: 13px; color: #888; margin-top: 4px; }
+
+        .wechat-status { display: flex; align-items: center; gap: 12px; padding: 12px 16px; background: #0f0f1a; border-radius: 8px; margin-bottom: 12px; }
+        .wechat-status .dot { width: 8px; height: 8px; border-radius: 50%; }
+        .wechat-status .dot.bound { background: #27ae60; }
+        .wechat-status .dot.unbound { background: #888; }
+
+        .session-item {
+            display: flex; justify-content: space-between; align-items: center;
+            padding: 12px 16px; background: #0f0f1a; border-radius: 8px; margin-bottom: 8px;
+        }
+        .session-item .info { flex: 1; }
+        .session-item .info .topic { font-size: 14px; color: #e0e0e0; }
+        .session-item .info .meta { font-size: 12px; color: #888; margin-top: 2px; }
+
+        .secret-display {
+            display: flex; align-items: center; gap: 10px;
+            padding: 10px 14px; background: #0f0f1a; border-radius: 8px;
+            font-family: 'Monaco', 'Consolas', monospace; font-size: 14px;
+        }
+        .secret-display .value { flex: 1; color: #667eea; letter-spacing: 1px; }
+        .secret-display .copy-btn {
+            background: none; border: 1px solid #2a2a4a; color: #888;
+            padding: 4px 10px; border-radius: 4px; cursor: pointer; font-size: 12px;
+        }
+        .secret-display .copy-btn:hover { color: #fff; border-color: #667eea; }
+
+        .back-link { display: inline-block; padding: 10px 0; color: #667eea; text-decoration: none; margin-bottom: 16px; }
+
+        /* Toggle switch */
+        .toggle-switch { position: relative; width: 44px; height: 24px; display: inline-block; }
+        .toggle-switch input { opacity: 0; width: 0; height: 0; }
+        .toggle-slider {
+            position: absolute; cursor: pointer;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background-color: #2a2a4a; transition: 0.3s; border-radius: 24px;
+        }
+        .toggle-slider:before {
+            position: absolute; content: "";
+            height: 18px; width: 18px; left: 3px; bottom: 3px;
+            background-color: #888; transition: 0.3s; border-radius: 50%;
+        }
+        .toggle-switch input:checked + .toggle-slider { background-color: #667eea; }
+        .toggle-switch input:checked + .toggle-slider:before { transform: translateX(20px); background-color: #fff; }
+
+        /* WeChat dialog */
+        #wechat-dialog-overlay {
+            display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.6); z-index: 10000;
+            align-items: center; justify-content: center;
+        }
+        #wechat-dialog-overlay.active { display: flex; }
+        .wechat-dialog-box {
+            background: #1a1a2e; border: 1px solid #2a2a4a;
+            border-radius: 16px; padding: 32px; max-width: 360px; width: 90%; text-align: center;
+        }
+        .wechat-dialog-box h3 { margin: 0 0 8px; color: #fff; font-size: 18px; }
+        .wechat-dialog-box p { margin: 0 0 20px; color: #888; font-size: 13px; }
+        .wechat-qr { width: 200px; height: 200px; margin: 0 auto 16px; display: flex; align-items: center; justify-content: center; background: #0f0f1a; border-radius: 12px; }
+
+        .empty-state { text-align: center; padding: 40px; color: #888; }
+        .empty-state .icon { font-size: 40px; margin-bottom: 12px; }
+
+        @media (max-width: 768px) {
+            .sidebar { display: none; }
+            .page-layout { flex-direction: column; }
+            .main-content { padding: 16px; }
+            .stat-grid { grid-template-columns: repeat(2, 1fr); }
+        }
+        /* Mobile sidebar toggle */
+        .mobile-nav { display: none; padding: 12px 16px; background: #1a1a2e; border-bottom: 1px solid #2a2a4a; }
+        .mobile-nav select { width: 100%; padding: 8px; background: #0f0f1a; color: #fff; border: 1px solid #2a2a4a; border-radius: 6px; }
+        @media (max-width: 768px) { .mobile-nav { display: block; } }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div>
+            <h1>⚙️ FeClaw 设置</h1>
+            <span class="agent" id="agentHash">加载中...</span>
+            <span class="agent" id="authMethodLabel" style="font-size:12px;color:#888;margin-left:8px;"></span>
+        </div>
+        <button onclick="logout()" style="background:#c0392b;color:white;border:none;">退出登录</button>
+    </div>
+    <a href="/" class="back-link" style="padding:10px 30px;display:inline-block;">← 返回主页</a>
+
+    <!-- Mobile nav -->
+    <div class="mobile-nav">
+        <select onchange="switchSection(this.value)" id="mobileSelect">
+            <option value="profile">Agent 信息</option>
+            <option value="config">配置管理</option>
+            <option value="wechat">微信绑定</option>
+            <option value="totp">TOTP 权限码</option>
+            <option value="sessions">会话管理</option>
+        </select>
+    </div>
+
+    <div class="page-layout">
+        <div class="sidebar">
+            <div class="sidebar-item active" data-section="profile" onclick="switchSection('profile')">👤 Agent 信息</div>
+            <div class="sidebar-item" data-section="config" onclick="switchSection('config')">⚙️ 配置管理</div>
+            <div class="sidebar-item" data-section="wechat" onclick="switchSection('wechat')">💬 微信绑定</div>
+            <div class="sidebar-item" data-section="totp" onclick="switchSection('totp')">🔑 TOTP 权限码</div>
+            <div class="sidebar-item" data-section="sessions" onclick="switchSection('sessions')">💬 会话管理</div>
+        </div>
+
+        <div class="main-content">
+            <!-- Toast -->
+            <div class="toast" id="toast"></div>
+
+            <!-- ===== Section: Agent Profile ===== -->
+            <div class="section active" id="section-profile">
+                <h2>👤 Agent 基本信息</h2>
+                <div class="stat-grid" id="profileStats">
+                    <div class="stat-card"><div class="value" id="statHash">-</div><div class="label">Agent Hash</div></div>
+                    <div class="stat-card"><div class="value" id="statStatus">-</div><div class="label">状态</div></div>
+                    <div class="stat-card"><div class="value" id="statCreated">-</div><div class="label">创建时间</div></div>
+                </div>
+                <div class="card">
+                    <h3>📝 基本信息</h3>
+                    <div class="form-group">
+                        <label>Agent 名称</label>
+                        <input type="text" id="agentName" placeholder="给你的 Agent 起个名字">
+                    </div>
+
+                    <button class="btn btn-primary" onclick="saveProfile()">保存</button>
+                </div>
+            </div>
+
+            <!-- ===== Section: Config ===== -->
+            <div class="section" id="section-config">
+                <h2>⚙️ 配置管理</h2>
+                <div class="card">
+                    <h3>🌍 全局配置</h3>
+                    <div class="form-group" style="display:flex;justify-content:space-between;align-items:center;">
+                        <label style="margin:0;">心跳间隔 (秒)</label>
+                        <input type="number" id="heartbeat_interval" value="900" min="60" max="3600" style="width:120px;">
+                    </div>
+                    <div class="form-group" style="display:flex;justify-content:space-between;align-items:center;">
+                        <label style="margin:0;">自动加载会话</label>
+                        <label class="toggle-switch">
+                            <input type="checkbox" id="session_auto_load" checked>
+                            <span class="toggle-slider"></span>
+                        </label>
+                    </div>
+                    <div class="form-group" style="display:flex;justify-content:space-between;align-items:center;">
+                        <label style="margin:0;">摘要触发消息数</label>
+                        <input type="number" id="session_summary_trigger_count" value="50" min="10" max="500" style="width:120px;">
+                    </div>
+                </div>
+                <div class="card">
+                    <h3>🌐 Web 渠道</h3>
+                    <div class="form-group" style="display:flex;justify-content:space-between;align-items:center;">
+                        <label style="margin:0;">流式输出</label>
+                        <label class="toggle-switch">
+                            <input type="checkbox" id="web_streaming" checked>
+                            <span class="toggle-slider"></span>
+                        </label>
+                    </div>
+                    <div class="form-group" style="display:flex;justify-content:space-between;align-items:center;">
+                        <label style="margin:0;">显示工具调用</label>
+                        <label class="toggle-switch">
+                            <input type="checkbox" id="web_show_tool_calls">
+                            <span class="toggle-slider"></span>
+                        </label>
+                    </div>
+                    <div class="form-group" style="display:flex;justify-content:space-between;align-items:center;">
+                        <label style="margin:0;">深度思考</label>
+                        <label class="toggle-switch">
+                            <input type="checkbox" id="web_deep_thinking">
+                            <span class="toggle-slider"></span>
+                        </label>
+                    </div>
+                </div>
+                <div class="card">
+                    <h3>💬 微信渠道</h3>
+                    <div class="form-group" style="display:flex;justify-content:space-between;align-items:center;">
+                        <label style="margin:0;">显示工具调用</label>
+                        <label class="toggle-switch">
+                            <input type="checkbox" id="wechat_show_tool_calls">
+                            <span class="toggle-slider"></span>
+                        </label>
+                    </div>
+                    <div class="form-group" style="display:flex;justify-content:space-between;align-items:center;">
+                        <label style="margin:0;">深度思考</label>
+                        <label class="toggle-switch">
+                            <input type="checkbox" id="wechat_deep_thinking">
+                            <span class="toggle-slider"></span>
+                        </label>
+                    </div>
+                </div>
+                <div class="card">
+                    <h3>🧠 智能路由 (Smart Router)</h3>
+                    <div class="form-group" style="display:flex;justify-content:space-between;align-items:center;">
+                        <label style="margin:0;">
+                            启用智能路由
+                            <div style="font-size:12px;color:#888;font-weight:normal;margin-top:2px;">提前用小模型分析消息，预取数据、判断思考深度</div>
+                        </label>
+                        <label class="toggle-switch">
+                            <input type="checkbox" id="sr_enabled">
+                            <span class="toggle-slider"></span>
+                        </label>
+                    </div>
+                    <div style="background:rgba(255,193,7,0.1);border:1px solid rgba(255,193,7,0.3);border-radius:8px;padding:12px;font-size:13px;color:#f0c040;margin-top:12px;">
+                        ⚠️ 实验性功能：启用后每次对话将额外消耗约1-2秒小模型分析时间。
+                        可能带来更精准的决策，也可能引入意外行为。建议先在测试环境试用。
+                    </div>
+                </div>
+                <button class="btn btn-primary" onclick="saveConfig()">💾 保存配置</button>
+            </div>
+
+            <!-- ===== Section: WeChat ===== -->
+            <div class="section" id="section-wechat">
+                <h2>💬 微信绑定</h2>
+                <div class="card">
+                    <h3>绑定微信</h3>
+                    <p style="color:#888;font-size:14px;margin-bottom:16px;">绑定微信后，可通过微信使用此 Agent</p>
+                    <div id="wechat-status-area">
+                        <div class="wechat-status" id="wechatBoundStatus" style="display:none;">
+                            <span class="dot bound"></span>
+                            <span id="wechatBoundName">已绑定</span>
+                        </div>
+                        <div class="wechat-status" id="wechatUnboundStatus">
+                            <span class="dot unbound"></span>
+                            <span>未绑定</span>
+                        </div>
+                    </div>
+                    <button class="btn btn-primary" id="wechatBindBtn" onclick="openWechatDialog()">绑定微信</button>
+                    <button class="btn btn-danger btn-sm" id="wechatUnbindBtn" style="display:none;margin-top:8px;" onclick="unbindWechat()">解绑</button>
+                </div>
+            </div>
+
+            <!-- ===== Section: TOTP ===== -->
+            <div class="section" id="section-totp">
+                <h2>🔑 TOTP 权限码</h2>
+                <!-- ===== TOTP 分享链接 ===== -->
+                <div style="margin-bottom:24px;">
+                    <h3 style="display:flex;align-items:center;gap:8px;margin-bottom:16px;font-size:16px;">🔗 分享此 Agent</h3>
+                    <p style="color:#888;font-size:13px;margin-bottom:12px;">
+                        生成一个分享链接，发送给对方即可授权访问此 Agent 控制台，无需共享账号密码。
+                    </p>
+                    <button class="btn btn-primary" onclick="generateShareLink()" id="genShareBtn">生成分享链接</button>
+                    <div id="shareLinkResult" style="display:none;margin-top:10px;padding:12px;background:#0f0f1a;border-radius:8px;">
+                        <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+                            <input type="text" id="shareLinkInput" readonly style="flex:1;padding:8px 10px;background:#1a1a2e;border:1px solid #2a2a4a;border-radius:6px;color:#667eea;font-size:13px;">
+                            <button class="btn btn-sm btn-outline" onclick="navigator.clipboard.writeText(document.getElementById('shareLinkInput').value).then(()=>showToast('已复制'))" style="white-space:nowrap;">复制</button>
+                        </div>
+                        <p style="color:#888;font-size:12px;">验证码 <span id="shareCode" style="color:#e0e0e0;font-weight:600;"></span> · 5 分钟内有效</p>
+                    </div>
+                </div>
+
+                <!-- ===== TOTP 登录 ===== -->
+                <div>
+                    <h3 style="display:flex;align-items:center;gap:8px;margin-bottom:12px;font-size:16px;">🔑 TOTP 权限码登录</h3>
+                    <p style="color:#888;font-size:13px;margin-bottom:12px;">
+                        TOTP 是另一种登录方式。用 Authenticator 扫描下方二维码后，每次打开 Agent 控制台输入验证码即可登录，
+                        无需记忆 FeClaw 密码。
+                    </p>
+                    <p style="color:#f0c040;font-size:12px;margin-bottom:12px;">
+                        ⚠️ 实验功能，请谨慎操作
+                    </p>
+                    <p style="color:#888;font-size:12px;margin-bottom:16px;background:#0f0f1a;border-radius:8px;padding:10px;">
+                        FeClaw 采用滑动时间窗口（Sliding Window）校验 TOTP，验证码自生成起 <strong style="color:#e0e0e0;">5 分钟</strong>内有效。
+                    </p>
+
+                    <div style="text-align:center;margin-bottom:16px;">
+                        <div id="totpQRContainer" style="width:200px;height:200px;margin:0 auto;display:flex;align-items:center;justify-content:center;background:#0f0f1a;border-radius:12px;">
+                            <span style="color:#888;">加载中...</span>
+                        </div>
+                        <p id="totpQRHash" style="color:#888;font-size:13px;margin-top:8px;"></p>
+                    </div>
+                    <div class="form-group">
+                        <label>验证码测试</label>
+                        <div style="display:flex;gap:10px;">
+                            <input type="text" id="totpTestCode" placeholder="000000" maxlength="6" style="width:120px;">
+                            <button class="btn btn-primary btn-sm" onclick="testTotp()">验证</button>
+                        </div>
+                        <div id="totpTestResult" style="margin-top:8px;font-size:13px;"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ===== Section: Sessions ===== -->
+            <div class="section" id="section-sessions">
+                <h2>💬 会话管理</h2>
+                <div class="card">
+                    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+                        <h3 style="margin:0;">活跃会话</h3>
+                        <button class="btn btn-sm btn-outline" onclick="loadSessions()">🔄 刷新</button>
+                    </div>
+                    <div id="sessionList">
+                        <div class="empty-state"><div class="icon">💬</div><p>加载中...</p></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Logout Dialog -->
+    <div id="logoutDialog" class="wechat-dialog-overlay" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.6);z-index:10000;align-items:center;justify-content:center;">
+        <div style="background:#1a1a2e;border:1px solid #2a2a4a;border-radius:16px;padding:28px;max-width:380px;width:90%;text-align:center;">
+            <h3 style="margin:0 0 8px;color:#fff;font-size:16px;">退出登录</h3>
+            <p style="margin:0 0 20px;color:#888;font-size:13px;" id="logoutDialogMsg"></p>
+            <div id="logoutDialogExtra" style="display:none;margin-bottom:16px;">
+                <button id="logoutPlatformBtn" class="btn btn-danger" onclick="doLogout(true)" style="width:100%;margin-bottom:8px;background:#c0392b;color:white;border:none;padding:10px;border-radius:8px;cursor:pointer;font-size:14px;">同时退出 Platform</button>
+                <button id="logoutFeclawBtn" class="btn btn-primary" onclick="doLogout(false)" style="width:100%;margin-bottom:8px;background:linear-gradient(135deg,#667eea,#764ba2);color:white;border:none;padding:10px;border-radius:8px;cursor:pointer;font-size:14px;">退出</button>
+            </div>
+            <div>
+                <button class="btn btn-outline" onclick="closeLogoutDialog()" style="background:transparent;border:1px solid #2a2a4a;color:#888;padding:10px 24px;border-radius:8px;cursor:pointer;font-size:14px;">取消</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- WeChat Dialog -->
+    <div id="wechat-dialog-overlay">
+        <div class="wechat-dialog-box">
+            <h3>绑定微信</h3>
+            <p>使用微信扫描二维码</p>
+            <div class="wechat-qr" id="wechatDialogQR">
+                <span style="color:#888;">加载中...</span>
+            </div>
+            <p id="wechatDialogStatus" style="font-size:14px;color:#aaa;margin-bottom:16px;">等待扫码...</p>
+            <div style="display:flex;justify-content:center;gap:12px;">
+                <button class="btn btn-sm btn-outline" id="wechatRefreshBtn" style="display:none;" onclick="refreshWechatQR()">刷新二维码</button>
+                <button class="btn btn-sm btn-outline" onclick="closeWechatDialog()">关闭</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let jwt = localStorage.getItem('feclaw_jwt');
+        let agentHash = null;
+        let wechatPollTimer = null;
+        let wechatDialogOpen = false;
+        let sessionsData = [];
+
+        // Parse agent hash from host
+        const host = window.location.host;
+        const hashMatch = host.match(/^([a-f0-9]{4})\./);
+        agentHash = hashMatch ? hashMatch[1] : null;
+        document.getElementById('agentHash').textContent = 'Agent: ' + agentHash;
+        // 显示登录方式
+        if (jwt) {
+            try {
+                var payload = JSON.parse(atob(jwt.split('.')[1]));
+                var authMethod = payload.auth_method || '未知';
+                var label = {'platform': 'Platform', 'totp': 'TOTP', 'local': '本地账号'}[authMethod] || authMethod;
+                document.getElementById('authMethodLabel').textContent = '当前登录: ' + label;
+            } catch(e) {}
+        }
+
+        if (!jwt) {
+            window.location.href = '/login';
+        }
+
+        // ===== Section switching =====
+        function switchSection(name) {
+            document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
+            document.querySelectorAll('.sidebar-item').forEach(s => s.classList.remove('active'));
+            document.getElementById('section-' + name).classList.add('active');
+            const sidebarItem = document.querySelector(`.sidebar-item[data-section="${name}"]`);
+            if (sidebarItem) sidebarItem.classList.add('active');
+            document.getElementById('mobileSelect').value = name;
+
+            // Lazy load
+            if (name === 'sessions') loadSessions();
+            if (name === 'wechat') checkWechatBinding();
+            if (name === 'profile') loadProfile();
+            if (name === 'totp') loadTotp();
+        }
+
+        // ===== Toast =====
+        function showToast(msg, isError) {
+            const t = document.getElementById('toast');
+            t.textContent = msg;
+            t.className = 'toast ' + (isError ? 'error' : 'success');
+            t.classList.add('show');
+            setTimeout(() => t.classList.remove('show'), 3000);
+        }
+
+        // ===== Profile =====
+        async function loadProfile() {
+            try {
+                const res = await Auth.fetch('/api/agent/info?agent_hash=' + agentHash);
+                if (!res.ok) throw new Error('Failed to load');
+                const data = await res.json();
+                document.getElementById('statHash').textContent = data.hash;
+                document.getElementById('statStatus').textContent = data.status === 'initialized' ? '已初始化' : '待初始化';
+                document.getElementById('statCreated').textContent = data.created_at || '-';
+                document.getElementById('agentName').value = data.name || '';
+                document.getElementById('agentDescription').value = '';
+                if (data.user_id) {
+                    document.getElementById('agentDescription').placeholder = 'Agent #' + data.user_id;
+                }
+                // Try loading description from settings
+                
+            } catch (e) {
+                console.error('Failed to load profile:', e);
+            }
+        }
+
+
+
+        async function saveProfile() {
+            const name = document.getElementById('agentName').value;
+            const btn = event.target;
+            btn.disabled = true; btn.textContent = '保存中...';
+            try {
+                const res = await Auth.fetch('/api/agent/initialize', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ persona: '', name: name, description: '' })
+                });
+                if (res.ok) {
+                    showToast('保存成功');
+                    loadProfile();
+                } else {
+                    const err = await res.json();
+                    showToast(err.detail || '保存失败', true);
+                }
+            } catch (e) {
+                showToast('保存失败: ' + e.message, true);
+            }
+            btn.disabled = false; btn.textContent = '保存';
+        }
+
+        // ===== Config =====
+        async function loadConfig() {
+            try {
+                const res = await Auth.fetch('/api/settings');
+                if (!res.ok) { if (res.status === 401) logout(); return; }
+                const data = await res.json();
+                document.getElementById('heartbeat_interval').value = data.global['heartbeat.interval'] || 900;
+                document.getElementById('session_auto_load').checked = data.global['session.auto_load'] !== false;
+                document.getElementById('session_summary_trigger_count').value = data.global['session.summary_trigger_count'] || 50;
+                document.getElementById('web_streaming').checked = data.web['streaming'] !== false;
+                document.getElementById('web_show_tool_calls').checked = data.web['show_tool_calls'] === true;
+                document.getElementById('web_deep_thinking').checked = data.web['deep_thinking'] === true;
+                document.getElementById('wechat_show_tool_calls').checked = data.wechat['show_tool_calls'] === true;
+                document.getElementById('wechat_deep_thinking').checked = data.wechat['deep_thinking'] === true;
+                document.getElementById('sr_enabled').checked = data.sr_enabled === true;
+            } catch (e) { showToast('加载配置失败: ' + e.message, true); }
+        }
+
+        async function saveConfig() {
+            const btn = event.target;
+            btn.disabled = true; btn.textContent = '保存中...';
+            const updates = [
+                { key: 'heartbeat.interval', value: document.getElementById('heartbeat_interval').value },
+                { key: 'session.auto_load', value: document.getElementById('session_auto_load').checked.toString() },
+                { key: 'session.summary_trigger_count', value: document.getElementById('session_summary_trigger_count').value },
+                { key: 'streaming', value: document.getElementById('web_streaming').checked.toString(), channel: 'web' },
+                { key: 'show_tool_calls', value: document.getElementById('web_show_tool_calls').checked.toString(), channel: 'web' },
+                { key: 'deep_thinking', value: document.getElementById('web_deep_thinking').checked.toString(), channel: 'web' },
+                { key: 'streaming', value: 'false', channel: 'wechat' },
+                { key: 'show_tool_calls', value: document.getElementById('wechat_show_tool_calls').checked.toString(), channel: 'wechat' },
+                { key: 'deep_thinking', value: document.getElementById('wechat_deep_thinking').checked.toString(), channel: 'wechat' },
+                { key: 'sr_enabled', value: document.getElementById('sr_enabled').checked.toString() }
+            ];
+            let errors = [];
+            for (const u of updates) {
+                try {
+                    const res = await Auth.fetch('/api/settings', {
+                        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(u)
+                    });
+                    if (!res.ok) { const e = await res.json(); errors.push(e.detail || '?'); }
+                } catch (e) { errors.push(e.message); }
+            }
+            btn.disabled = false; btn.textContent = '💾 保存配置';
+            if (errors.length) showToast('部分配置保存失败', true);
+            else showToast('配置已保存');
+        }
+
+        // ===== WeChat =====
+        function stopWechatPoll() { if (wechatPollTimer) { clearTimeout(wechatPollTimer); wechatPollTimer = null; } }
+
+        function openWechatDialog() {
+            wechatDialogOpen = true;
+            document.getElementById('wechat-dialog-overlay').classList.add('active');
+            document.getElementById('wechatDialogStatus').textContent = '等待扫码...';
+            document.getElementById('wechatRefreshBtn').style.display = 'none';
+            document.getElementById('wechatDialogQR').innerHTML = '<span style="color:#888;">加载中...</span>';
+            fetchWechatQR();
+        }
+
+        function closeWechatDialog() {
+            wechatDialogOpen = false;
+            stopWechatPoll();
+            document.getElementById('wechat-dialog-overlay').classList.remove('active');
+        }
+
+        async function fetchWechatQR() {
+            const qrDiv = document.getElementById('wechatDialogQR');
+            const statusEl = document.getElementById('wechatDialogStatus');
+            const refreshBtn = document.getElementById('wechatRefreshBtn');
+            stopWechatPoll();
+            refreshBtn.style.display = 'none';
+            qrDiv.innerHTML = '<span style="color:#888;">加载中...</span>';
+            try {
+                const resp = await Auth.fetch('/api/wechat/qrcode');
+                if (!resp.ok) { qrDiv.innerHTML = '<span style="color:#888;">获取失败</span>'; statusEl.textContent = '获取二维码失败'; refreshBtn.style.display = ''; return; }
+                const data = await resp.json();
+                if (data.qrcode_url) {
+                    qrDiv.innerHTML = '<img src="https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=' + encodeURIComponent(data.qrcode_url) + '" style="width:180px;height:180px;border-radius:8px;" alt="QR">';
+                    statusEl.textContent = '等待扫码...';
+                    startWechatPoll();
+                } else { qrDiv.innerHTML = '<span style="color:#888;">暂不可用</span>'; }
+            } catch (e) { qrDiv.innerHTML = '<span style="color:#888;">服务不可用</span>'; statusEl.textContent = '网络错误'; refreshBtn.style.display = ''; }
+        }
+
+        function refreshWechatQR() { fetchWechatQR(); }
+
+        function startWechatPoll() {
+            stopWechatPoll();
+            const statusEl = document.getElementById('wechatDialogStatus');
+            const refreshBtn = document.getElementById('wechatRefreshBtn');
+            const poll = async function() {
+                if (!wechatDialogOpen) return;
+                try {
+                    const resp = await Auth.fetch('/api/wechat/status');
+                    const data = await resp.json();
+                    if (data.status === 'scanned') { statusEl.textContent = '已扫码，确认中...'; statusEl.style.color = '#fff'; }
+                    else if (data.status === 'confirmed') {
+                        statusEl.textContent = '绑定中...'; statusEl.style.color = '#fff';
+                        const bindResp = await Auth.fetch('/api/wechat/bind', {
+                            method: 'POST', headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ ilink_user_id: data.ilink_user_id, bot_token: data.bot_token, ilink_bot_id: data.ilink_bot_id, base_url: data.base_url, agent_hash: agentHash })
+                        });
+                        if (bindResp.ok) {
+                            statusEl.textContent = '✅ 绑定成功'; statusEl.style.color = '#4ade80';
+                            stopWechatPoll();
+                            setTimeout(function() { closeWechatDialog(); showWechatBound(data.ilink_user_id); }, 1500);
+                        } else { 
+                            const errData = await bindResp.json().catch(() => ({}));
+                            statusEl.textContent = '绑定失败: ' + (errData.detail || errData.message || bindResp.status); 
+                            statusEl.style.color = '#f87171'; 
+                            refreshBtn.style.display = ''; 
+                        }
+                        return;
+                    } else if (data.status === 'expired') { statusEl.textContent = '二维码已过期'; statusEl.style.color = '#fbbf24'; refreshBtn.style.display = ''; return; }
+                    else if (data.status === 'waiting' || data.status === 'idle') { statusEl.textContent = '等待扫码...'; statusEl.style.color = '#aaa'; }
+                    wechatPollTimer = setTimeout(poll, 1000);
+                } catch(e) { wechatPollTimer = setTimeout(poll, 2000); }
+            };
+            poll();
+        }
+
+        function showWechatBound(name) {
+            document.getElementById('wechatUnboundStatus').style.display = 'none';
+            const bound = document.getElementById('wechatBoundStatus');
+            bound.style.display = 'flex';
+            document.getElementById('wechatBoundName').textContent = '已绑定 ' + (name || '');
+            document.getElementById('wechatBindBtn').style.display = 'none';
+            document.getElementById('wechatUnbindBtn').style.display = 'inline-block';
+        }
+
+        async function checkWechatBinding() {
+            try {
+                const resp = await Auth.fetch('/api/wechat/binding');
+                if (resp.ok) {
+                    const data = await resp.json();
+                    if (data.bound) showWechatBound(data.openid || data.ilink_bot_id);
+                }
+            } catch(e) { console.error('WeChat check error:', e); }
+        }
+
+        async function unbindWechat() {
+            if (!confirm('确定要解绑微信吗？')) return;
+            try {
+                const resp = await Auth.fetch('/api/wechat/unbind', { method: 'DELETE' });
+                if (resp.ok) {
+                    showToast('已解绑');
+                    document.getElementById('wechatBoundStatus').style.display = 'none';
+                    document.getElementById('wechatUnboundStatus').style.display = 'flex';
+                    document.getElementById('wechatBindBtn').style.display = 'inline-block';
+                    document.getElementById('wechatUnbindBtn').style.display = 'none';
+                } else { showToast('解绑失败', true); }
+            } catch(e) { showToast('解绑失败: ' + e.message, true); }
+        }
+
+        document.getElementById('wechat-dialog-overlay').addEventListener('click', function(e) { if (e.target === this) closeWechatDialog(); });
+
+        // ===== TOTP =====
+        async function loadTotp() {
+            try {
+                const res = await Auth.fetch('/api/agent/info?agent_hash=' + agentHash);
+                if (res.ok) {
+                    const data = await res.json();
+                    if (data.totp_secret) {
+                        // 使用服务端生成的 QR data URL
+                        if (data.totp_qr_data_url) {
+                            document.getElementById('totpQRContainer').innerHTML = '<img src="' + data.totp_qr_data_url + '" style="width:180px;height:180px;border-radius:8px;" alt="TOTP QR Code">';
+                        }
+                        document.getElementById('totpQRHash').textContent = 'Agent: ' + agentHash;
+                    }
+                }
+            } catch(e) { console.error('Failed to load TOTP info:', e); }
+        }
+
+        async function generateShareLink() {
+            const btn = document.getElementById('genShareBtn');
+            btn.disabled = true; btn.textContent = '生成中...';
+            try {
+                const fetcher = window._originalFetch || fetch;
+                const res = await fetcher('/api/totp/generate', {
+                    method: 'POST',
+                    headers: { 'Authorization': 'Bearer ' + jwt, 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ agent_hash: agentHash, code: '' })
+                });
+                const data = await res.json();
+                if (res.ok) {
+                    document.getElementById('shareLinkInput').value = data.login_url;
+                    document.getElementById('shareCode').textContent = data.code;
+                    document.getElementById('shareLinkResult').style.display = 'block';
+                    showToast('分享链接已生成');
+                } else {
+                    showToast('生成失败: ' + (data.detail || '未知错误'), true);
+                }
+            } catch(e) {
+                showToast('生成失败: ' + e.message, true);
+            }
+            btn.disabled = false; btn.textContent = '生成分享链接';
+        }
+
+        async function testTotp() {
+            const code = document.getElementById('totpTestCode').value;
+            if (code.length !== 6) { document.getElementById('totpTestResult').textContent = '请输入6位验证码'; return; }
+            try {
+                // 使用原始 fetch（绕过 Auth.fetch 的 401 跳转逻辑）
+                const fetcher = window._originalFetch || fetch;
+                const res = await fetcher('/api/totp/verify', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ agent_hash: agentHash, code: code })
+                });
+                const el = document.getElementById('totpTestResult');
+                if (res.ok) { el.textContent = '✅ 验证码有效'; el.style.color = '#4ade80'; }
+                else { el.textContent = '❌ 验证码无效'; el.style.color = '#f87171'; }
+            } catch(e) { document.getElementById('totpTestResult').textContent = '❌ 请求失败'; }
+        }
+
+        // ===== Sessions =====
+        async function loadSessions() {
+            const list = document.getElementById('sessionList');
+            list.innerHTML = '<div class="empty-state"><div class="icon">⏳</div><p>加载中...</p></div>';
+            try {
+                const res = await Auth.fetch('/api/chat/sessions');
+                if (!res.ok) throw new Error('Failed');
+                const data = await res.json();
+                sessionsData = data || [];
+                if (sessionsData.length === 0) {
+                    list.innerHTML = '<div class="empty-state"><div class="icon">💬</div><p>暂无活跃会话</p></div>';
+                    return;
+                }
+                list.innerHTML = sessionsData.map(s => {
+                    const created = s.created_at ? new Date(s.created_at).toLocaleString('zh-CN') : '-';
+                    const topic = s.topic || '[web]';
+                    const msgCount = s.message_count || 0;
+                    return '<div class="session-item">' +
+                        '<div class="info"><div class="topic">' + topic + '</div><div class="meta">' + msgCount + ' 条消息 · ' + created + '</div></div>' +
+                        '<button class="btn btn-danger btn-sm" onclick="archiveSession(\'' + s.session_id + '\')">归档</button>' +
+                    '</div>';
+                }).join('');
+            } catch (e) {
+                list.innerHTML = '<div class="empty-state"><div class="icon">❌</div><p>加载失败: ' + e.message + '</p></div>';
+            }
+        }
+
+        async function archiveSession(sessionId) {
+            if (!confirm('确定要归档此会话吗？')) return;
+            try {
+                const res = await Auth.fetch('/api/chat/sessions/' + sessionId, { method: 'DELETE' });
+                if (res.ok) { showToast('会话已归档'); loadSessions(); }
+                else { showToast('归档失败', true); }
+            } catch(e) { showToast('归档失败: ' + e.message, true); }
+        }
+
+        // ===== Logout =====
+        function logout() {
+            var authMethod = 'local';
+            try {
+                var payload = JSON.parse(atob(jwt.split('.')[1]));
+                authMethod = payload.auth_method || 'local';
+            } catch(e) {}
+
+            // 统一使用自定义弹窗
+            var msgEl = document.getElementById('logoutDialogMsg');
+            var extraEl = document.getElementById('logoutDialogExtra');
+
+            if (authMethod === 'totp') {
+                msgEl.textContent = '退出后需要用新的 TOTP 权限码才能再次登录。确定退出吗？';
+                extraEl.style.display = '';
+                document.getElementById('logoutPlatformBtn').style.display = 'none';
+                document.getElementById('logoutFeclawBtn').textContent = '退出';
+            } else if (authMethod === 'platform') {
+                msgEl.textContent = '此操作会退出 FeClaw。请选择：';
+                extraEl.style.display = '';
+                // Platform 用户：显示「同时退出 Platform」和「仅退出 FeClaw」
+                document.getElementById('logoutPlatformBtn').style.display = '';
+                document.getElementById('logoutFeclawBtn').textContent = '仅退出 FeClaw';
+            } else {
+                msgEl.textContent = '此操作会退出整个 FeClaw 平台。确定退出吗？';
+                extraEl.style.display = '';
+                // 本地用户只显示「退出」
+                document.getElementById('logoutPlatformBtn').style.display = 'none';
+                document.getElementById('logoutFeclawBtn').textContent = '退出';
+            }
+            document.getElementById('logoutDialog').style.display = 'flex';
+        }
+
+        function closeLogoutDialog() {
+            document.getElementById('logoutDialog').style.display = 'none';
+            document.getElementById('logoutDialogExtra').style.display = 'none';
+        }
+
+        function doLogout(alsoPlatform) {
+            closeLogoutDialog();
+            Auth.clearAuth();
+            if (alsoPlatform) {
+                window.open('https://platform.firstentrance.lizidaren.cn/api/auth/logout-page', '_blank');
+            }
+            window.location.href = '/login';
+        }
+
+        // ===== Init =====
+        loadConfig();
+        loadProfile();
+    </script>
+</body>
+</html>

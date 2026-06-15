@@ -1,0 +1,18 @@
+[Unit]
+Description=FeClaw Backend
+Documentation=https://github.com/lch/FeClaw
+After=network-online.target feclaw-netns.service
+Wants=feclaw-netns.service
+
+[Service]
+Type=simple
+User=lch
+WorkingDirectory=/home/lch/Projects/FeClaw
+ExecStart=/usr/local/bin/python3 -m uvicorn main:app --host 0.0.0.0 --port 8080
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

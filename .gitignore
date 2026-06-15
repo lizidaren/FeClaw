@@ -1,0 +1,83 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+ENV/
+env/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+data/
+
+# Logs
+*.log
+logs/
+
+# Environment
+.env
+.env.local
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Build
+dist/
+build/
+*.egg-info/
+
+# Temporary
+*.tmp
+*.bak
+*.deprecated
+# Temp scripts
+tmp/
+
+# Node.js
+node_modules/
+package.json
+package-lock.json
+
+# Dev / audit artifacts
+audits/
+claude-audit/
+claude_audit/
+claude_audit_session_memory_service/
+agent_profiles/
+# app/public/filemanager/ is tracked (used by main.py)
+tests/
+
+# Internal tools & config
+.claude/
+.container
+REQUIREMENTS.md
+REQUIREMENTS_CHECK.md
+test_agent_cleanup.py
+test_agent_init.py
+test_oauth.py
+
+# Dev notes / audit reports
+*.audit.md
+*.audit-*.md
+edit_note_*.md
+code_review_result.md
+.multi_worker_audit.md
+.fix_rerank_and_client.md
+.agent_executor_fixes.md
+AUDIT_REPORT.md
+history/
