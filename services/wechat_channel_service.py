@@ -555,41 +555,26 @@ async def _generate_greeting_message(user_id: str, agent_hash: str = None) -> st
     try:
         from services.agent_executor import AgentExecutor
 
-        # 读取最近会话摘要
+        # 不调 COS Vector Search（新服务器环境不可用，且 greeting 不需要深度搜索）
         recent_context = ""
         try:
-            from services.vector_search_service import VectorSearchService
             from models.database import SessionLocal, ConversationSession
-            _vs = VectorSearchService(agent_hash=agent_hash)
-            _vec_results = await _vs.search("", index=f"idx-{agent_hash}-conv", top_k=5)
-            if _vec_results:
-                summaries = []
-                for r in _vec_results:
-                    meta = r.get("metadata", {})
-                    sid = meta.get("session_id")
-                    text = meta.get("text", meta.get("summary", ""))[:200]
-                    if sid and text:
-                        summaries.append(f"- 会话 {sid[:8]}: {text}")
-                if summaries:
-                    recent_context = "\n".join(summaries[:3])
-        except Exception:
+            _db2 = SessionLocal()
             try:
-                _db2 = SessionLocal()
-                try:
-                    _recent = _db2.query(ConversationSession).filter(
-                        ConversationSession.agent_hash == agent_hash
-                    ).order_by(ConversationSession.updated_at.desc()).limit(3).all()
-                    if _recent:
-                        summaries = []
-                        for s in _recent:
-                            if s.summary and s.summary not in ("生成中...", ""):
-                                summaries.append(f"- {s.topic or '话题'}: {s.summary[:200]}")
-                        if summaries:
-                            recent_context = "\n".join(summaries)
-                finally:
-                    _db2.close()
-            except Exception:
-                pass
+                _recent = _db2.query(ConversationSession).filter(
+                    ConversationSession.agent_hash == agent_hash
+                ).order_by(ConversationSession.updated_at.desc()).limit(3).all()
+                if _recent:
+                    summaries = []
+                    for s in _recent:
+                        if s.summary and s.summary not in ("生成中...", ""):
+                            summaries.append(f"- {s.topic or '话题'}: {s.summary[:200]}")
+                    if summaries:
+                        recent_context = "\n".join(summaries)
+            finally:
+                _db2.close()
+        except Exception:
+            pass
 
         # 读取人设文件
         persona_parts = []
