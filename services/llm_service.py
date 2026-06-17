@@ -921,7 +921,7 @@ class LLMService:
                     reasoning_chunk = delta.get("reasoning_content", "")
                     if reasoning_chunk:
                         full_reasoning += reasoning_chunk
-                        # 不 yield 给用户——思考链不应出现在对话中
+                        yield {"type": "reasoning", "content": reasoning_chunk}
 
                     # 处理 tool_calls（在流的最后部分）
                     delta_tool_calls = delta.get("tool_calls", None)

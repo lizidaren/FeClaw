@@ -182,7 +182,7 @@ class WebToolsMixin(AgentToolsServiceBase):
                     result = await self.search.search_tencent(query)
                     service_name = "腾讯搜狗(降级)"
                 elif fallback_level == "balanced":
-                    result = await self.search.search_qwen(query)
+                    result = await self.search.search_qwen(query, on_progress=on_progress)
                     service_name = "Qwen(降级)"
                 elif fallback_level == "bing_fallback":
                     result = await self._search_bing_fallback_async(query)
@@ -569,7 +569,8 @@ class WebToolsMixin(AgentToolsServiceBase):
         self,
         query: str,
         level: str = "balanced",
-        use_cache: bool = True
+        use_cache: bool = True,
+        on_progress=None
     ) -> str:
         """
         网页搜索，支持四级搜索服务。
@@ -610,7 +611,7 @@ class WebToolsMixin(AgentToolsServiceBase):
             result = await self.search.search_tencent_deepseek(query)
             service_name = "腾讯+DeepSeek"
         elif level == "balanced":
-            result = await self.search.search_qwen(query)
+            result = await self.search.search_qwen(query, on_progress=on_progress)
             service_name = "Qwen3.5-Flash"
         elif level == "deep":
             # 并发发动 Kimi + 百度，结果合并
@@ -639,7 +640,7 @@ class WebToolsMixin(AgentToolsServiceBase):
 
         elapsed_sec = (time.time() - start_time)
 
-        if result.startswith("Error:"):
+        if isinstance(result, str) and result.startswith("Error:"):
             fallback_result = await self._try_fallback_search_async(query, level, start_time)
             if fallback_result:
                 return fallback_result
@@ -688,7 +689,7 @@ class WebToolsMixin(AgentToolsServiceBase):
         elapsed_ms = int((time.time() - start_time) * 1000)
         elapsed_sec = elapsed_ms / 1000
 
-        if result.startswith("Error:"):
+        if isinstance(result, str) and result.startswith("Error:"):
             fallback_result = self._try_fallback_search(query, level, start_time)
             if fallback_result:
                 return fallback_result

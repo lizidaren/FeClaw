@@ -136,7 +136,7 @@ class SmartRouter:
         # 注入上下文（最后 2 轮）
         context_text = ""
         if context:
-            recent = context[-4:]  # 最近 4 条
+            recent = context[-10:]  # 最近 10 条（约 5 轮对话）
             lines = []
             for msg in recent:
                 role = "用户" if msg.get("role") == "user" else "助手"

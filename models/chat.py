@@ -18,6 +18,9 @@ class ChatEventType(Enum):
     ERROR = "error"             # 错误
     DONE = "done"               # 对话结束
     HISTORY_LOADED = "history_loaded"  # 历史消息加载完成
+    PIPELINE = "pipeline"       # 流水线状态更新（SmartRouter/预取等）
+    REASONING = "reasoning"     # 深度思考推理过程
+    SEARCH_PROGRESS = "search_progress"  # 搜索结果的流式内容
 
 
 @dataclass

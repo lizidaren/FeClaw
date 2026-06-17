@@ -240,6 +240,29 @@ class WebChannelService:
             elif event.type == ChatEventType.KEEPALIVE:
                 # 心跳注释（加填充字节强制触发 CDN flush）
                 yield ": keepalive " + ("x" * 1024) + "\n\n"
+
+            elif event.type == ChatEventType.PIPELINE:
+                # 流水线状态更新
+                payload = {'content': event.content}
+                if event.metadata:
+                    payload['result_preview'] = event.metadata.get('result_preview', '')
+                    payload['query'] = event.metadata.get('query', '')
+                    payload['tool'] = event.metadata.get('tool', '')
+                    payload['done'] = event.metadata.get('done', False)
+                    payload['error'] = event.metadata.get('error', False)
+                yield f"event: pipeline\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+            elif event.type == ChatEventType.SEARCH_PROGRESS:
+                # 搜索结果的流式内容
+                payload = {'content': event.content}
+                if event.metadata:
+                    payload['query'] = event.metadata.get('query', '')
+                    payload['tool'] = event.metadata.get('tool', '')
+                yield f"event: search_progress\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+            elif event.type == ChatEventType.REASONING:
+                # 深度思考推理过程
+                yield f"event: reasoning\ndata: {json.dumps({'content': event.content}, ensure_ascii=False)}\n\n"
             
             elif event.type == ChatEventType.ERROR:
                 yield f"event: error\ndata: {json.dumps({'code': 'LLM_ERROR', 'message': event.error_message}, ensure_ascii=False)}\n\n"
@@ -271,6 +294,7 @@ class WebChannelService:
         
         session = ConversationSession(
             session_id=new_session_id,
+            agent_hash=self.agent_hash,
             user_id=self.user_id,
             messages="[]",
             created_at=datetime.utcnow(),

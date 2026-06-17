@@ -54,7 +54,7 @@ _CHINESE_DAYS = [
 class LunarDate:
     """农历日期"""
 
-    __slots__ = ("year", "month", "day", "is_leap")
+    __slots__ = ("year", "month", "day", "is_leap", "lunar_year", "lunar_month", "lunar_day", "leap_month")
 
     def __init__(self, year: int, month: int, day: int, is_leap: bool = False):
         self.year = year

@@ -37,6 +37,11 @@ from models.database import SessionLocal, AgentProfile, ChatHistory
 
 logger = logging.getLogger(__name__)
 
+# VFS 文件内容缓存 { path: (content, expiry_timestamp) }
+# 避免每次对话都从 COS 重新读取静态文件
+_VFS_FILE_CACHE: Dict[str, tuple] = {}
+_VFS_CACHE_TTL = 60  # 缓存存活秒数
+
 
 @contextmanager
 def get_session():
@@ -195,6 +200,9 @@ class ChatService:
             )
 
         try:
+            _chat_t0 = time.time()
+            logger.warning(f"[TIMING] chat() start, agent={self.agent_hash}, channel={self.channel}, user_input_len={len(actual.text) if actual.text else 0}")
+
             # ① 前置钩子
             if self.pre_process_hook:
                 result = await self.pre_process_hook(self.channel, actual.meta, actual.text)
@@ -213,6 +221,10 @@ class ChatService:
 
             # ② 检查 Agent 状态
             agent_status = self._check_agent_status()
+
+            # 立即给前端反馈，避免等待 VFS 读取
+            yield ChatEvent(type=ChatEventType.PIPELINE, content="🤔 正在准备...")
+
             if agent_status == "pending":
                 yield ChatEvent(
                     type=ChatEventType.TEXT,
@@ -234,11 +246,15 @@ class ChatService:
                 return
 
             # ④ 构建系统提示词
+            _t_build_sp = time.time()
             system_prompt = await self.build_system_prompt()
+            logger.warning(f"[TIMING] build_system_prompt: {time.time()-_t_build_sp:.1f}s")
 
             # ⑤ 加载历史消息
+            _t_load_hist = time.time()
             if not skip_history and not self._history_loaded_from_session:
                 await self._load_history()
+                logger.warning(f"[TIMING] load_history: {time.time()-_t_load_hist:.1f}s, history_len={len(self.context.history)}")
                 yield ChatEvent(
                     type=ChatEventType.HISTORY_LOADED,
                     metadata={"count": len(self.context.history)}
@@ -248,18 +264,22 @@ class ChatService:
             messages = self._build_messages(system_prompt, actual.text, image_url)
 
             # ⑦ 调用 AI 进行对话
+            _t_ai = time.time()
             full_response = ""
             async for event in self._stream_ai_response(messages):
                 if event.type == ChatEventType.TEXT:
                     full_response += event.content
                 yield event
+            logger.warning(f"[TIMING] AI response: {time.time()-_t_ai:.1f}s, response_len={len(full_response)}")
 
             # ⑧ 保存对话历史
+            _t_save = time.time()
             self._save_conversation(
                 actual.text, full_response,
                 meta=actual.meta if actual.meta else None,
                 attachments=actual.attachments if actual.attachments else None,
             )
+            logger.warning(f"[TIMING] save_conversation: {time.time()-_t_save:.1f}s")
 
             # ⑨ 会话记忆后台提取（非阻塞）
             if settings.SESSION_MEMORY_ENABLED:
@@ -321,21 +341,45 @@ class ChatService:
             if profile and profile.system_prompt:
                 return _time_header + "\n\n" + profile.system_prompt
 
-        # 2. 回退到 VFS 读取
+        # 2. 回退到 VFS 读取 - 所有文件并行读取
         parts = [_time_header]
 
+        all_paths = [
+            "/workspace/agent/soul.md",
+            "/workspace/agent/identity.md",
+            "/workspace/agent/user.md",
+            "/workspace/agent/memory.md",
+            "/public/feclaw/index.md",
+            "/public/feclaw/principles.md",
+            "/public/feclaw/session_management.md",
+            "/public/feclaw/image_processing.md",
+            "/public/feclaw/skills/INDEX.md",
+            "/workspace/agent/skills/INDEX.md",
+            "/workspace/agent/BOOTSTRAP.md",
+        ]
+        files = await self._read_vfs_files_async(*all_paths)
+
+        soul_content = files.get("/workspace/agent/soul.md")
+        identity_content = files.get("/workspace/agent/identity.md")
+        user_content = files.get("/workspace/agent/user.md")
+        memory_content = files.get("/workspace/agent/memory.md")
+        platform_info = files.get("/public/feclaw/index.md")
+        principles_content = files.get("/public/feclaw/principles.md")
+        session_mgmt = files.get("/public/feclaw/session_management.md")
+        image_processing = files.get("/public/feclaw/image_processing.md")
+        skills_index = files.get("/public/feclaw/skills/INDEX.md")
+        local_skills = files.get("/workspace/agent/skills/INDEX.md")
+        bootstrap_content = files.get("/workspace/agent/BOOTSTRAP.md")
+
         # 读取人格设定
-        soul_content = self._read_vfs_file('/workspace/agent/soul.md')
         if soul_content:
             parts.append(f"【人格设定】\n{soul_content}")
 
         # 读取身份配置
-        identity_content = self._read_vfs_file('/workspace/agent/identity.md')
         if identity_content:
             parts.append(f"【身份配置】\n{identity_content}")
 
         # 读取用户信息
-        user_content = self._read_vfs_file('/workspace/agent/user.md')
         if user_content:
             parts.append(f"【用户信息】\n{user_content}")
 
@@ -350,7 +394,6 @@ class ChatService:
                 logger.debug(f"[ChatService] User profile injection skipped: {e}")
 
         # 读取长期记忆（跳过纯标题的空模板）
-        memory_content = self._read_vfs_file('/workspace/agent/memory.md')
         if memory_content and _has_meaningful_content(memory_content):
             parts.append(f"【长期记忆】\n{memory_content}")
             # 追加写入指南
@@ -386,12 +429,10 @@ class ChatService:
             parts.append(f"【会话笔记】\n当前会话有自动记录的笔记文件，包含近期重要信息。如需了解会话上下文，请使用 file_read 读取 `{session_note_path}`。")
 
         # 平台信息
-        platform_info = self._read_vfs_file('/public/feclaw/index.md')
         if platform_info:
             parts.append(f"【平台信息】\n{platform_info}")
 
         # 工具调用原则（从公共空间读取）
-        principles_content = self._read_vfs_file('/public/feclaw/principles.md')
         if principles_content:
             parts.append(f"【重要：工具调用原则】\n{principles_content}")
         else:
@@ -402,7 +443,6 @@ class ChatService:
 3️⃣ 如果回复里出现了"我让子Agent干某某事"、"读取文件最新内容"、"保存到错题本"之类的话，但没有对应工具调用，那就是在编造，绝不允许！""")
 
         # 会话管理提示
-        session_mgmt = self._read_vfs_file('/public/feclaw/session_management.md')
         if session_mgmt:
             parts.append(f"【会话管理】\n{session_mgmt}")
         else:
@@ -416,7 +456,6 @@ class ChatService:
 当用户想要回顾之前的讨论或切换到其他话题时，主动使用这些工具帮助管理会话。""")
 
         # 图片处理提示
-        image_processing = self._read_vfs_file('/public/feclaw/image_processing.md')
         if image_processing:
             parts.append(f"【图片处理】\n{image_processing}")
         else:
@@ -440,12 +479,10 @@ class ChatService:
 除非用户明确指定了输出形式（如"直接发"、"计算器"等），否则默认走文件分享路径。""")
 
         # Skills 系统（按需加载）
-        skills_index = self._read_vfs_file('/public/feclaw/skills/INDEX.md')
         if skills_index:
             parts.append(f"【技能系统】\n{skills_index}")
-        
+
         # Agent 本地技能（自动从对话中积累）
-        local_skills = self._read_vfs_file('/workspace/agent/skills/INDEX.md')
         if local_skills and len(local_skills) > 50:
             parts.append(f"【个人技能】\n{local_skills}")
 
@@ -470,7 +507,6 @@ class ChatService:
             logger.debug(f"[ChatService] RAG search skipped: {e}")
 
         # BOOTSTRAP.md 初始化引导（存在时注入，不存在则忽略）
-        bootstrap_content = self._read_vfs_file('/workspace/agent/BOOTSTRAP.md')
         if bootstrap_content:
             parts.append(f"【初始化引导 — BOOTSTRAP.md】\n{bootstrap_content}")
 
@@ -485,6 +521,55 @@ class ChatService:
         except Exception as e:
             logger.debug(f"[ChatService] VFS read error for {path}: {e}")
         return None
+
+    async def _read_vfs_files_async(self, *paths: str) -> Dict[str, Optional[str]]:
+        """并行读取多个 VFS 文件（带 60s TTL 缓存）"""
+        now = time.time()
+
+        # 先检查缓存
+        result = {}
+        uncached = []
+        for p in paths:
+            cached = _VFS_FILE_CACHE.get(p)
+            if cached and cached[1] > now:
+                result[p] = cached[0]
+            else:
+                uncached.append(p)
+
+        if not uncached:
+            return result
+
+        # 只拉取缓存失效的文件
+        # 用 COS 预签名 URL + httpx 并行下载，避免 COS SDK 的 SSL/TLS 握手开销
+        import httpx
+        from services.storage_service import get_storage_service
+
+        storage_svc = get_storage_service()
+
+        async def _read_one(path):
+            try:
+                cos_key, err = self.vfs._resolve_path(path)
+                if err or not cos_key:
+                    return (path, None)
+
+                cos_url = f"https://{settings.TENCENT_COS_BUCKET}.cos.{settings.TENCENT_COS_REGION}.myqcloud.com/{cos_key}"
+                presigned = storage_svc.generate_presigned_get_url(cos_url, expired=3600)
+
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    resp = await client.get(presigned)
+                    resp.raise_for_status()
+                    content = resp.text.strip()
+                    if content:
+                        _VFS_FILE_CACHE[path] = (content, now + _VFS_CACHE_TTL)
+                        return (path, content)
+            except Exception as e:
+                logger.debug(f"[ChatService] VFS read error for {path}: {e}")
+            return (path, None)
+
+        fresh = await asyncio.gather(*[_read_one(p) for p in uncached])
+        for path, content in fresh:
+            result[path] = content
+        return result
     
     async def _load_history(self):
         """从 ChatHistory 表加载对话历史，注入到 ChatContext
@@ -662,6 +747,26 @@ class ChatService:
                     yield ChatEvent(
                         type=ChatEventType.KEEPALIVE,
                         content=step.content or ""
+                    )
+                elif step.step_type == "pipeline":
+                    # 流水线状态更新（SmartRouter/预取等）
+                    yield ChatEvent(
+                        type=ChatEventType.PIPELINE,
+                        content=step.content,
+                        metadata=step.metadata
+                    )
+                elif step.step_type == "search_progress":
+                    # 搜索结果的流式内容
+                    yield ChatEvent(
+                        type=ChatEventType.SEARCH_PROGRESS,
+                        content=step.content,
+                        metadata=step.metadata
+                    )
+                elif step.step_type == "reasoning":
+                    # 深度思考推理过程
+                    yield ChatEvent(
+                        type=ChatEventType.REASONING,
+                        content=step.content
                     )
 
             # 注意：DONE 事件由 chat() 方法统一发送，避免重复

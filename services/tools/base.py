@@ -37,11 +37,13 @@ logger = logging.getLogger(__name__)
 @dataclass
 class Step:
     """流式步骤 dataclass"""
-    step_type: str  # "pre_tool" | "tool_call" | "tool_result" | "final"
+    step_type: str  # "pre_tool" | "tool_call" | "tool_result" | "final" | "pipeline" | "reasoning" | "keepalive" | "search_progress"
     content: str
     tool_name: Optional[str] = None
     tool_args: Optional[Dict] = None
     tool_result: Optional[str] = None  # 工具执行结果
+    metadata: Optional[Dict] = None  # 额外元数据（如搜索查询标识符）
+    reasoning: Optional[str] = None  # 深度思考的推理过程文本
 
 
 # 默认配置

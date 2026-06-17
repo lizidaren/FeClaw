@@ -89,7 +89,8 @@ async def lifespan(app: FastAPI):
                 "cn.bing.com", "api.moonshot.cn",
                 "firstentrance-gz01-1257148458.cos.ap-guangzhou.myqcloud.com",
                 "cos.ap-guangzhou.myqcloud.com",
-                "sts.tencentcloudapi.com")
+                "sts.tencentcloudapi.com",
+                "firstentrance-gzvec-1257148458.vectors.ap-guangzhou.coslake.com")
     install_global_fallback()
     logger.info("DNS cache warmed + global fallback installed")
 

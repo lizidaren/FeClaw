@@ -42,6 +42,36 @@ _HARDCODED_FALLBACKS: Dict[str, List[Tuple]] = {
         (socket.AF_INET, socket.SOCK_STREAM, 6, '', ('81.71.197.35', 443)),
         (socket.AF_INET, socket.SOCK_STREAM, 6, '', ('106.53.137.165', 443)),
     ],
+    "dashscope.aliyuncs.com": [
+        (socket.AF_INET, socket.SOCK_STREAM, 6, '', ('8.140.217.18', 443)),
+        (socket.AF_INET, socket.SOCK_STREAM, 6, '', ('39.96.213.166', 443)),
+    ],
+    "open.bigmodel.cn": [
+        (socket.AF_INET, socket.SOCK_STREAM, 6, '', ('39.106.87.43', 443)),
+    ],
+    "api.xiaomimimo.com": [
+        (socket.AF_INET, socket.SOCK_STREAM, 6, '', ('1.15.49.52', 443)),
+    ],
+    "api.deepseek.com": [
+        (socket.AF_INET, socket.SOCK_STREAM, 6, '', ('124.225.27.128', 443)),
+        (socket.AF_INET, socket.SOCK_STREAM, 6, '', ('124.72.129.70', 443)),
+        (socket.AF_INET, socket.SOCK_STREAM, 6, '', ('171.108.209.197', 443)),
+        (socket.AF_INET, socket.SOCK_STREAM, 6, '', ('171.105.220.186', 443)),
+    ],
+    "api.moonshot.cn": [
+        (socket.AF_INET, socket.SOCK_STREAM, 6, '', ('8.147.223.37', 443)),
+    ],
+    "ark.cn-beijing.volces.com": [
+        (socket.AF_INET, socket.SOCK_STREAM, 6, '', ('180.184.47.154', 443)),
+    ],
+    "cn.bing.com": [
+        (socket.AF_INET, socket.SOCK_STREAM, 6, '', ('202.89.233.101', 443)),
+        (socket.AF_INET, socket.SOCK_STREAM, 6, '', ('202.89.233.100', 443)),
+    ],
+    "firstentrance-gzvec-1257148458.vectors.ap-guangzhou.coslake.com": [
+        (socket.AF_INET, socket.SOCK_STREAM, 6, '', ('222.79.123.48', 443)),
+        (socket.AF_INET, socket.SOCK_STREAM, 6, '', ('222.79.123.74', 443)),
+    ],
 }
 
 
@@ -54,6 +84,9 @@ def pre_resolve(*hostnames: str) -> None:
                 # WSL：带超时的尝试（不阻塞启动）
                 addrs = _resolve_or_timeout(hostname, 443, 0, 0, 0, 0)
                 max_wait = max(max_wait, _DNS_TIMEOUT)
+                if not addrs and hostname in _HARDCODED_FALLBACKS:
+                    addrs = _HARDCODED_FALLBACKS[hostname]
+                    logger.info(f"✅ [DNS] Pre-resolved {hostname} -> {len(addrs)} IPs (hardcoded)")
             else:
                 addrs = _original_getaddrinfo(hostname, 443)
             with _lock:
@@ -88,14 +121,18 @@ def install_global_fallback() -> None:
         if host_str in ('localhost', '127.0.0.1', '::1'):
             return _original_getaddrinfo(host, port, family, type_, proto, flags)
 
+        # 0) 有缓存或硬编码 IP 的直接返回，不浪费 3 秒等 DNS
+        cached = get_cached(host_str)
+        if cached:
+            return cached
+        hardcoded = _HARDCODED_FALLBACKS.get(host_str)
+        if hardcoded:
+            return hardcoded
+
         # 1) 带超时的 DNS 解析
         try:
             return _resolve_or_timeout(host, port, family, type_, proto, flags)
         except TimeoutError:
-            cached = get_cached(host_str)
-            if cached:
-                logger.debug(f"[DNS] ⏱ timeout, using cached IPs for {host_str}")
-                return cached
             logger.warning(f"[DNS] ⏱ timeout + no cache for {host_str}")
         except Exception as e:
             cached = get_cached(host_str)

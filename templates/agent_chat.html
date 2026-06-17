@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <!-- Markdown & Code Highlighting -->
-    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="/static/marked.min.js"></script>
     <!-- KaTeX for math rendering -->
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
     <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
@@ -100,6 +100,9 @@
             cursor: pointer;
             margin-bottom: 4px;
             transition: background 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 12px;
         }
 
         .session-item:hover {
@@ -110,22 +113,51 @@
             background: rgba(102, 126, 234, 0.2);
         }
 
-        .session-item .title {
+        .session-avatar {
+            width: 44px;
+            height: 44px;
+            border-radius: 8px;
+            background: var(--gradient);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 20px;
+            flex-shrink: 0;
+        }
+
+        .session-info {
+            flex: 1;
+            min-width: 0;
+            position: relative;
+        }
+
+        .session-title {
             font-size: 14px;
             font-weight: 500;
-            margin-bottom: 4px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            margin-bottom: 3px;
+            padding-right: 60px;
+        }
+
+        .session-preview {
+            font-size: 12px;
+            color: var(--text-dim);
             white-space: nowrap;
             overflow: hidden;
             text-overflow: ellipsis;
         }
 
-        .session-item .meta {
-            font-size: 12px;
-            color: var(--text-dim);
+        .session-time {
+            position: absolute;
+            top: 0;
+            right: 0;
+            font-size: 11px;
+            color: var(--text-muted);
         }
 
         .session-item .delete-btn {
-            float: right;
             opacity: 0;
             transition: opacity 0.2s;
             background: none;
@@ -133,6 +165,8 @@
             color: var(--text-dim);
             cursor: pointer;
             font-size: 14px;
+            flex-shrink: 0;
+            padding: 4px;
         }
 
         .session-item:hover .delete-btn {
@@ -176,6 +210,58 @@
 
         .back-link:hover {
             color: var(--primary);
+        }
+
+        /* WebSocket 连接状态指示器 */
+        .ws-status {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            margin-left: 10px;
+            font-size: 12px;
+        }
+
+        .ws-status-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            display: inline-block;
+            flex-shrink: 0;
+            transition: background-color 0.3s, box-shadow 0.3s;
+        }
+
+        .ws-status-dot.connected {
+            background: #4ade80;
+            box-shadow: 0 0 8px rgba(74, 222, 128, 0.4);
+        }
+
+        .ws-status-dot.connecting {
+            background: #facc15;
+            box-shadow: 0 0 8px rgba(250, 204, 21, 0.4);
+            animation: pulse-yellow 1.5s ease-in-out infinite;
+        }
+
+        .ws-status-dot.disconnected {
+            background: #ef4444;
+            box-shadow: 0 0 8px rgba(239, 68, 68, 0.4);
+        }
+
+        @keyframes pulse-yellow {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.4; }
+        }
+
+        .ws-status-tooltip {
+            color: var(--text-dim);
+            font-size: 11px;
+            white-space: nowrap;
+            opacity: 0;
+            transition: opacity 0.2s;
+            pointer-events: none;
+        }
+
+        .ws-status:hover .ws-status-tooltip {
+            opacity: 1;
         }
 
         /* 消息区域 */
@@ -566,6 +652,190 @@
             border-radius: 12px;
             border: 1px solid var(--border);
         }
+
+        /* 工具调用提示 */
+        .thinking-indicator {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 8px 12px;
+            margin: 4px 0;
+            font-size: 13px;
+            color: #facc15;
+            background: rgba(250, 204, 21, 0.08);
+            border-radius: 8px;
+            animation: think-pulse 2s ease-in-out infinite;
+        }
+        @keyframes think-pulse {
+            0%, 100% { opacity: 0.7; }
+            50% { opacity: 1; }
+        }
+        .tool-call {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 6px 12px;
+            margin: 3px 0;
+            font-size: 13px;
+            color: var(--text-dim);
+            background: rgba(59, 130, 246, 0.08);
+            border-radius: 8px;
+            border-left: 3px solid #3b82f6;
+        }
+        .tool-result {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 6px 12px;
+            margin: 3px 0 3px 16px;
+            font-size: 12px;
+            color: var(--text-dim);
+            background: rgba(34, 197, 94, 0.06);
+            border-radius: 8px;
+            border-left: 3px solid #22c55e;
+            font-family: 'SF Mono', 'Fira Code', monospace;
+        }
+        .pipeline-step {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 14px;
+            margin: 3px 0;
+            font-size: 13px;
+            color: var(--text-dim);
+            background: rgba(102, 126, 234, 0.04);
+            border-radius: 8px;
+            border-left: 3px solid #667eea;
+            animation: fadeIn 0.3s ease;
+        }
+        .pipeline-step.done {
+            color: #22c55e;
+            border-left-color: #22c55e;
+        }
+        .pipeline-step.clickable {
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        .pipeline-step.clickable:hover {
+            background: rgba(102, 126, 234, 0.12);
+        }
+        .search-count-badge {
+            margin-left: auto;
+            font-size: 11px;
+            padding: 1px 8px;
+            border-radius: 10px;
+            background: rgba(102, 126, 234, 0.15);
+            color: #667eea;
+            white-space: nowrap;
+        }
+        /* 搜索结果弹窗 */
+        .search-modal-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0,0,0,0.5);
+            z-index: 1000;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            animation: fadeIn 0.2s ease;
+        }
+        .search-modal {
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            width: min(600px, 90vw);
+            max-height: 80vh;
+            display: flex;
+            flex-direction: column;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+        }
+        .search-modal-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 14px 18px;
+            border-bottom: 1px solid var(--border);
+            font-size: 14px;
+            font-weight: 600;
+        }
+        .search-modal-header .close-btn {
+            cursor: pointer;
+            width: 28px;
+            height: 28px;
+            border-radius: 6px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: transparent;
+            border: none;
+            color: var(--text-dim);
+            font-size: 18px;
+        }
+        .search-modal-header .close-btn:hover {
+            background: var(--bg-message);
+        }
+        .search-modal-body {
+            flex: 1;
+            overflow-y: auto;
+            padding: 18px;
+            font-size: 14px;
+            line-height: 1.7;
+            white-space: pre-wrap;
+            color: var(--text);
+        }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(-4px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .reasoning-area {
+            margin: 0 0 8px 0;
+            border-radius: 10px;
+            overflow: hidden;
+            max-width: 80%;
+        }
+        .reasoning-area summary {
+            padding: 8px 14px;
+            background: rgba(139, 92, 246, 0.1);
+            border: 1px solid rgba(139, 92, 246, 0.25);
+            border-radius: 10px;
+            cursor: pointer;
+            font-size: 13px;
+            color: #a78bfa;
+            user-select: none;
+            transition: background 0.2s;
+        }
+        .reasoning-area summary:hover {
+            background: rgba(139, 92, 246, 0.18);
+        }
+        .conversation-divider {
+            text-align: center;
+            padding: 16px 0;
+            margin: 12px 0;
+            font-size: 12px;
+            color: var(--text-muted);
+            border-top: 1px solid var(--border);
+            border-bottom: 1px solid var(--border);
+            letter-spacing: 2px;
+            user-select: none;
+        }
+        .reasoning-content {
+            background: #0d0d1a;
+            border: 1px solid rgba(139, 92, 246, 0.15);
+            border-top: none;
+            border-radius: 0 0 10px 10px;
+            padding: 12px 16px;
+            font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+            font-size: 12px;
+            line-height: 1.7;
+            color: #c4b5fd;
+            max-height: 300px;
+            overflow-y: auto;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
     </style>
 </head>
 <body>
@@ -587,7 +857,13 @@
     <div class="chat-main">
         <div class="chat-header">
             <button class="mobile-menu-btn" onclick="toggleSidebar()" title="历史会话">☰</button>
-            <h1 id="chatTitle">新对话</h1>
+            <div style="display: flex; align-items: center;">
+                <h1 id="chatTitle">新对话</h1>
+                <span class="ws-status" id="wsStatus">
+                    <span class="ws-status-dot disconnected" id="wsStatusDot"></span>
+                    <span class="ws-status-tooltip" id="wsStatusTooltip">WebSocket 已断开</span>
+                </span>
+            </div>
             <a href="/" class="back-link">返回主页</a>
         </div>
 
@@ -626,7 +902,7 @@
 
     <script>
         // ======== 配置 ========
-        const USE_WEBSOCKET = false;  // 改为 true 启用 WebSocket（CDN 需要配置支持）
+        const USE_WEBSOCKET = true;  // WebSocket 模式（绕过 CDN 缓冲）
         const WS_URL = (location.protocol === 'https:' ? 'wss://' : 'ws://') + window.location.host + '/api/chat/ws';
 
         // 状态
@@ -634,6 +910,170 @@
         let currentSessionId = null;
         let isStreaming = false;
         let selectedImageBase64 = null;  // 选中的图片 base64 数据
+
+        // ======== WebSocket 连接管理器（持久连接 + 自动重连） ========
+        const ConnectionManager = {
+            ws: null,
+            reconnectTimer: null,
+            pingCheckTimer: null,
+            lastPingTime: 0,
+            _pendingSend: null,
+            _shuttingDown: false,
+
+            // 消息回调（由 sendMessageWS 注册，done/error 时清除）
+            onToken: null,
+            onThinking: null,
+            onTool: null,
+            onToolResult: null,
+            onDone: null,
+            onError: null,
+            onPipeline: null,
+            onSearchProgress: null,
+            onReasoning: null,
+
+            setStatus(s) {
+                const dot = document.getElementById('wsStatusDot');
+                const tooltip = document.getElementById('wsStatusTooltip');
+                if (!dot) return;
+                dot.className = 'ws-status-dot ' + s;
+                if (s === 'connected') {
+                    tooltip.textContent = 'WebSocket 已连接';
+                } else if (s === 'connecting') {
+                    tooltip.textContent = '正在重连...';
+                } else {
+                    tooltip.textContent = 'WebSocket 已断开';
+                }
+            },
+
+            connect() {
+                this._shuttingDown = false;
+                if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
+                if (this.pingCheckTimer) { clearInterval(this.pingCheckTimer); this.pingCheckTimer = null; }
+
+                if (this.ws) {
+                    try { this.ws.onclose = null; } catch(e) {}
+                    try { this.ws.close(); } catch(e) {}
+                    this.ws = null;
+                }
+
+                this.setStatus('connecting');
+
+                // 刷新 JWT（可能已过期/更换）
+                const token = (typeof Auth !== 'undefined' && Auth.getToken) ? Auth.getToken() : localStorage.getItem('feclaw_jwt');
+                if (token) jwt = token;
+
+                const url = WS_URL + '?token=' + encodeURIComponent(jwt);
+                const self = this;
+                const ws = new WebSocket(url);
+
+                ws.onopen = () => {
+                    self.lastPingTime = Date.now();
+                    self.setStatus('connected');
+
+                    // 发送排队的消息
+                    if (self._pendingSend) {
+                        const data = self._pendingSend;
+                        self._pendingSend = null;
+                        self.ws.send(JSON.stringify(data));
+                    }
+
+                    self.pingCheckTimer = setInterval(() => {
+                        if (Date.now() - self.lastPingTime > 90000) {
+                            console.log('Ping timeout, reconnecting...');
+                            self._handleDrop();
+                        }
+                    }, 10000);
+                };
+
+                ws.onmessage = (event) => {
+                    self.lastPingTime = Date.now();
+                    try {
+                        const msg = JSON.parse(event.data);
+                        if (msg.type === 'ping') return;
+
+                        if (msg.type === 'token' && self.onToken) self.onToken(msg);
+                        else if (msg.type === 'divider') {
+                            // 在消息区插入分割线（放在最新 AI 消息之前或消息区末尾）
+                            const container = document.getElementById('messagesContainer');
+                            const lastAi = container.querySelector('.message.assistant:last-child');
+                            const div = document.createElement('div');
+                            div.className = 'conversation-divider';
+                            div.textContent = msg.content || '──── 新对话 ────';
+                            container.insertBefore(div, lastAi ? lastAi.nextSibling : null);
+                            scrollToBottom();
+                        }
+                        else if (msg.type === 'thinking' && self.onThinking) self.onThinking(msg);
+                        else if (msg.type === 'tool' && self.onTool) self.onTool(msg);
+                        else if (msg.type === 'tool_result' && self.onToolResult) self.onToolResult(msg);
+                        else if (msg.type === 'done' && self.onDone) self.onDone(msg);
+                        else if (msg.type === 'error' && self.onError) self.onError(msg);
+                        else if (msg.type === 'pipeline' && self.onPipeline) self.onPipeline(msg);
+                        else if (msg.type === 'search_progress' && self.onSearchProgress) self.onSearchProgress(msg);
+                        else if (msg.type === 'reasoning' && self.onReasoning) self.onReasoning(msg);
+                    } catch (e) {
+                        console.error('WS 消息解析失败:', e, event.data);
+                    }
+                };
+
+                ws.onerror = (err) => {
+                    console.error('WebSocket error:', err);
+                };
+
+                ws.onclose = () => {
+                    self.ws = null;
+                    if (self.pingCheckTimer) { clearInterval(self.pingCheckTimer); self.pingCheckTimer = null; }
+                    if (!self._shuttingDown) self._handleDrop();
+                };
+
+                this.ws = ws;
+            },
+
+            _handleDrop() {
+                // 如果有排队消息（正在等待重连发送），不触发 onError
+                if (this._pendingSend) {
+                    this.scheduleReconnect();
+                    return;
+                }
+                if (this.onError) {
+                    this.onError({ message: '连接已断开，正在重连...' });
+                }
+                this.setStatus('connecting');
+                this.scheduleReconnect();
+            },
+
+            scheduleReconnect() {
+                if (this.reconnectTimer) return;
+                console.log('WS reconnect in 1s');
+                this.setStatus('connecting');
+                this.reconnectTimer = setTimeout(() => {
+                    this.reconnectTimer = null;
+                    this.connect();
+                }, 1000);
+            },
+
+            send(data) {
+                if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+                    // WS 未就绪，排队等待发送
+                    this._pendingSend = data;
+                    console.log('WS 未就绪，已排队消息');
+                    return false;
+                }
+                this.ws.send(JSON.stringify(data));
+                return true;
+            },
+
+            disconnect() {
+                this._shuttingDown = true;
+                if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
+                if (this.pingCheckTimer) { clearInterval(this.pingCheckTimer); this.pingCheckTimer = null; }
+                this.setStatus('disconnected');
+                if (this.ws) {
+                    this.ws.onclose = null;
+                    this.ws.close(1000);
+                    this.ws = null;
+                }
+            }
+        };
 
         // 初始化
         document.addEventListener('DOMContentLoaded', async () => {
@@ -649,7 +1089,10 @@
                 window.location.href = '/login';
                 return;
             }
-            
+
+            // 建立持久 WebSocket 连接
+            ConnectionManager.connect();
+
             loadSessions();
             
             // 自动聚焦输入框
@@ -712,6 +1155,10 @@
                 
                 const sessions = await response.json();
                 renderSessionList(sessions);
+                // 自动加载最近会话
+                if (sessions.length > 0 && !currentSessionId) {
+                    loadSession(sessions[0].session_id);
+                }
             } catch (error) {
                 console.error('加载会话列表失败:', error);
             }
@@ -726,14 +1173,19 @@
                 return;
             }
             
-            container.innerHTML = sessions.map(session => `
-                <div class="session-item ${session.session_id === currentSessionId ? 'active' : ''}" 
-                     onclick="loadSessionAndClose('${session.session_id}')">
+            container.innerHTML = sessions.map(session => {
+                const preview = session.last_message || session.topic || '新对话';
+                const isActive = session.session_id === currentSessionId;
+                return `<div class="session-item ${isActive ? 'active' : ''}" data-session-id="${session.session_id}" onclick="loadSessionAndClose('${session.session_id}')">
+                    <div class="session-avatar">💬</div>
+                    <div class="session-info">
+                        <div class="session-title">${escapeHtml(session.topic || '对话')}</div>
+                        <div class="session-preview">${escapeHtml(preview.slice(0, 50))}</div>
+                        <div class="session-time">${formatDate(session.updated_at)}</div>
+                    </div>
                     <button class="delete-btn" onclick="deleteSession(event, '${session.session_id}')">🗑️</button>
-                    <div class="title">${session.last_message || '新对话'}</div>
-                    <div class="meta">${session.message_count} 条消息 · ${formatDate(session.updated_at)}</div>
-                </div>
-            `).join('');
+                </div>`;
+            }).join('');
         }
 
         // 加载会话
@@ -751,12 +1203,19 @@
                 // 更新标题
                 document.getElementById('chatTitle').textContent = session.topic || '对话';
                 
+                // 解析消息（后端存的是 JSON 字符串）
+                let messages = session.messages;
+                if (typeof messages === 'string') {
+                    try { messages = JSON.parse(messages); } catch(e) { messages = []; }
+                }
+                if (!Array.isArray(messages)) messages = [];
+                
                 // 渲染消息
-                renderMessages(session.messages);
+                renderMessages(messages);
                 
                 // 更新侧边栏选中状态
                 document.querySelectorAll('.session-item').forEach(el => {
-                    el.classList.toggle('active', el.onclick.toString().includes(sessionId));
+                    el.classList.toggle('active', el.dataset.sessionId === sessionId);
                 });
             } catch (error) {
                 console.error('加载会话失败:', error);
@@ -779,7 +1238,7 @@
             
             container.innerHTML = messages.map(msg => `
                 <div class="message ${msg.role}">
-                    ${msg.role === 'assistant' ? renderMarkdown(msg.content) : escapeHtml(msg.content)}
+                    ${msg.role === 'assistant' ? renderMarkdown(msg.content || '') : escapeHtml(msg.content || '')}
                 </div>
             `).join('');
             
@@ -813,12 +1272,11 @@
             scrollToBottom();
         }
 
-        // WebSocket 发送消息
+        // WebSocket 发送消息（使用持久连接）
         async function sendMessageWS() {
             const input = document.getElementById('inputField');
             const content = input.value.trim();
 
-            // 如果没有内容且没有图片，不发送
             if ((!content && !selectedImageBase64) || isStreaming) return;
 
             // 清空输入
@@ -828,117 +1286,288 @@
             // 显示用户消息
             appendMessage('user', content, false, selectedImageBase64);
 
-            // 保存图片数据用于发送
             const imageData = selectedImageBase64;
-
-            // 清除选中的图片
             clearSelectedImage();
 
             // 显示 AI 消息占位
             const aiMessageEl = appendMessage('assistant', '', true);
-
-            // 禁用发送按钮
             setStreaming(true);
 
-            let ws = null;
             let fullContent = '';
-            let retries = 0;
             let doneReceived = false;
-            const MAX_RETRIES = 3;
 
-            function connect() {
-                return new Promise((resolve, reject) => {
-                    const url = WS_URL + '?token=' + encodeURIComponent(jwt);
-                    ws = new WebSocket(url);
+            // 注册回调到持久连接上
+            let firstToken = true;
+            ConnectionManager.onToken = (msg) => {
+                if (firstToken) {
+                    firstToken = false;
+                    // 移除最后一条流水线步骤（💬 准备生成回答）让位给真实回复
+                    const steps = messagesContainer.querySelectorAll('.pipeline-step');
+                    if (steps.length > 0) steps[steps.length - 1].remove();
+                }
+                fullContent += msg.content || '';
+                updateMessage(aiMessageEl, fullContent);
+            };
 
-                    ws.onopen = () => {
-                        retries = 0;
-                        ws.send(JSON.stringify({
-                            content: content || '',
-                            session_id: currentSessionId,
-                            image_url: imageData
-                        }));
-                    };
+            ConnectionManager.onThinking = (msg) => {
+                const thinkEl = document.createElement('div');
+                thinkEl.className = 'thinking-indicator';
+                thinkEl.textContent = '\u{1F914} ' + (msg.content || '思考中...');
+                document.getElementById('messagesContainer').appendChild(thinkEl);
+            };
 
-                    ws.onmessage = (event) => {
-                        try {
-                            const msg = JSON.parse(event.data);
+            ConnectionManager.onTool = (msg) => {
+                // 在 AI 消息气泡内部插入工具调用（inline），而非外部
+                _insertBeforeAiMessage(aiMessageEl, '\u{1F527} ' + escapeHtml(msg.tool_name || msg.content || '执行工具'), 'tool-call');
+            };
 
-                            if (msg.type === 'token') {
-                                fullContent += msg.content || '';
-                                updateMessage(aiMessageEl, fullContent);
-                            } else if (msg.type === 'thinking') {
-                                const thinkEl = document.createElement('div');
-                                thinkEl.className = 'thinking-indicator';
-                                thinkEl.textContent = '🤔 ' + (msg.content || '思考中...');
-                                document.getElementById('messagesContainer').appendChild(thinkEl);
-                            } else if (msg.type === 'tool') {
-                                const toolEl = document.createElement('div');
-                                toolEl.className = 'tool-call';
-                                toolEl.innerHTML = '🔧 ' + escapeHtml(msg.tool_name || msg.content || '执行工具');
-                                document.getElementById('messagesContainer').appendChild(toolEl);
-                                scrollToBottom();
-                            } else if (msg.type === 'tool_result') {
-                                const resultEl = document.createElement('div');
-                                resultEl.className = 'tool-result';
-                                const resultText = msg.content || '';
-                                const preview = resultText.length > 100 ? resultText.slice(0, 100) + '...' : resultText;
-                                resultEl.innerHTML = '✅ ' + escapeHtml(preview);
-                                document.getElementById('messagesContainer').appendChild(resultEl);
-                                scrollToBottom();
-                            } else if (msg.type === 'done') {
-                                doneReceived = true;
-                                currentSessionId = msg.session_id;
-                                removeCursor(aiMessageEl);
-                                loadSessions();
-                                cleanup();
-                                resolve();
-                            } else if (msg.type === 'error') {
-                                showError(msg.message || '发送失败');
-                                aiMessageEl.remove();
-                                cleanup();
-                                reject(new Error(msg.message));
-                            }
-                            // ping 忽略
-                        } catch (e) {
-                            console.error('WS 消息解析失败:', e, event.data);
+            ConnectionManager.onToolResult = (msg) => {
+                const resultText = msg.content || '';
+                const preview = resultText.length > 100 ? resultText.slice(0, 100) + '...' : resultText;
+                _insertBeforeAiMessage(aiMessageEl, '\u2705 ' + escapeHtml(preview), 'tool-result');
+            };
+
+            // 在 AI 消息之前插入 inline 元素（工具调用/结果）
+            function _insertBeforeAiMessage(anchor, html, className) {
+                const el = document.createElement('div');
+                el.className = className;
+                el.innerHTML = html;
+                document.getElementById('messagesContainer').insertBefore(el, anchor);
+                scrollToBottom();
+            }
+
+            // 流水线状态 — 在消息区域流式显示处理步骤
+            ConnectionManager.onPipeline = (msg) => {
+                const text = msg.content || '';
+                const isDone = text.startsWith('✅');
+                const isSearch = text.startsWith('🔍');
+
+                // ✅ 完成：找到匹配的 🔍 搜索步骤，替换其内容，而不是新建
+                if (isDone && msg.query) {
+                    const existing = document.querySelector(`.pipeline-step[data-query="${msg.query.slice(0, 40).replace(/["\\]/g, '\\$&')}"]:not(.done)`);
+                    if (existing) {
+                        existing.textContent = text;
+                        existing.classList.add('done');
+                        existing.dataset.query = '';
+                        // 如果有结果预览，挂点击弹窗
+                        if (msg.result_preview) {
+                            _attachResultModal(existing, msg.query || msg.tool, msg.result_preview);
                         }
-                    };
+                        scrollToBottom();
+                        return;
+                    }
+                }
 
-                    ws.onerror = (err) => {
-                        console.error('WebSocket error:', err);
-                    };
+                const stepEl = document.createElement('div');
+                stepEl.className = 'pipeline-step';
+                if (isDone) stepEl.classList.add('done');
 
-                    ws.onclose = (event) => {
-                        if (doneReceived) return;
-                        if (retries < MAX_RETRIES) {
-                            retries++;
-                            console.log(`WS 断线，重试 ${retries}/${MAX_RETRIES}...`);
-                            setTimeout(() => {
-                                connect().then(resolve).catch(reject);
-                            }, 1000);
-                        } else {
-                            showError('连接失败，请检查网络后重试');
-                            aiMessageEl.remove();
-                            cleanup();
-                            reject(new Error('max retries'));
-                        }
-                    };
+                // 搜索步骤（🔍）：提取查询关键词存入 dataset
+                if (isSearch) {
+                    const m = text.match(/: (.+?)\.\.\.$/);
+                    if (m) stepEl.dataset.query = m[1];
+                }
+
+                // 有结果预览的步骤 → 可点击弹窗
+                if (isDone && msg.result_preview) {
+                    _attachResultModal(stepEl, msg.query || msg.tool || text, msg.result_preview);
+                }
+
+                stepEl.textContent = text;
+                document.getElementById('messagesContainer').insertBefore(stepEl, aiMessageEl);
+                scrollToBottom();
+            };
+
+            // 给 pipeline 步骤挂载结果查看弹窗
+            function _attachResultModal(el, title, content) {
+                el.classList.add('clickable');
+                el.addEventListener('click', function() {
+                    removeSearchModal();
+                    const overlay = document.createElement('div');
+                    overlay.className = 'search-modal-overlay';
+                    const body = document.createElement('div');
+                    body.className = 'search-modal-body';
+                    body.innerHTML = renderMarkdown(content);
+                    overlay.innerHTML = `
+                        <div class="search-modal">
+                            <div class="search-modal-header">
+                                <span>📄 结果：${escapeHtml(title || '')}</span>
+                                <button class="close-btn">✕</button>
+                            </div>
+                        </div>
+                    `;
+                    overlay.querySelector('.search-modal').appendChild(body);
+                    overlay.querySelector('.close-btn').onclick = removeSearchModal;
+                    overlay.onclick = function(e) { if (e.target === overlay) removeSearchModal(); };
+                    document.body.appendChild(overlay);
+                    _activeSearchModal = overlay;
                 });
             }
 
-            function cleanup() {
-                setStreaming(false);
-                if (ws && ws.readyState === WebSocket.OPEN) {
-                    ws.close();
+            // 搜索流式内容 — 不直接显示，攒到 map 里并更新对应 step 上的字数徽标
+            const _searchContents = {};  // { query: accumulated_text }
+            const _searchModalRefs = {}; // { query: modal_body_element }
+            ConnectionManager.onSearchProgress = (msg) => {
+                const query = msg.query || '';
+                const tool = msg.tool || 'web_search';
+                const text = msg.content || '';
+                if (!query) return;
+
+                // 累积内容
+                if (!_searchContents[query]) _searchContents[query] = '';
+                _searchContents[query] += text;
+                const totalChars = _searchContents[query].length;
+
+                // 如果该搜索的弹窗已打开，实时更新内容
+                if (_searchModalRefs[query]) {
+                    _searchModalRefs[query].innerHTML = renderMarkdown(_searchContents[query]);
+                    _searchModalRefs[query].scrollTop = _searchModalRefs[query].scrollHeight;
+                }
+
+                // 找到对应的 pipeline step
+                let step = null;
+                const _q = query.slice(0, 40).replace(/["\\]/g, '\\$&');
+                step = document.querySelector(`.pipeline-step[data-query="${_q}"]:not(.done)`);
+                // 后备：前缀匹配（data-query 是截断版 query[:40]，SSE 发的是完整 query）
+                if (!step && query.length > 40) {
+                    for (const s of document.querySelectorAll('.pipeline-step:not(.done)[data-query]')) {
+                        if (query.startsWith(s.dataset.query)) {
+                            step = s;
+                            step.dataset.query = query;  // 修复为完整 query
+                            break;
+                        }
+                    }
+                }
+                if (!step) return;
+
+                // 挂载点击事件（打开弹窗）
+                step.classList.add('clickable');
+                if (!step._searchQuery) {
+                    step._searchQuery = query;
+                    step.addEventListener('click', function() {
+                        showSearchModal(this._searchQuery);
+                    });
+                }
+                // 更新/添加字数 badge
+                let badge = step.querySelector('.search-count-badge');
+                if (!badge) {
+                    badge = document.createElement('span');
+                    badge.className = 'search-count-badge';
+                    step.appendChild(badge);
+                }
+                badge.textContent = `📝 ${totalChars}字`;
+                if (step) {
+                    step.classList.add('clickable');
+                    if (!step._searchQuery) {
+                        step._searchQuery = query;
+                        step.addEventListener('click', function() {
+                            showSearchModal(this._searchQuery);
+                        });
+                    }
+                    // 更新/添加字数 badge
+                    let badge = step.querySelector('.search-count-badge');
+                    if (!badge) {
+                        badge = document.createElement('span');
+                        badge.className = 'search-count-badge';
+                        step.appendChild(badge);
+                    }
+                    badge.textContent = `📝 ${totalChars}字`;
+                }
+            };
+
+            // 搜索内容弹窗
+            let _activeSearchModal = null; // 当前打开的弹窗 overlay
+            function showSearchModal(query) {
+                removeSearchModal();
+                const content = _searchContents[query] || '';
+                const overlay = document.createElement('div');
+                overlay.className = 'search-modal-overlay';
+                const body = document.createElement('div');
+                body.className = 'search-modal-body';
+                body.innerHTML = renderMarkdown(content);
+                overlay.innerHTML = `
+                    <div class="search-modal">
+                        <div class="search-modal-header">
+                            <span>🔍 搜索结果：${escapeHtml(query || '')}</span>
+                            <button class="close-btn">✕</button>
+                        </div>
+                    </div>
+                `;
+                overlay.querySelector('.search-modal').appendChild(body);
+                overlay.querySelector('.close-btn').onclick = removeSearchModal;
+                overlay.onclick = function(e) { if (e.target === overlay) removeSearchModal(); };
+                document.body.appendChild(overlay);
+                _activeSearchModal = overlay;
+                _searchModalRefs[query] = body;
+            }
+            function removeSearchModal() {
+                Object.keys(_searchModalRefs).forEach(k => delete _searchModalRefs[k]);
+                if (_activeSearchModal) {
+                    _activeSearchModal.remove();
+                    _activeSearchModal = null;
                 }
             }
 
-            try {
-                await connect();
-            } catch (error) {
-                console.error('WebSocket 发送失败:', error);
+            // 深度思考推理过程（可折叠）
+            let reasoningArea = null;
+            let reasoningContent = null;
+            ConnectionManager.onReasoning = (msg) => {
+                if (!reasoningArea) {
+                    reasoningArea = document.createElement('details');
+                    reasoningArea.className = 'reasoning-area';
+                    reasoningArea.open = true;
+                    const summary = document.createElement('summary');
+                    summary.textContent = '🧠 深度思考中...';
+                    reasoningArea.appendChild(summary);
+                    reasoningContent = document.createElement('div');
+                    reasoningContent.className = 'reasoning-content';
+                    reasoningArea.appendChild(reasoningContent);
+                    document.getElementById('messagesContainer').insertBefore(reasoningArea, aiMessageEl);
+                }
+                reasoningContent.textContent += (msg.content || '');
+                reasoningArea.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+            };
+
+            ConnectionManager.onDone = (msg) => {
+                doneReceived = true;
+                // 关闭推理区域
+                if (reasoningArea && reasoningArea.open) {
+                    const summary = reasoningArea.querySelector('summary');
+                    if (summary) summary.textContent = '🧠 深度思考（已完成）';
+                }
+                currentSessionId = msg.session_id;
+                removeCursor(aiMessageEl);
+                loadSessions();
                 cleanup();
+            };
+
+            ConnectionManager.onError = (msg) => {
+                if (doneReceived) return;
+                showError(msg.message || '发送失败');
+                aiMessageEl.remove();
+                cleanup();
+            };
+
+            function cleanup() {
+                setStreaming(false);
+                ConnectionManager.onToken = null;
+                ConnectionManager.onThinking = null;
+                ConnectionManager.onTool = null;
+                ConnectionManager.onToolResult = null;
+                ConnectionManager.onDone = null;
+                ConnectionManager.onError = null;
+                ConnectionManager.onPipeline = null;
+                ConnectionManager.onReasoning = null;
+            }
+
+            const sent = ConnectionManager.send({
+                content: content || '',
+                session_id: currentSessionId,
+                image_url: imageData
+            });
+
+            if (!sent) {
+                // send() 会自动排队，等 WS 就绪后发送
             }
         }
 
@@ -1076,10 +1705,55 @@
                                 scrollToBottom();
                             }
                             
+                            if (eventType === 'pipeline') {
+                                // 流水线状态
+                                const text = data.content || '';
+                                if (text.startsWith('🤔')) {
+                                    const stepEl = document.createElement('div');
+                                    stepEl.className = 'pipeline-step';
+                                    stepEl.textContent = text;
+                                    document.getElementById('messagesContainer').appendChild(stepEl);
+                                } else if (text.startsWith('✅')) {
+                                    const existing = document.getElementById('messagesContainer').querySelectorAll('.pipeline-step');
+                                    const stepEl = document.createElement('div');
+                                    stepEl.className = 'pipeline-step done';
+                                    stepEl.textContent = text;
+                                    document.getElementById('messagesContainer').appendChild(stepEl);
+                                }
+                                scrollToBottom();
+                            }
+
+                            if (eventType === 'reasoning') {
+                                // 深度思考推理过程
+                                let rsnArea = document.getElementById('reasoningArea');
+                                if (!rsnArea) {
+                                    rsnArea = document.createElement('details');
+                                    rsnArea.id = 'reasoningArea';
+                                    rsnArea.className = 'reasoning-area';
+                                    rsnArea.open = true;
+                                    const summary = document.createElement('summary');
+                                    summary.textContent = '🧠 深度思考中...';
+                                    rsnArea.appendChild(summary);
+                                    const rsnContent = document.createElement('div');
+                                    rsnContent.id = 'reasoningContent';
+                                    rsnContent.className = 'reasoning-content';
+                                    rsnArea.appendChild(rsnContent);
+                                    document.getElementById('messagesContainer').appendChild(rsnArea);
+                                }
+                                const rsnContent = document.getElementById('reasoningContent');
+                                if (rsnContent) rsnContent.textContent += (data.content || '');
+                            }
+
                             if (eventType === 'done') {
                                 currentSessionId = data.session_id;
+                                // 关闭推理区域
+                                const rsnArea = document.getElementById('reasoningArea');
+                                if (rsnArea && rsnArea.open) {
+                                    const summary = rsnArea.querySelector('summary');
+                                    if (summary) summary.textContent = '🧠 深度思考（已完成）';
+                                }
                             }
-                            
+
                             if (eventType === 'error') {
                                 showError(data.message || '发送失败');
                                 aiMessageEl.remove();
@@ -1231,10 +1905,12 @@
             overlay.classList.remove('show');
         }
 
-        // 加载会话后关闭侧边栏（手机端）
+        // 加载会话后关闭侧边栏（仅手机端）
         function loadSessionAndClose(sessionId) {
             loadSession(sessionId);
-            closeSidebar();
+            if (window.innerWidth <= 768) {
+                closeSidebar();
+            }
         }
 
         // 删除会话
@@ -1293,18 +1969,12 @@
         // Markdown 渲染（用于 assistant 消息）
         function renderMarkdown(text) {
             if (!text) return '';
-            // 配置 marked.js
-            marked.setOptions({
-                breaks: true,  // 支持换行
-                gfm: true,     // GitHub Flavored Markdown
-                highlight: function(code, lang) {
-                    if (lang && hljs.getLanguage(lang)) {
-                        return hljs.highlight(code, { language: lang }).value;
-                    }
-                    return hljs.highlightAuto(code).value;
-                }
-            });
-            return marked.parse(text);
+            try {
+                return marked.parse(text, { breaks: true, gfm: true });
+            } catch(e) {
+                console.error('renderMarkdown error:', e);
+                return escapeHtml(text);
+            }
         }
 
         // 自动调整输入框高度

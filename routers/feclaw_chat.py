@@ -18,6 +18,7 @@ from datetime import datetime
 
 from sqlalchemy.orm import Session
 from models.database import SessionLocal
+from config import settings
 from services.web_channel_service import WebChannelService
 from utils.auth import get_current_user_id, decode_jwt_token
 
@@ -148,6 +149,14 @@ async def chat_websocket(websocket: WebSocket):
     logger = logging.getLogger(__name__)
     await websocket.accept()
 
+    # 记录客户端信息
+    try:
+        logger.warning(f"[WS_DEBUG] New WS connection from {websocket.client.host}:{websocket.client.port}")
+        logger.warning(f"[WS_DEBUG] Headers: {dict(websocket.headers)}")
+        logger.warning(f"[WS_DEBUG] Query: {websocket.query_params}")
+    except Exception:
+        pass
+
     # JWT 认证
     token = None
     auth_header = websocket.headers.get("authorization", "")
@@ -171,12 +180,18 @@ async def chat_websocket(websocket: WebSocket):
     db = SessionLocal()
 
     async def heartbeat():
-        """每 30 秒 ping 一次保持连接"""
+        """每 30 秒 ping 一次保持连接，首次立即发送"""
+        try:
+            await websocket.send_json({"type": "ping"})
+        except Exception:
+            return
         while True:
             try:
                 await asyncio.sleep(30)
+                logger.warning(f"[WS_DEBUG] Sending ping to user={user_id}")
                 await websocket.send_json({"type": "ping"})
-            except Exception:
+            except Exception as e:
+                logger.warning(f"[WS_DEBUG] Heartbeat failed for user={user_id}: {e}")
                 break
 
     heartbeat_task = asyncio.create_task(heartbeat())
@@ -185,9 +200,11 @@ async def chat_websocket(websocket: WebSocket):
         while True:
             # 接收消息
             try:
+                logger.warning(f"[WS_DEBUG] Waiting for message from user={user_id}...")
                 data = await websocket.receive_json()
+                logger.warning(f"[WS_DEBUG] Received message from user={user_id}: keys={list(data.keys())}, content_len={len(data.get('content','') or '')}, session_id={data.get('session_id')}")
             except WebSocketDisconnect:
-                logger.info(f"[WS] user={user_id} disconnected")
+                logger.warning(f"[WS_DEBUG] user={user_id} disconnected (WebSocketDisconnect on receive)")
                 break
 
             content = data.get("content", "")
@@ -201,6 +218,53 @@ async def chat_websocket(websocket: WebSocket):
             logger.info(f"[WS] user_id={user_id}, content={content[:50] if content else ''}..., image_url={'yes' if image_url else 'no'}")
 
             chat_service = WebChannelService(db, user_id=user_id)
+
+            # 路由层拦截：开启新会话（在已有对话中插入分割线 + 招呼）
+            _new_session_cmds = {"开启新会话", "新对话", "新会话", "重新开始", "结束对话", "结束会话", "开启新对话"}
+            if content in _new_session_cmds:
+                # 发送分割线标记
+                await websocket.send_json({"type": "divider", "content": "──── 新对话 ────"})
+                # 读取 session memory 生成招呼
+                # 读取 session memory，用 LLM 生成打招呼
+                _greeting = ""
+                _memory = ""
+                try:
+                    from services.virtual_filesystem import VirtualFileSystem
+                    _vfs = VirtualFileSystem(agent_hash=chat_service.agent_hash)
+                    _memory = await asyncio.to_thread(_vfs.cat, "/workspace/agent/session_memory.md")
+                except Exception as _e:
+                    logger.warning(f"[WS] session memory read error: {_e}")
+
+                if _memory and not _memory.startswith("Error"):
+                    try:
+                        from services.llm_service import LLMService
+                        from services.model_registry import resolve as _resolve
+                        _cfg = _resolve(settings.MAIN_TEXT_MODEL)
+                        _llm = LLMService()
+                        async for chunk in _llm.chat(
+                            messages=[{
+                                "role": "system",
+                                "content": "根据对话记忆生成一句自然的打招呼消息。"
+                                           "用 2-4 句话表达还记得对方并邀请继续对话。"
+                                           "不要用「欢迎回来」「我记得」「很开心见到你」等生硬的表述。"
+                            }, {
+                                "role": "user",
+                                "content": f"对话记忆：\n{_memory.strip()}"
+                            }],
+                            provider=_cfg["provider"],
+                            model=settings.MAIN_TEXT_MODEL,
+                        ):
+                            _greeting += chunk
+                    except Exception as _e:
+                        logger.warning(f"[WS] LLM greeting error: {_e}")
+                else:
+                    _greeting = ""
+
+                if not _greeting:
+                    _greeting = "你好呀！有什么想聊的吗？"
+                await websocket.send_json({"type": "token", "content": _greeting})
+                await websocket.send_json({"type": "done", "session_id": session_id, "usage": {"input_tokens": 0, "output_tokens": 0}})
+                continue
 
             try:
                 async for sse_str in chat_service.chat_stream(content, session_id, image_url):
@@ -222,7 +286,7 @@ async def chat_websocket(websocket: WebSocket):
                     pass
 
     except WebSocketDisconnect:
-        logger.info(f"[WS] user={user_id} disconnected during processing")
+        logger.warning(f"[WS_DEBUG] user={user_id} disconnected during processing (outer WebSocketDisconnect)")
     finally:
         heartbeat_task.cancel()
         try:
@@ -230,6 +294,7 @@ async def chat_websocket(websocket: WebSocket):
         except asyncio.CancelledError:
             pass
         db.close()
+        logger.warning(f"[WS_DEBUG] user={user_id} connection closed (finally)")
 
 
 @router.get("/api/chat/sessions", response_model=List[SessionResponse])

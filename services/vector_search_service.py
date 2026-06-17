@@ -45,19 +45,23 @@ def _vector_dns_scope():
         yield
         return
 
+    _global_fallback = socket.getaddrinfo
+
     @functools.wraps(_original_getaddrinfo)
     def _patched(host, port, family=0, type_=0, proto=0, flags=0):
         if host is not None:
             host_str = host.decode() if isinstance(host, bytes) else host
             if host_str == VECTOR_ENDPOINT or host_str.endswith(VECTOR_ENDPOINT_SUFFIX):
-                host = VECTOR_IP
-        return _original_getaddrinfo(host, port, family, type_, proto, flags)
-
+                return [
+                    (socket.AF_INET, socket.SOCK_STREAM, 6, '', (VECTOR_IP, port or 443))
+                ]
+        # 非向量域名走全局 fallback（缓存/硬编码 IP，不浪费 DNS 3 秒）
+        return _global_fallback(host, port, family, type_, proto, flags)
     socket.getaddrinfo = _patched
     try:
         yield
     finally:
-        socket.getaddrinfo = _original_getaddrinfo
+        socket.getaddrinfo = _global_fallback
 
 
 class _VectorClientWrapper:

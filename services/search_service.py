@@ -6,7 +6,8 @@
 
 import json
 import logging
-from typing import Optional
+import time
+from typing import Optional, Callable, Awaitable
 
 import httpx
 
@@ -119,20 +120,23 @@ class SearchService:
         except Exception as e:
             return raw_result + f"\n\n(DeepSeek 清洗失败: {e})"
 
-    async def search_qwen(self, query: str) -> str:
+    async def search_qwen(self, query: str, on_progress: Optional[Callable[[str], Awaitable[None]]] = None) -> str:
         """
-        L2 均衡搜索：Qwen3.5-Flash 联网搜索
+        L2 均衡搜索：Qwen3.5-Flash 联网搜索（流式）
         - 速度：~4s
         - 返回：LLM 总结的搜索结果
+        - on_progress: 可选进度回调，接收逐字的搜索结果增量
         """
         import os
 
         qwen_key = settings.QWEN_API_KEY or settings.QWEN_VL_KEY or ""
         if not qwen_key:
             return "Error: QWEN_API_KEY 环境变量未配置"
+        _t0 = time.time()
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
-                resp = await client.post(
+                async with client.stream(
+                    "POST",
                     "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
                     headers={
                         "Authorization": f"Bearer {qwen_key}",
@@ -146,16 +150,37 @@ class SearchService:
                         ],
                         "enable_search": True,
                         "thinking": {"type": "disabled"},
+                        "stream": True,
                     },
-                )
-                resp.raise_for_status()
-                data = resp.json()
-                content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-                if content:
-                    return f"🔍 搜索「{query}」(Qwen3.5-Flash)\n\n{content}"
+                ) as resp:
+                    resp.raise_for_status()
+                    full_content = ""
+                    async for line in resp.aiter_lines():
+                        if line and line.startswith("data: "):
+                            data_str = line[6:]
+                            if data_str.strip() == "[DONE]":
+                                break
+                            try:
+                                chunk = json.loads(data_str)
+                                choices = chunk.get("choices", [])
+                                if not choices:
+                                    continue
+                                delta = choices[0].get("delta", {}).get("content", "")
+                                if delta:
+                                    full_content += delta
+                                    if on_progress:
+                                        await on_progress(delta)
+                            except json.JSONDecodeError:
+                                continue
+                _elapsed = time.time() - _t0
+                logger.info(f"[SEARCH] search_qwen: {_elapsed:.1f}s for query={query[:50]}")
+                if full_content:
+                    return f"🔍 搜索「{query}」(Qwen3.5-Flash)\n\n{full_content}"
                 return "(搜索结果为空)"
         except Exception as e:
-            return f"Error: Qwen 搜索失败: {e}"
+            _elapsed = time.time() - _t0
+            logger.warning(f"[SEARCH] search_qwen FAILED: {_elapsed:.1f}s, {e}")
+            return f"Error: Qwen联网搜索失败: {e}"
 
     async def search_kimi(self, query: str) -> str:
         """

@@ -206,6 +206,9 @@ class AgentExecutor:
             model: 模型名称（默认 settings.MAIN_TEXT_MODEL）
             reasoning_effort: 深度思考强度（默认 settings.AGENT_LLM_REASONING_EFFORT）
         """
+        _t0 = time.time()
+        logger.warning(f"[TIMING] chat_with_tools start, agent={self.agent_hash}, model={model or settings.MAIN_TEXT_MODEL}")
+
         MAX_TOOL_ROUNDS = 25
         TOOL_LOOP_TIMEOUT = 120  # 整体工具循环超时（秒）
         actual_model = model or settings.MAIN_TEXT_MODEL
@@ -249,6 +252,7 @@ class AgentExecutor:
         # 每次 SR 检查前从 DB 刷新 profile，确保使用最新的 sr_enabled 设置
         self._refresh_agent_profile()
         if not self._skip_smart_router and self.agent_profile.sr_enabled:
+            yield Step(step_type="pipeline", content="🤔 SmartRouter 正在分析...")
             # 提取 image_info（由上游注入的图片预识别描述）
             image_info = None
             for msg in reversed(messages):
@@ -278,12 +282,28 @@ class AgentExecutor:
             try:
                 router = SmartRouter()
                 _sr_t0 = time.time()
-                decision = await router.route(last_text, context=messages[-6:],
+                decision = await router.route(last_text, context=messages[-20:],
                                               image_info=image_info, persona=_persona)
                 logger.info(f"[PERF] SmartRouter: {time.time()-_sr_t0:.1f}s → thinking={decision.thinking} prefetch={len(decision.prefetch or [])}")
             except Exception as e:
                 logger.warning(f"[AgentExecutor] SmartRouter failed: {e}")
                 decision = RouteDecision()
+            yield Step(step_type="pipeline", content="✅ SmartRouter 分析完成")
+
+        logger.warning(f"[TIMING] SmartRouter phase done: {time.time()-_t0:.1f}s, direct_reply={decision.direct_reply is not None}, thinking={decision.thinking}, prefetch={len(decision.prefetch or [])}")
+
+        # 展示 SmartRouter 决策结果
+        if decision.direct_reply:
+            yield Step(step_type="pipeline", content="📋 决策: 直接回复（无需联网搜索）")
+        else:
+            _labels = []
+            for _cmd in (decision.prefetch or []):
+                _t = {"web_search": "🔍网络搜索", "knowledge_search": "📚知识库", "file_read": "📄文件读取"}.get(_cmd.get("tool", ""), _cmd.get("tool", ""))
+                _q = _cmd.get("query", "")[:30]
+                _labels.append(f"{_t}({_q})")
+            yield Step(step_type="pipeline", content=f"📋 决策: 搜索后回答 [{' | '.join(_labels)}]")
+        if decision.thinking:
+            yield Step(step_type="pipeline", content="🧠 深度思考已开启")
 
         # 2a. L0 直接回复（不走主模型）
         if decision.direct_reply:
@@ -318,18 +338,35 @@ class AgentExecutor:
         consecutive_errors = 0
         same_tool_count: Dict[str, int] = {}
 
-        # 2b. 预取工具执行
+        # 2b. 预取工具执行（流式进度推送）
         prefetch_results = []
         if decision.prefetch:
-            async def _run_one(cmd: dict) -> Optional[str]:
+            # 每项预取前发送流水线状态
+            for cmd in decision.prefetch:
+                tool_name = cmd.get("tool", "")
+                query = cmd.get("query", "")
+                label = {"web_search": "网络搜索", "knowledge_search": "知识库", "file_read": "文件读取"}.get(tool_name, tool_name)
+                yield Step(step_type="pipeline", content=f"🔍 正在{label}: {query[:40]}...")
+
+            # 共享进度队列，流式推送搜索结果片段到前端
+            progress_queue: asyncio.Queue = asyncio.Queue()
+
+            async def _run_one_with_progress(cmd: dict) -> Optional[str]:
                 tool_name = cmd.get("tool", "")
                 query = cmd.get("query", "")
                 args = cmd.get("args", {})
                 if tool_name in ("web_search", "file_read", "file_list", "knowledge_search") and query:
                     try:
-                        # 将 tool/query 之外的所有字段作为额外参数
                         extra_args = {k: v for k, v in cmd.items() if k not in ("tool", "query")}
-                        result = await self.execute_tool(tool_name, {"query": query, **args, **extra_args})
+
+                        # 每个搜索有独立的 buffer，由 query 标识区分
+                        async def on_progress(chunk: str):
+                            await progress_queue.put((tool_name, query, chunk))
+
+                        result = await self.execute_tool(
+                            tool_name, {"query": query, **args, **extra_args},
+                            on_progress=on_progress
+                        )
                         logger.info(f"[AgentExecutor] Prefetch {tool_name}({query[:50]}) OK ({len(result)} chars)")
                         return result
                     except Exception as e:
@@ -338,9 +375,47 @@ class AgentExecutor:
                     logger.warning(f"[AgentExecutor] Prefetch unknown tool: {tool_name}")
                 return None
 
-            _tasks = [_run_one(cmd) for cmd in decision.prefetch]
-            _done = await asyncio.gather(*_tasks)
+            prefetch_tasks = [asyncio.create_task(_run_one_with_progress(cmd)) for cmd in decision.prefetch]
+
+            # 直接流式，无缓冲：每来一个 chunk 立即推送
+            _sent_progress = False
+            try:
+                while not all(t.done() for t in prefetch_tasks):
+                    try:
+                        item = await asyncio.wait_for(progress_queue.get(), timeout=0.3)
+                        if item is None:
+                            continue
+                        tn, q, chunk = item
+                        if chunk.strip():
+                            yield Step(step_type="search_progress", content=chunk.strip(),
+                                       metadata={"query": q, "tool": tn})
+                            _sent_progress = True
+                    except asyncio.TimeoutError:
+                        continue
+            except asyncio.CancelledError:
+                for t in prefetch_tasks:
+                    if not t.done():
+                        t.cancel()
+                raise
+
+            # 收集所有结果
+            _done = [t.result() for t in prefetch_tasks]
             prefetch_results = [r for r in _done if r is not None]
+
+            # 展示每项预取结果摘要（含内容预览，供前端弹窗查看）
+            for _i, (_cmd, _res) in enumerate(zip(decision.prefetch, _done)):
+                _tn = _cmd.get("tool", "")
+                _q = _cmd.get("query", "")[:30]
+                if _res and not _res.startswith("Error"):
+                    _len = len(_res)
+                    label = {"web_search": "网络搜索", "knowledge_search": "知识库", "file_read": "文件读取"}.get(_tn, _tn)
+                    _preview = _res[:500] if _res else ""
+                    yield Step(step_type="pipeline", content=f"✅ {label}「{_q}」完成 ({_len} 字符)",
+                               metadata={"result_preview": _preview, "query": _q, "tool": _tn, "done": True})
+                else:
+                    yield Step(step_type="pipeline", content=f"⚠️ {_tn}「{_q}」未返回有效结果",
+                               metadata={"result_preview": _res[:500] if _res else "", "query": _q, "tool": _tn, "error": True})
+            yield Step(step_type="pipeline", content="✅ 预取完成")
 
         # 2c. 注入规则（追加到 system 消息，确保主模型在 prompt 层面接收）
         if decision.inject_rules:
@@ -366,7 +441,7 @@ class AgentExecutor:
         if _vec_task:
             _vec_results = []
             try:
-                _vec_results = await asyncio.wait_for(_vec_task, timeout=4.0)
+                _vec_results = await asyncio.wait_for(_vec_task, timeout=3.0)
             except (asyncio.TimeoutError, Exception):
                 pass
             if _vec_results:
@@ -383,8 +458,14 @@ class AgentExecutor:
         if decision.thinking:
             actual_reasoning = "high"
             logger.info("[AgentExecutor] SmartRouter: thinking=high (SR override)")
+            # DeepSeek V4 Flash 不支持 thinking 参数，切换到 deepseek-reasoner
+            if actual_provider == "deepseek":
+                actual_model = "deepseek-reasoner"
+                actual_provider = _exec_resolve("deepseek-reasoner")["provider"]
+                logger.info("[AgentExecutor] Switched to deepseek-reasoner for thinking")
 
         _loop_start = time.time()
+        yield Step(step_type="pipeline", content="💬 准备生成回答...")
         for round_num in range(MAX_TOOL_ROUNDS):
             # 整体超时检查
             if time.time() - _loop_start > TOOL_LOOP_TIMEOUT:
@@ -412,6 +493,10 @@ class AgentExecutor:
                         # 流式输出文本片段
                         full_content += event["content"]
                         yield Step(step_type="token", content=event["content"])
+
+                    elif event["type"] == "reasoning":
+                        # 深度思考推理过程
+                        yield Step(step_type="reasoning", content=event["content"])
 
                     elif event["type"] == "done":
                         # 流结束，获取完整信息
@@ -468,16 +553,35 @@ class AgentExecutor:
                     })
                     continue
 
-                # 执行工具（带超时控制 + 心跳保活）
-                tool_task = asyncio.create_task(self.execute_tool(func_name, args))
+                # 执行工具（带超时控制 + 流式进度 + 心跳保活）
+                # 创建工具级进度队列（用于 web_search 等支持流式的工具）
+                _tool_progress_queue = asyncio.Queue()
+
+                async def _on_tool_progress(chunk):
+                    await _tool_progress_queue.put(chunk)
+
+                tool_task = asyncio.create_task(
+                    self.execute_tool(func_name, args,
+                        on_progress=_on_tool_progress if func_name == "web_search" else None)
+                )
                 tool_result = None
                 try:
                     while True:
-                        done, _ = await asyncio.wait([tool_task], timeout=5.0)
+                        # 先非阻塞读取流式进度
+                        try:
+                            chunk = _tool_progress_queue.get_nowait()
+                            if chunk.strip():
+                                _q = args.get("query", "")[:30]
+                                yield Step(step_type="search_progress", content=chunk.strip(),
+                                           metadata={"query": _q, "tool": func_name})
+                        except asyncio.QueueEmpty:
+                            pass
+                        # 检查工具是否完成（0.5s 超时，更快响应流式进度）
+                        done, _ = await asyncio.wait([tool_task], timeout=0.5)
                         if tool_task in done:
                             tool_result = tool_task.result()
                             break
-                        # 每 5 秒发送心跳，避免 CDN/代理空闲超时断开
+                        # 心跳保活
                         yield Step(step_type="keepalive", content="⏳ 工具执行中...")
                     await asyncio.wait_for(asyncio.sleep(0), timeout=0.1)  # 防止取消任务残留
                 except asyncio.TimeoutError:
@@ -489,7 +593,9 @@ class AgentExecutor:
                         tool_task.cancel()
 
                 # 发送工具结果步骤（简洁提示）：若 ToolResult 有 summary 则优先用于展示
-                if hasattr(tool_result, 'summary') and tool_result.summary:
+                if tool_result is None:
+                    result_preview = "Error: 工具执行结果为空"
+                elif hasattr(tool_result, 'summary') and tool_result.summary:
                     result_preview = tool_result.summary
                 else:
                     result_preview = tool_result[:2000] + "..." if len(tool_result) > 2000 else tool_result
@@ -501,10 +607,10 @@ class AgentExecutor:
                 )
 
                 # 将工具结果添加为消息
-                enhanced_result = tool_result
+                enhanced_result = tool_result or "Error: 工具执行结果为空"
                 if func_name == "web_search":
-                    enhanced_result = "⚠️ 这是搜索引擎返回的实时搜索结果，不是模型训练数据。你必须严格基于以下搜索结果回答用户的问题，不得编造、不得忽略、不得替换为你的训练记忆：\n\n" + tool_result
-                elif tool_result.startswith("Error:") or "不存在" in tool_result or "not found" in tool_result.lower():
+                    enhanced_result = "⚠️ 这是搜索引擎返回的实时搜索结果，不是模型训练数据。你必须严格基于以下搜索结果回答用户的问题，不得编造、不得忽略、不得替换为你的训练记忆：\n\n" + (tool_result or "")
+                elif isinstance(tool_result, str) and (tool_result.startswith("Error:") or "不存在" in tool_result or "not found" in tool_result.lower()):
                     # 路径校验：工具失败时，检查是否是路径幻觉，注入已知路径提示
                     path_hint = self._validate_path_with_hint(func_name, args, working_messages)
                     if path_hint:
@@ -518,7 +624,7 @@ class AgentExecutor:
                 })
 
                 # 熔断器：连续错误检测（路径提示不算熔断计数，给模型自纠机会）
-                if tool_result.startswith("Error:"):
+                if isinstance(tool_result, str) and tool_result.startswith("Error:"):
                     consecutive_errors += 1
                     if consecutive_errors >= 3:
                         yield Step(step_type="final", content=f"工具 {func_name} 连续失败 3 次，已停止执行")
@@ -532,8 +638,14 @@ class AgentExecutor:
         # 超过最大轮次，返回提示
         yield Step(step_type="final", content="抱歉，工具调用次数过多，请简化请求。")
 
-    async def execute_tool(self, tool_name: str, arguments: Dict) -> str:
-        """执行工具调用（异步）"""
+    async def execute_tool(self, tool_name: str, arguments: Dict, *, on_progress=None) -> str:
+        """执行工具调用（异步）
+
+        Args:
+            tool_name: 工具名称
+            arguments: 工具参数字典
+            on_progress: 可选进度回调，用于流式传输工具执行的中间结果
+        """
         from services.tool_registry import get_tool
 
         # 检查禁用工具
@@ -565,6 +677,12 @@ class AgentExecutor:
             for key in tool_entry["param_names"]:
                 if key in arguments:
                     valid_args[key] = arguments[key]
+
+            # 注入 on_progress 回调（仅当工具方法接受该参数时）
+            if on_progress is not None:
+                sig = inspect.signature(method)
+                if "on_progress" in sig.parameters:
+                    valid_args["on_progress"] = on_progress
 
             # 异步工具直接 await，同步工具在线程池执行（避免阻塞事件循环）
             loop = asyncio.get_event_loop()
