@@ -19,6 +19,7 @@ from datetime import datetime
 from sqlalchemy.orm import Session
 from models.database import SessionLocal
 from config import settings
+from routers.feclaw_domain import extract_hash_from_host
 from services.web_channel_service import WebChannelService
 from utils.auth import get_current_user_id, decode_jwt_token
 
@@ -177,6 +178,9 @@ async def chat_websocket(websocket: WebSocket):
         return
 
     user_id: int = payload["user_id"]
+    # 从 Host header 提取子域名 agent_hash
+    host = websocket.headers.get("host", "")
+    agent_hash = extract_hash_from_host(host) if host else None
     db = SessionLocal()
 
     async def heartbeat():
@@ -195,6 +199,8 @@ async def chat_websocket(websocket: WebSocket):
                 break
 
     heartbeat_task = asyncio.create_task(heartbeat())
+
+    chat_service = WebChannelService(db, user_id=user_id, agent_hash=agent_hash)
 
     try:
         while True:
@@ -216,8 +222,6 @@ async def chat_websocket(websocket: WebSocket):
                 continue
 
             logger.info(f"[WS] user_id={user_id}, content={content[:50] if content else ''}..., image_url={'yes' if image_url else 'no'}")
-
-            chat_service = WebChannelService(db, user_id=user_id)
 
             # 路由层拦截：开启新会话（在已有对话中插入分割线 + 招呼）
             _new_session_cmds = {"开启新会话", "新对话", "新会话", "重新开始", "结束对话", "结束会话", "开启新对话"}
@@ -258,7 +262,38 @@ async def chat_websocket(websocket: WebSocket):
                     except Exception as _e:
                         logger.warning(f"[WS] LLM greeting error: {_e}")
                 else:
+                    # 没有 session memory，尝试用 Agent 人格生成招呼
                     _greeting = ""
+                    try:
+                        _identity = await asyncio.to_thread(_vfs.cat, "/workspace/agent/identity.md")
+                        _soul = await asyncio.to_thread(_vfs.cat, "/workspace/agent/soul.md")
+                        _persona = ""
+                        if _identity and not _identity.startswith("Error"):
+                            _persona += f"身份配置：\n{_identity.strip()}\n\n"
+                        if _soul and not _soul.startswith("Error"):
+                            _persona += f"人格设定：\n{_soul.strip()}"
+                        if _persona:
+                            from services.llm_service import LLMService
+                            from services.model_registry import resolve as _resolve
+                            _cfg = _resolve(settings.MAIN_TEXT_MODEL)
+                            _llm = LLMService()
+                            async for chunk in _llm.chat(
+                                messages=[{
+                                    "role": "system",
+                                    "content": "根据 AI 助手的身份和人格设定，生成一句自然的开场打招呼消息。"
+                                               "用 1-2 句话表达热情和欢迎。"
+                                               "语气要符合人格设定（活泼/元气/温柔等），不要用「你好呀」等太通用的开场。"
+                                               "直接以助手的身份说话，不要提及「这是一个开场白」之类的元描述。"
+                                }, {
+                                    "role": "user",
+                                    "content": f"这是 AI 助手的人格设定：\n\n{_persona}"
+                                }],
+                                provider=_cfg["provider"],
+                                model=settings.MAIN_TEXT_MODEL,
+                            ):
+                                _greeting += chunk
+                    except Exception as _e:
+                        logger.warning(f"[WS] personality greeting error: {_e}")
 
                 if not _greeting:
                     _greeting = "你好呀！有什么想聊的吗？"
