@@ -1246,20 +1246,15 @@ class VirtualFileSystem:
             except Exception as ve:
                 logger.warning(f"[VFS] 版本注册失败: {ve}")
 
-            # 异步触发向量化（非阻塞，不干扰写入流程）
+            # 同步上下文（echo 在线程池中运行），使用线程 fallback
             if self._should_vectorize(path, append):
-                try:
-                    asyncio.get_running_loop()
-                    asyncio.create_task(self._async_index_file(path))
-                except RuntimeError:
-                    # 无事件循环（同步上下文），开新线程跑
-                    import threading
-                    _agent = self.agent_id or ""
-                    _path = path
-                    def _run_index():
-                        from services.vfs_indexer import VfsIndexer
-                        asyncio.run(VfsIndexer(agent_hash=_agent, file_path=_path).run())
-                    threading.Thread(target=_run_index, daemon=True).start()
+                import threading
+                _agent = self.agent_id or ""
+                _path = path
+                def _run_index():
+                    from services.vfs_indexer import VfsIndexer
+                    asyncio.run(VfsIndexer(agent_hash=_agent, file_path=_path).run())
+                threading.Thread(target=_run_index, daemon=True).start()
 
             return f"OK: 已写入 {len(content)} 字符到 {path}"
 
@@ -1278,17 +1273,6 @@ class VirtualFileSystem:
             return False
         ext = os.path.splitext(path)[1].lower()
         return ext in (".md", ".txt")
-
-    def _async_index_file(self, path: str):
-        """异步触发 VFS 文件索引（fire-and-forget）"""
-        try:
-            from services.vfs_indexer import VfsIndexer
-            agent_hash = self.agent_id or ""
-            indexer = VfsIndexer(agent_hash=agent_hash, file_path=path)
-            asyncio.create_task(indexer.run())
-            logger.info(f"[VFS] 已触发异步索引: {path}")
-        except Exception as e:
-            logger.warning(f"[VFS] 触发异步索引失败: {e}")
 
     # ========== grep ==========
 
