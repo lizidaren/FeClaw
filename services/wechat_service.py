@@ -1952,14 +1952,17 @@ class WeChatService:
         finally:
             db.close()
 
-    def unbind_user(self, user_id: int) -> bool:
-        """解除绑定"""
+    def unbind_user(self, user_id: int, agent_hash: str = None) -> bool:
+        """解除绑定（agent_hash 非空时只解绑指定 Agent）"""
         db = SessionLocal()
         try:
-            binding = db.query(WeChatBinding).filter(
+            query = db.query(WeChatBinding).filter(
                 WeChatBinding.user_id == user_id,
                 WeChatBinding.status == "active"
-            ).first()
+            )
+            if agent_hash:
+                query = query.filter(WeChatBinding.agent_hash == agent_hash)
+            binding = query.first()
             if binding:
                 binding.status = "logout"
                 binding.bot_token = ""
@@ -1969,6 +1972,17 @@ class WeChatService:
                 db.commit()
                 return True
             return False
+        finally:
+            db.close()
+
+    def has_active_binding(self, user_id: int) -> bool:
+        """检查用户是否还有活跃的微信绑定（用于决定是否停止轮询）"""
+        db = SessionLocal()
+        try:
+            return db.query(WeChatBinding).filter(
+                WeChatBinding.user_id == user_id,
+                WeChatBinding.status == "active"
+            ).first() is not None
         finally:
             db.close()
 

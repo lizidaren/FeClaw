@@ -353,22 +353,26 @@ async def get_binding_info(request: Request, user: User = Depends(get_current_us
 
 
 @router.post("/logout")
-async def logout(user: User = Depends(get_current_user)) -> dict:
+async def logout(request: Request, user: User = Depends(get_current_user)) -> dict:
     """
-    解绑微信 - 清除 bot 鉴权数据
-
-    同时清理本地状态和数据库绑定记录
+    解绑微信（按子域名 Agent 隔离）
     """
     try:
-        current_user = user
+        from routers.feclaw_domain import extract_hash_from_host
+        host = request.headers.get("X-Forwarded-Host", "") or request.headers.get("host", "")
+        agent_hash = extract_hash_from_host(host) if host else None
 
-        # 1. 停止长轮询
-        await wechat_service.stop_polling()
+        # 1. 停止当前用户的轮询
+        await wechat_service.stop_polling(user.id)
 
-        # 2. 清除数据库绑定记录
-        wechat_service.unbind_user(current_user.id)
+        # 2. 按 agent_hash 解绑指定 Agent
+        wechat_service.unbind_user(user.id, agent_hash=agent_hash)
 
-        # 3. 重置本地状态
+        # 3. 如果还有别的 Agent 绑着，重新启动轮询
+        if wechat_service.has_active_binding(user.id):
+            await wechat_service.start_polling(user_id=user.id)
+
+        # 4. 重置本地状态
         wechat_service.reset_login_state()
         return {"status": "success", "message": "已解绑"}
     except Exception as e:
@@ -380,13 +384,19 @@ async def logout(user: User = Depends(get_current_user)) -> dict:
 
 
 @router.delete("/unbind")
-async def unbind_wechat(user: User = Depends(get_current_user)) -> dict:
+async def unbind_wechat(request: Request, user: User = Depends(get_current_user)) -> dict:
     """
-    解绑微信 - DELETE 方法（与前端对齐）
+    解绑微信 - DELETE 方法（按子域名 Agent 隔离）
     """
     try:
-        await wechat_service.stop_polling()
-        wechat_service.unbind_user(user.id)
+        from routers.feclaw_domain import extract_hash_from_host
+        host = request.headers.get("X-Forwarded-Host", "") or request.headers.get("host", "")
+        agent_hash = extract_hash_from_host(host) if host else None
+
+        wechat_service.unbind_user(user.id, agent_hash=agent_hash)
+        remaining = wechat_service.has_active_binding(user.id)
+        if not remaining:
+            await wechat_service.stop_polling(user.id)
         wechat_service.reset_login_state()
         return {"status": "success", "message": "已解绑"}
     except Exception as e:
