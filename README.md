@@ -95,6 +95,16 @@ git clone https://github.com/lizidaren/FeClaw.git
 cd FeClaw
 pip install -r requirements.txt
 cp .env.example .env
+
+**系统依赖**（FUSE 文件系统挂载支持，可选但推荐）：
+
+```bash
+# Ubuntu / Debian
+sudo apt install fuse3 libfuse3-dev
+
+# macOS 已内置 FUSE 支持
+# Windows WSL 需安装 fuse3 包（sudo apt install fuse3）
+```
 ```
 
 **最简起步 — 只配一个千问 API Key**（推荐用于快速体验）：
