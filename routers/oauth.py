@@ -81,8 +81,6 @@ async def oauth_callback(
     # 用户取消授权
     if error:
         logger.info(f"OAuth callback with error: {error} ({error_description})")
-        from fastapi.responses import RedirectResponse
-        from urllib.parse import urlencode
         domain = settings.FECLAW_DOMAIN or "feclaw.lizidaren.cn"
         base = f"https://{domain}"
         redirect_url = f"{base}/login?error={error}"
