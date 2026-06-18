@@ -83,8 +83,9 @@ async def oauth_callback(
         logger.info(f"OAuth callback with error: {error} ({error_description})")
         from fastapi.responses import RedirectResponse
         from urllib.parse import urlencode
-        params = urlencode({"error": error})
-        redirect_url = f"{settings.FECLAW_DOMAIN or 'https://feclaw.lizidaren.cn'}/login?{params}"
+        domain = settings.FECLAW_DOMAIN or "feclaw.lizidaren.cn"
+        base = f"https://{domain}"
+        redirect_url = f"{base}/login?error={error}"
         return RedirectResponse(url=redirect_url)
 
     # 从 Cookie 读取 state，不依赖服务端内存
