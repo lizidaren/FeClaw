@@ -12,7 +12,7 @@ import base64
 import time
 import logging
 from datetime import datetime
-from typing import AsyncGenerator, Optional
+from typing import AsyncGenerator, Optional, Tuple
 from sqlalchemy.orm import Session
 
 import httpx
@@ -32,7 +32,7 @@ CHANNEL_WEB = "web"
 logger = logging.getLogger(__name__)
 
 
-async def _download_and_save_image_to_vfs(image_url: str, user_id: int, agent_hash: str = None) -> Optional[str]:
+async def _download_and_save_image_to_vfs(image_url: str, user_id: int, agent_hash: str = None) -> Tuple[Optional[str], Optional[bytes]]:
     """
     保存图片到 Agent VFS 工作区（与微信端共用相同逻辑）
 
@@ -45,7 +45,7 @@ async def _download_and_save_image_to_vfs(image_url: str, user_id: int, agent_ha
         VFS 文件路径，失败返回 None
     """
     if not image_url:
-        return None
+        return None, None
 
     try:
         # 处理 data URI 或直接 URL
@@ -66,7 +66,7 @@ async def _download_and_save_image_to_vfs(image_url: str, user_id: int, agent_ha
         if existing_path:
             # 图片已存在，直接复用
             logger.info(f"[FeClaw] Image deduplicated: reusing {existing_path}")
-            return existing_path
+            return existing_path, image_bytes
 
         # 生成文件名
         timestamp = int(time.time() * 1000)
@@ -88,11 +88,11 @@ async def _download_and_save_image_to_vfs(image_url: str, user_id: int, agent_ha
         dedup.register_image(vfs_path, image_bytes)
 
         logger.info(f"[FeClaw] Saved image to VFS: {vfs_path}")
-        return vfs_path
+        return vfs_path, image_bytes
 
     except Exception as e:
         logger.warning(f"[FeClaw] Failed to save image to VFS: {e}")
-        return None
+        return None, None
 
 
 class WebChannelService:
@@ -144,7 +144,7 @@ class WebChannelService:
         vfs_path = None
         if image_url:
             # 下载图片并保存到用户VFS工作区
-            vfs_path = await _download_and_save_image_to_vfs(image_url, self.user_id, agent_hash=self.agent_hash)
+            vfs_path, image_bytes = await _download_and_save_image_to_vfs(image_url, self.user_id, agent_hash=self.agent_hash)
             if vfs_path:
                 # Pre-LLM: 用 Qwen3 VL Flash 快速描述图片
                 image_desc = None
@@ -156,21 +156,13 @@ class WebChannelService:
                     ).first()
                     _use_4d = _ap and not _ap.sr_enabled
 
-                    if _use_4d:
-                        from services.image_describer import describe_image_from_path_4d
-                    else:
-                        from services.image_describer import describe_image_from_path
-                    # 构建实际文件系统路径
-                    from config import settings
-                    import os
-                    fs_path = os.path.join(settings.VFS_ROOT, self.agent_hash, vfs_path.lstrip('/'))
-                    if not os.path.exists(fs_path):
-                        fs_path = os.path.join(settings.VFS_ROOT, f"agents/{self.agent_hash}", vfs_path.lstrip('/'))
-                    if os.path.exists(fs_path):
+                    if image_bytes:
                         if _use_4d:
-                            image_desc = await describe_image_from_path_4d(fs_path, timeout=15.0)
+                            from services.image_describer import describe_image_4d
+                            image_desc = await describe_image_4d(image_bytes, timeout=15.0)
                         else:
-                            image_desc = await describe_image_from_path(fs_path, timeout=15.0)
+                            from services.image_describer import describe_image_3d
+                            image_desc = await describe_image_3d(image_bytes, timeout=15.0)
                 except Exception as e:
                     logger.warning(f"[FeClaw] Pre-LLM image description failed: {e}")
 
