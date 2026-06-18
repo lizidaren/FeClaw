@@ -184,7 +184,17 @@ class WebChannelService:
                     prefix_parts.append(f"图片概述: {image_desc}")
                     prefix_parts.append("")
                     prefix_parts.append("（以上为预识别描述，供参考。）")
-                
+
+                # 发送预识别结果为主管 SSE 事件（可点击展开）
+                if image_desc:
+                    yield f"event: pipeline\ndata: {json.dumps({
+                        "content": "📷 图片预识别完成",
+                        "result_preview": image_desc[:2000],
+                        "done": True,
+                        "tool": "image_describer",
+                        "query": "图片分析"
+                    }, ensure_ascii=False)}\n\n"
+
                 prefix = "\n".join(prefix_parts)
                 
                 if user_input:
