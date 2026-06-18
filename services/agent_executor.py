@@ -290,20 +290,20 @@ class AgentExecutor:
                 decision = RouteDecision()
             yield Step(step_type="pipeline", content="✅ SmartRouter 分析完成")
 
-        logger.warning(f"[TIMING] SmartRouter phase done: {time.time()-_t0:.1f}s, direct_reply={decision.direct_reply is not None}, thinking={decision.thinking}, prefetch={len(decision.prefetch or [])}")
+            # 展示 SmartRouter 决策结果
+            if decision.direct_reply:
+                yield Step(step_type="pipeline", content="📋 决策: 直接回复（无需联网搜索）")
+            else:
+                _labels = []
+                for _cmd in (decision.prefetch or []):
+                    _t = {"web_search": "🔍网络搜索", "knowledge_search": "📚知识库", "file_read": "📄文件读取"}.get(_cmd.get("tool", ""), _cmd.get("tool", ""))
+                    _q = _cmd.get("query", "")[:30]
+                    _labels.append(f"{_t}({_q})")
+                yield Step(step_type="pipeline", content=f"📋 决策: 搜索后回答 [{' | '.join(_labels)}]")
+            if decision.thinking:
+                yield Step(step_type="pipeline", content="🧠 深度思考已开启")
 
-        # 展示 SmartRouter 决策结果
-        if decision.direct_reply:
-            yield Step(step_type="pipeline", content="📋 决策: 直接回复（无需联网搜索）")
-        else:
-            _labels = []
-            for _cmd in (decision.prefetch or []):
-                _t = {"web_search": "🔍网络搜索", "knowledge_search": "📚知识库", "file_read": "📄文件读取"}.get(_cmd.get("tool", ""), _cmd.get("tool", ""))
-                _q = _cmd.get("query", "")[:30]
-                _labels.append(f"{_t}({_q})")
-            yield Step(step_type="pipeline", content=f"📋 决策: 搜索后回答 [{' | '.join(_labels)}]")
-        if decision.thinking:
-            yield Step(step_type="pipeline", content="🧠 深度思考已开启")
+        logger.warning(f"[TIMING] SmartRouter phase done: {time.time()-_t0:.1f}s, direct_reply={decision.direct_reply is not None}, thinking={decision.thinking}, prefetch={len(decision.prefetch or [])}")
 
         # 2a. L0 直接回复（不走主模型）
         if decision.direct_reply:
