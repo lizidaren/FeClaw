@@ -26,9 +26,9 @@ VECTOR_BUCKET = "firstentrance-gzvec-1257148458"
 # 向量维度
 VECTOR_DIMENSION = 1024
 # COS 向量存储域名 & IP（WSL DNS 兜底）
-VECTOR_ENDPOINT = "vectors.ap-guangzhou.coslake.com"
+VECTOR_ENDPOINT = "vectors.ap-guangzhou.tencentcos.com"
 VECTOR_ENDPOINT_SUFFIX = "." + VECTOR_ENDPOINT
-VECTOR_IP = "222.79.123.48"
+VECTOR_IP = "169.254.1.83"
 
 _is_wsl = "microsoft" in __import__("platform").uname().release.lower()
 _original_getaddrinfo = socket.getaddrinfo
@@ -36,32 +36,8 @@ _original_getaddrinfo = socket.getaddrinfo
 
 @contextlib.contextmanager
 def _vector_dns_scope():
-    """局部 DNS patch：在 socket 层将 VECTOR_ENDPOINT 解析为 VECTOR_IP。
-
-    仅 WSL 下生效。URL 保持域名不变（SSL 证书匹配），只在建立 TCP 连接时
-    将域名解析指向硬编码 IP。退出 scope 后自动恢复。
-    """
-    if not _is_wsl:
-        yield
-        return
-
-    _global_fallback = socket.getaddrinfo
-
-    @functools.wraps(_original_getaddrinfo)
-    def _patched(host, port, family=0, type_=0, proto=0, flags=0):
-        if host is not None:
-            host_str = host.decode() if isinstance(host, bytes) else host
-            if host_str == VECTOR_ENDPOINT or host_str.endswith(VECTOR_ENDPOINT_SUFFIX):
-                return [
-                    (socket.AF_INET, socket.SOCK_STREAM, 6, '', (VECTOR_IP, port or 443))
-                ]
-        # 非向量域名走全局 fallback（缓存/硬编码 IP，不浪费 DNS 3 秒）
-        return _global_fallback(host, port, family, type_, proto, flags)
-    socket.getaddrinfo = _patched
-    try:
-        yield
-    finally:
-        socket.getaddrinfo = _global_fallback
+    """历史上用于 WSL 的 DNS patch，现在使用正确的 internal endpoint 后不再需要。"""
+    yield
 
 
 class _VectorClientWrapper:
