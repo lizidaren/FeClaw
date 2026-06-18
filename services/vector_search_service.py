@@ -109,7 +109,7 @@ class VectorSearchService:
             Region="ap-guangzhou",
             SecretId=settings.TENCENT_COS_SECRET_ID,
             SecretKey=settings.TENCENT_COS_SECRET_KEY,
-            Endpoint=VECTOR_ENDPOINT,
+            Domain=VECTOR_ENDPOINT,
             Scheme="https",
         )
         # WSL: 包装客户端，每次方法调用自动套上 DNS scope（保持 URL 域名不变）
