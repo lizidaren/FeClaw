@@ -188,11 +188,10 @@ class CosVectorStorage(VectorStorage):
                 return
         except Exception as e:
             if "not found" in str(e).lower():
-                pass
+                pass  # 不存在，正常走创建流程
             else:
-                logger.warning("ensure_index check_index failed: %s", e)
-                if "not found" not in str(e).lower():
-                    return
+                logger.error("ensure_index check_index failed: %s — retrying create", e)
+                # 不确定是否真的不存在，但尝试创建不亏
 
         try:
             client = self._get_client()
@@ -206,7 +205,13 @@ class CosVectorStorage(VectorStorage):
             self._index_bucket_cache[index] = bucket
             logger.info("Created index %s in bucket %s", index, bucket)
         except Exception as e:
-            logger.warning("create_index %s in bucket %s failed: %s", index, bucket, e)
+            err_lower = str(e).lower()
+            if "already exists" in err_lower or "exist" in err_lower:
+                self._index_bucket_cache[index] = bucket
+                logger.info("Index %s already exists in bucket %s", index, bucket)
+            else:
+                logger.error("create_index %s in bucket %s failed: %s", index, bucket, e)
+                raise  # 让调用方知道创建失败
 
     # ----- query -----
 
@@ -250,7 +255,7 @@ class CosVectorStorage(VectorStorage):
                         import ast
                         metadata = ast.literal_eval(metadata)
                     except (ValueError, SyntaxError):
-                        pass
+                        metadata = {}  # 解析失败时返回空 dict，避免下游 .get() 报错
             results.append({
                 "key": v.get("key", ""),
                 "score": max(0.0, min(1.0, 1.0 - v.get("distance", 0))),
@@ -569,59 +574,61 @@ def _get_sqlite_conn() -> sqlite3.Connection:
     
     优先使用 pysqlite3-binary（支持 extension loading），
     回退到 stdlib sqlite3。
+    完整初始化在锁内完成，避免双线程竞态。
     """
     global _sqlite_connection
     if _sqlite_connection is not None:
         return _sqlite_connection
 
-    # 优先使用 pysqlite3-binary（带 extension loading 支持）
-    try:
-        import pysqlite3
-        _sqlite_mod = pysqlite3
-        logger.debug("Using pysqlite3-binary (supports extensions)")
-    except ImportError:
-        _sqlite_mod = sqlite3
-        logger.debug("Using stdlib sqlite3")
+    with _sqlite_lock:
+        # Double-checked locking
+        if _sqlite_connection is not None:
+            return _sqlite_connection
 
-    db_path = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        "data",
-        os.path.basename(settings.VECTOR_SQLITE_PATH),
-    )
-    os.makedirs(os.path.dirname(db_path), exist_ok=True)
+        # 优先使用 pysqlite3-binary（带 extension loading 支持）
+        try:
+            import pysqlite3
+            _sqlite_mod = pysqlite3
+            logger.debug("Using pysqlite3-binary (supports extensions)")
+        except ImportError:
+            _sqlite_mod = sqlite3
+            logger.debug("Using stdlib sqlite3")
 
-    conn = _sqlite_mod.connect(db_path, check_same_thread=False)
-    conn.row_factory = _sqlite_mod.Row
-
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=5000")
-
-    # 加载 sqlite-vec 扩展
-    try:
-        import sqlite_vec
-        conn.enable_load_extension(True)
-        sqlite_vec.load(conn)
-        conn.enable_load_extension(False)
-        logger.info("sqlite-vec extension loaded successfully")
-    except (AttributeError, Exception) as e:
-        logger.error(
-            "Cannot load sqlite-vec extension: %s. "
-            "Try: pip install pysqlite3-binary",
-            e
+        db_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "data",
+            os.path.basename(settings.VECTOR_SQLITE_PATH),
         )
-        raise RuntimeError(
-            f"sqlite-vec extension unavailable: {e}. "
-            f"VECTOR_STORAGE_BACKEND=sqlite requires extension loading support. "
-            f"Install pysqlite3-binary: pip install pysqlite3-binary"
-        )
+        os.makedirs(os.path.dirname(db_path), exist_ok=True)
 
-    _init_schema(conn)
-    _sqlite_connection = conn
-    return conn
+        conn = _sqlite_mod.connect(db_path, check_same_thread=False)
+        conn.row_factory = _sqlite_mod.Row
 
-    _init_schema(conn)
-    _sqlite_connection = conn
-    return conn
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
+
+        # 加载 sqlite-vec 扩展
+        try:
+            import sqlite_vec
+            conn.enable_load_extension(True)
+            sqlite_vec.load(conn)
+            conn.enable_load_extension(False)
+            logger.info("sqlite-vec extension loaded successfully")
+        except (AttributeError, Exception) as e:
+            logger.error(
+                "Cannot load sqlite-vec extension: %s. "
+                "Try: pip install pysqlite3-binary",
+                e
+            )
+            raise RuntimeError(
+                f"sqlite-vec extension unavailable: {e}. "
+                f"VECTOR_STORAGE_BACKEND=sqlite requires extension loading support. "
+                f"Install pysqlite3-binary: pip install pysqlite3-binary"
+            )
+
+        _init_schema(conn)
+        _sqlite_connection = conn
+        return conn
 
 
 def _get_table_by_index(conn: sqlite3.Connection, index: str) -> str:
@@ -657,37 +664,39 @@ class SqliteVecStorage(VectorStorage):
     # ----- ensure_index -----
 
     def ensure_index(self, index: str) -> None:
-        """创建 index：vec0 表 + 元数据注册。幂等，单事务。"""
+        """创建 index：vec0 表 + 元数据注册。幂等。
+        
+        注意：不使用 with self._conn 以避免嵌套事务。
+        当被 put() 调用时，外层 with self._conn 统一管理事务边界。
+        """
         table = _index_to_table(index)
         escaped_table = _escape_table(table)
 
-        with self._conn:
-            # 检查是否已注册
-            cur = self._conn.execute(
-                "SELECT 1 FROM vec_indexes WHERE index_name = ?", (index,)
-            )
-            if cur.fetchone():
-                return
+        # 检查是否已注册
+        if self._conn.execute(
+            "SELECT 1 FROM vec_indexes WHERE index_name = ?", (index,)
+        ).fetchone():
+            return
 
-            # 创建 vec0 表
-            try:
-                self._conn.execute(f"""
-                    CREATE VIRTUAL TABLE IF NOT EXISTS [{escaped_table}]
-                    USING vec0(embedding float[1024] distance_metric=cosine)
-                """)
-            except sqlite3.OperationalError as e:
-                err = str(e).lower()
-                if "already exists" in err:
-                    pass  # 并发安全：另一线程刚建好
-                else:
-                    logger.error("Failed to create vec0 table %s: %s", table, e)
-                    raise
+        # 创建 vec0 表
+        try:
+            self._conn.execute(f"""
+                CREATE VIRTUAL TABLE IF NOT EXISTS [{escaped_table}]
+                USING vec0(embedding float[1024] distance_metric=cosine)
+            """)
+        except sqlite3.OperationalError as e:
+            err = str(e).lower()
+            if "already exists" in err:
+                pass  # 并发安全：另一线程刚建好
+            else:
+                logger.error("Failed to create vec0 table %s: %s", table, e)
+                raise
 
-            # 注册到 vec_indexes（幂等）
-            self._conn.execute(
-                "INSERT OR IGNORE INTO vec_indexes (index_name, table_name) VALUES (?, ?)",
-                (index, table)
-            )
+        # 注册到 vec_indexes（幂等）
+        self._conn.execute(
+            "INSERT OR IGNORE INTO vec_indexes (index_name, table_name) VALUES (?, ?)",
+            (index, table)
+        )
 
     # ----- query -----
 
@@ -914,6 +923,7 @@ class NumpyVecStorage(VectorStorage):
 
     def put(self, index: str, vectors: List[Dict]) -> None:
         """原子写入：标记旧 key 为 deleted，追加新向量，内联 compact"""
+        import numpy as np
         if not vectors:
             return
 
@@ -923,7 +933,8 @@ class NumpyVecStorage(VectorStorage):
         with self._write_lock(index):
             self._cleanup_tmp(index)
 
-            entries = json.loads(open(entries_path).read()) if os.path.exists(entries_path) else []
+            entries = (json.loads(open(entries_path, 'rb').read())
+                       if os.path.exists(entries_path) else [])
             old = np.load(npy_path) if os.path.exists(npy_path) else np.empty((0, VECTOR_DIMENSION), dtype=np.float32)
 
             new_vecs = np.array([v["data"]["float32"] for v in vectors], dtype=np.float32)
@@ -966,6 +977,7 @@ class NumpyVecStorage(VectorStorage):
     def query(self, index: str, query_vec: List[float], top_k: int,
               filter: dict = None) -> List[Dict]:
         """mmap 加载 .npy，numpy 批量余弦相似度，行号对齐 entries.json"""
+        import numpy as np
         npy_path = self._npy_path(index)
         entries_path = self._entries_path(index)
         if not os.path.exists(npy_path):
