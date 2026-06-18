@@ -9,6 +9,7 @@ import contextlib
 import functools
 import json
 import logging
+import fcntl
 import os
 import re
 import socket
@@ -17,9 +18,11 @@ import struct
 import threading
 import time
 from abc import ABC, abstractmethod
+from datetime import datetime
 from typing import Dict, List, Optional
 
 import httpx
+import numpy as np
 
 from config import settings
 from services.model_registry import resolve as _reg_resolve
@@ -828,6 +831,258 @@ class SqliteVecStorage(VectorStorage):
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# NumpyVecStorage — 纯文件系统 + numpy 向量存储后端
+# ═══════════════════════════════════════════════════════════════════════
+
+class NumpyVecStorage(VectorStorage):
+    """纯文件系统 + numpy 向量存储后端（零 C 扩展、零数据库）"""
+
+    VECTOR_ROOT = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "data", "vectors"
+    )
+
+    def __init__(self):
+        os.makedirs(self.VECTOR_ROOT, exist_ok=True)
+
+    def _index_dir(self, index: str) -> str:
+        """每个 index 一个目录"""
+        _validate_index(index)
+        return os.path.join(self.VECTOR_ROOT, index)
+
+    def _lock_path(self, index: str) -> str:
+        return os.path.join(self._index_dir(index), ".lock")
+
+    def _entries_path(self, index: str) -> str:
+        return os.path.join(self._index_dir(index), "entries.json")
+
+    def _npy_path(self, index: str) -> str:
+        return os.path.join(self._index_dir(index), "embeddings.npy")
+
+    def _cleanup_tmp(self, index: str):
+        """清理残留的 .tmp 文件（崩溃恢复）"""
+        for f in (self._npy_path(index).replace('.npy', '.tmp.npy'), self._entries_path(index) + ".tmp"):
+            if os.path.exists(f):
+                os.remove(f)
+
+    @contextlib.contextmanager
+    def _read_lock(self, index: str):
+        """查询时：共享锁。阻止写入，允许多读。"""
+        fd = None
+        try:
+            fd = self._open_lock(index)
+            fcntl.flock(fd, fcntl.LOCK_SH)
+            yield
+        finally:
+            if fd is not None:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                os.close(fd)
+
+    @contextlib.contextmanager
+    def _write_lock(self, index: str):
+        """写入时：独占锁。阻止读写。"""
+        fd = self._open_lock(index)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+
+    def _open_lock(self, index: str) -> int:
+        """打开或创建锁文件，返回 fd"""
+        idx_dir = self._index_dir(index)
+        os.makedirs(idx_dir, exist_ok=True)
+        lock_path = self._lock_path(index)
+        if not os.path.exists(lock_path):
+            open(lock_path, 'w').close()
+        return os.open(lock_path, os.O_RDONLY)
+
+    # ── ensure_index ────────────────────────────────────────────────
+
+    def ensure_index(self, index: str) -> None:
+        """创建 index 目录（幂等）"""
+        self._cleanup_tmp(index)
+        idx_dir = self._index_dir(index)
+        if not os.path.exists(idx_dir):
+            os.makedirs(idx_dir, exist_ok=True)
+            with open(self._entries_path(index), 'w') as f:
+                json.dump([], f)
+            open(self._lock_path(index), 'w').close()
+
+    # ── put ─────────────────────────────────────────────────────────
+
+    def put(self, index: str, vectors: List[Dict]) -> None:
+        """原子写入：标记旧 key 为 deleted，追加新向量，内联 compact"""
+        if not vectors:
+            return
+
+        npy_path = self._npy_path(index)
+        entries_path = self._entries_path(index)
+
+        with self._write_lock(index):
+            self._cleanup_tmp(index)
+
+            entries = json.loads(open(entries_path).read()) if os.path.exists(entries_path) else []
+            old = np.load(npy_path) if os.path.exists(npy_path) else np.empty((0, VECTOR_DIMENSION), dtype=np.float32)
+
+            new_vecs = np.array([v["data"]["float32"] for v in vectors], dtype=np.float32)
+            new_keys = {v["key"] for v in vectors}
+
+            for entry in entries:
+                if entry["key"] in new_keys:
+                    entry["deleted"] = True
+
+            all_vecs = np.vstack([old, new_vecs])
+
+            for v in vectors:
+                entries.append({
+                    "key": v["key"],
+                    "metadata": v.get("metadata", {}),
+                    "created_at": datetime.now().isoformat(),
+                })
+
+            # 内联 compact：墓碑超过活跃行时同步清理
+            alive_count = sum(1 for e in entries if not e.get("deleted"))
+            tomb_count = len(entries) - alive_count
+            if tomb_count > alive_count and tomb_count > 50:
+                alive_indices = [i for i, e in enumerate(entries) if not e.get("deleted")]
+                all_vecs = all_vecs[alive_indices]
+                entries = [entries[i] for i in alive_indices]
+
+            # 原子写入：.tmp → os.rename
+            tmp_npy = npy_path.replace('.npy', '.tmp.npy')
+            tmp_json = entries_path + ".tmp"
+            np.save(tmp_npy, all_vecs)
+            with open(tmp_json, 'w') as f:
+                json.dump(entries, f, ensure_ascii=False)
+            os.rename(tmp_npy, npy_path)
+            os.rename(tmp_json, entries_path)
+
+            self._cleanup_tmp(index)
+
+    # ── query ───────────────────────────────────────────────────────
+
+    def query(self, index: str, query_vec: List[float], top_k: int,
+              filter: dict = None) -> List[Dict]:
+        """mmap 加载 .npy，numpy 批量余弦相似度，行号对齐 entries.json"""
+        npy_path = self._npy_path(index)
+        entries_path = self._entries_path(index)
+        if not os.path.exists(npy_path):
+            return []
+
+        with self._read_lock(index):
+            query_np = np.array(query_vec, dtype=np.float32)
+            query_norm = np.linalg.norm(query_np)
+
+            embeddings = np.load(npy_path, mmap_mode='r')
+            norms = np.linalg.norm(embeddings, axis=1)
+            dots = np.dot(embeddings, query_np)
+            similarities = dots / (norms * query_norm + 1e-8)
+
+            with open(entries_path, 'r') as f:
+                entries = json.load(f)
+
+            min_count = min(len(embeddings), len(entries))
+
+            deleted = set()
+            for i in range(min_count):
+                if entries[i].get("deleted"):
+                    deleted.add(i)
+
+            indices = np.argsort(-similarities[:min_count], kind='stable')
+
+            results = []
+            for idx in indices:
+                if len(results) >= top_k:
+                    break
+                if idx in deleted:
+                    continue
+                entry = entries[idx]
+                if filter and not _match_filter(entry.get("metadata", {}), filter):
+                    continue
+
+                score = max(0.0, min(1.0, float(similarities[idx])))
+                results.append({
+                    "key": entry["key"],
+                    "score": score,
+                    "metadata": entry.get("metadata", {}),
+                })
+
+        return results
+
+    # ── delete ──────────────────────────────────────────────────────
+
+    def delete(self, index: str, keys: List[str]) -> None:
+        """标记删除（墓碑），不实际删除文件"""
+        if not keys:
+            return
+
+        entries_path = self._entries_path(index)
+        if not os.path.exists(entries_path):
+            return
+
+        with self._write_lock(index):
+            with open(entries_path, 'r') as f:
+                entries = json.load(f)
+
+            key_set = set(keys)
+            changed = False
+            for entry in entries:
+                if entry["key"] in key_set and not entry.get("deleted"):
+                    entry["deleted"] = True
+                    changed = True
+
+            if changed:
+                tmp = entries_path + ".tmp"
+                with open(tmp, 'w') as f:
+                    json.dump(entries, f, ensure_ascii=False)
+                os.rename(tmp, entries_path)
+                self._cleanup_tmp(index)
+
+    # ── list_keys_by_prefix ─────────────────────────────────────────
+
+    def list_keys_by_prefix(self, index: str, prefix: str) -> List[str]:
+        """前缀匹配（跳过已删除）"""
+        entries_path = self._entries_path(index)
+        if not os.path.exists(entries_path):
+            return []
+
+        with self._read_lock(index):
+            with open(entries_path, 'r') as f:
+                entries = json.load(f)
+
+        return [
+            e["key"] for e in entries
+            if e["key"].startswith(prefix) and not e.get("deleted")
+        ]
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 自动降级
+# ═══════════════════════════════════════════════════════════════════════
+
+def _get_sqlite_or_numpy_storage() -> VectorStorage:
+    """自动选择：SqliteVecStorage → 失败 → NumpyVecStorage"""
+    try:
+        return SqliteVecStorage()
+    except Exception as e:
+        logger.warning("SqliteVecStorage init failed: %s", e)
+        logger.info("Falling back to NumpyVecStorage (zero C extension dependency)")
+
+    try:
+        import numpy as np
+        np.zeros(1)
+        return NumpyVecStorage()
+    except Exception:
+        raise RuntimeError(
+            "No local vector storage backend available. "
+            "Install: pip install sqlite-vec pysqlite3-binary  (recommended)\n"
+            "Or ensure numpy is available: pip install numpy"
+        )
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # VectorSearchService — 对外 API 层
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -844,7 +1099,7 @@ class VectorSearchService:
         """根据配置创建存储后端"""
         backend = settings.VECTOR_STORAGE_BACKEND or "cos"
         if backend == "sqlite":
-            return SqliteVecStorage()
+            return _get_sqlite_or_numpy_storage()
         return CosVectorStorage(agent_hash=self.agent_hash)
 
     # ----- Index Management -----
