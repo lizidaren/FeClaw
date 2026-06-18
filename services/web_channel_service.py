@@ -149,7 +149,17 @@ class WebChannelService:
                 # Pre-LLM: 用 Qwen3 VL Flash 快速描述图片
                 image_desc = None
                 try:
-                    from services.image_describer import describe_image_from_path
+                    # 根据 sr_enabled 决定预识别模式
+                    from models.database import AgentProfile
+                    _ap = self.db.query(AgentProfile).filter(
+                        AgentProfile.hash == self.agent_hash
+                    ).first()
+                    _use_4d = _ap and not _ap.sr_enabled
+
+                    if _use_4d:
+                        from services.image_describer import describe_image_from_path_4d
+                    else:
+                        from services.image_describer import describe_image_from_path
                     # 构建实际文件系统路径
                     from config import settings
                     import os
@@ -157,7 +167,10 @@ class WebChannelService:
                     if not os.path.exists(fs_path):
                         fs_path = os.path.join(settings.VFS_ROOT, f"agents/{self.agent_hash}", vfs_path.lstrip('/'))
                     if os.path.exists(fs_path):
-                        image_desc = await describe_image_from_path(fs_path, timeout=15.0)
+                        if _use_4d:
+                            image_desc = await describe_image_from_path_4d(fs_path, timeout=15.0)
+                        else:
+                            image_desc = await describe_image_from_path(fs_path, timeout=15.0)
                 except Exception as e:
                     logger.warning(f"[FeClaw] Pre-LLM image description failed: {e}")
 
