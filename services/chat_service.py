@@ -33,6 +33,7 @@ from services.agent_executor import AgentExecutor
 from services.point_service import PointService
 from services.message_compactor import estimate_tokens
 from services.workspace_service import get_agent_workspace_root
+from services.active_tracker import track_start, track_end
 from models.database import SessionLocal, AgentProfile, ChatHistory
 
 logger = logging.getLogger(__name__)
@@ -199,8 +200,10 @@ class ChatService:
                 meta={}
             )
 
+        _req_id = None
         try:
             _chat_t0 = time.time()
+            _req_id = track_start(self.agent_hash, self.channel)
             logger.warning(f"[TIMING] chat() start, agent={self.agent_hash}, channel={self.channel}, user_input_len={len(actual.text) if actual.text else 0}")
 
             # ① 前置钩子
@@ -297,11 +300,14 @@ class ChatService:
             )
 
         except Exception as e:
+            track_end(_req_id)
             logger.error(f"[ChatService] chat error: {e}", exc_info=True)
             yield ChatEvent(
                 type=ChatEventType.ERROR,
                 error_message=str(e)
             )
+        finally:
+            track_end(_req_id)
     
     async def build_system_prompt(self) -> str:
         """构建系统提示词，优先使用 AgentProfile.system_prompt，否则从 VFS 读取"""

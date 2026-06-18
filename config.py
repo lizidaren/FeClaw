@@ -72,6 +72,8 @@ class Settings(BaseSettings):
     OAUTH_TOKEN_URL: str = ""       # 默认: {OAUTH_PROVIDER_URL}/token
     OAUTH_USERINFO_URL: str = ""    # 默认: {OAUTH_PROVIDER_URL}/userinfo
     OAUTH_JWKS_URL: str = ""        # 默认: {OAUTH_PROVIDER_URL}/.well-known/jwks.json
+    OAUTH_END_SESSION_URL: str = ""  # 默认: {OAUTH_PROVIDER_URL}/oauth/end-session
+    ADMIN_API_KEY: str = ""
 
     # Feature Flag：设为 True 启用 OAuth，禁止本地注册/登录
     _oauth_enabled: bool = False

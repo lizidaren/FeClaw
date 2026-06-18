@@ -3,6 +3,7 @@ OAuth Client 服务
 处理与 FirstEntrancePlatform 的 OAuth 认证流程
 """
 
+import secrets
 import httpx
 from typing import Optional, Dict, Any
 from urllib.parse import urlencode, urljoin
@@ -35,6 +36,19 @@ class OAuthService:
         self.token_url = settings.OAUTH_TOKEN_URL or urljoin(self.provider_url, "/token")
         self.userinfo_url = settings.OAUTH_USERINFO_URL or urljoin(self.provider_url, "/userinfo")
         self.jwks_url = settings.OAUTH_JWKS_URL or urljoin(self.provider_url, "/.well-known/jwks.json")
+        self.end_session_endpoint = settings.OAUTH_END_SESSION_URL or urljoin(self.provider_url, "/oauth/end-session")
+
+    def build_logout_url(self, id_token: str = "", post_logout_redirect_uri: str = "") -> str:
+        """构建 OIDC RP-Initiated Logout URL"""
+        params = {}
+        if id_token:
+            params["id_token_hint"] = id_token
+        if post_logout_redirect_uri:
+            params["post_logout_redirect_uri"] = post_logout_redirect_uri
+            params["state"] = secrets.token_urlsafe(16)
+        if params:
+            return f"{self.end_session_endpoint}?{urlencode(params)}"
+        return self.end_session_endpoint
 
     def get_authorize_url(self, state: str) -> Optional[str]:
         """生成授权 URL，重定向到 Platform 登录"""
@@ -153,14 +167,14 @@ class OAuthService:
             if not jwks:
                 return None
 
-            # 按 kid 匹配密钥（若无 kid 或无匹配则 fallback 到 keys[0]）
+            # P2-8 修复：按 kid 匹配密钥，不匹配时直接返回 None（禁止 fallback 到第一个 key）
             key_data = None
             if kid:
-                for k in jwks["keys"]:
-                    if k.get("kid") == kid:
-                        key_data = k
-                        break
-            if key_data is None:
+                key_data = next((k for k in jwks["keys"] if k.get("kid") == kid), None)
+                if not key_data:
+                    logger.warning(f"No JWKS key matched kid={kid}, rejecting token")
+                    return None
+            else:
                 key_data = jwks["keys"][0]
 
             # 解析 RSA 公钥

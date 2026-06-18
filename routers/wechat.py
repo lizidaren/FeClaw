@@ -352,37 +352,6 @@ async def get_binding_info(request: Request, user: User = Depends(get_current_us
     return BindingInfoResponse(bound=False)
 
 
-@router.post("/logout")
-async def logout(request: Request, user: User = Depends(get_current_user)) -> dict:
-    """
-    解绑微信（按子域名 Agent 隔离）
-    """
-    try:
-        from routers.feclaw_domain import extract_hash_from_host
-        host = request.headers.get("X-Forwarded-Host", "") or request.headers.get("host", "")
-        agent_hash = extract_hash_from_host(host) if host else None
-
-        # 1. 停止当前用户的轮询
-        await wechat_service.stop_polling(user.id)
-
-        # 2. 按 agent_hash 解绑指定 Agent
-        wechat_service.unbind_user(user.id, agent_hash=agent_hash)
-
-        # 3. 如果还有别的 Agent 绑着，重新启动轮询
-        if wechat_service.has_active_binding(user.id):
-            await wechat_service.start_polling(user_id=user.id)
-
-        # 4. 重置本地状态
-        wechat_service.reset_login_state()
-        return {"status": "success", "message": "已解绑"}
-    except Exception as e:
-        logger.error(f"[WeChat] Failed to logout: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail={"status": "error", "message": str(e)}
-        )
-
-
 @router.delete("/unbind")
 async def unbind_wechat(request: Request, user: User = Depends(get_current_user)) -> dict:
     """

@@ -61,6 +61,7 @@ from routers.agent_config_ui import router as agent_config_ui_router
 from routers.agent_config import router as agent_config_router
 from routers.agent_config_chat import router as agent_config_chat_router
 from routers.user import router as user_router
+from routers.admin import router as admin_router
 from routers.wechat import ensure_message_handler
 from services.agent_init_service import ensure_default_agent_5178
 
@@ -312,6 +313,7 @@ app.include_router(workspace.router)  # 工作区管理
 app.include_router(wechat.router)  # 微信接入
 app.include_router(console.router)  # 控制台 API (必须在 static_site_public 之前)
 app.include_router(user_router)  # 用户 API (注册、登录)
+app.include_router(admin_router)  # 管理后台 API
 app.include_router(agent_config_ui_router)  # Agent 配置界面
 app.include_router(agent_config_router)  # Agent 配置 API
 app.include_router(agent_config_chat_router)  # Agent 配置聊天 API

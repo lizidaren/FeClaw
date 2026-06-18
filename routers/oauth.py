@@ -11,8 +11,6 @@ from fastapi import APIRouter, Request, HTTPException, Depends, Query
 from fastapi.responses import RedirectResponse, JSONResponse
 import logging
 
-from sqlalchemy import or_
-
 from config import settings
 
 from services.oauth_service import oauth_service
@@ -53,17 +51,17 @@ async def oauth_login(request: Request):
     # 写入 Cookie（不依赖服务端内存，多 worker/重启/多标签页均安全）
     response = RedirectResponse(url=oauth_service.get_authorize_url(state), status_code=302)
     cookie_name = f"oauth_state_{state[:16]}"
+    # P2-6 修复：secure=True，使用 set_cookie 的 domain 参数避免双重设置
     response.set_cookie(
         key=cookie_name,
         value=state,
         max_age=STATE_COOKIE_MAX_AGE,
         path="/",
-        secure=False,
+        secure=True,
         httponly=True,
-        samesite="lax"
+        samesite="lax",
+        domain=f".{settings.FECLAW_DOMAIN}" if settings.FECLAW_DOMAIN else None,
     )
-    if settings.FECLAW_DOMAIN:
-        response.headers.append("Set-Cookie", f"{cookie_name}={state}; Path=/; Domain=.{settings.FECLAW_DOMAIN}; Max-Age={STATE_COOKIE_MAX_AGE}; HttpOnly; SameSite=Lax")
     logger.info(f"OAuth login initiated, state={state[:16]}...")
 
     return response
@@ -127,14 +125,11 @@ async def oauth_callback(
         platform_user_id = user_info.get("sub") or user_info.get("user_id")
         username = user_info.get("username") or user_info.get("name") or f"platform_{platform_user_id}"
 
-        # 优先按 platform_user_id 匹配，再按 username 匹配
-        existing = db.query(User).filter(
-            or_(User.platform_user_id == platform_user_id, User.username == username)
-        ).first()
+        # 安全匹配：先按 platform_user_id 精准查（P0-1 修复：禁止 or_ 条件）
+        existing = db.query(User).filter(User.platform_user_id == platform_user_id).first()
 
         if existing:
-            # 更新现有用户信息
-            existing.platform_user_id = platform_user_id
+            # 按 platform_user_id 精准匹配 → 更新
             existing.email = user_info.get("email", existing.email)
             existing.is_admin = user_info.get("is_admin", False) or username == "admin"
             db.commit()
@@ -142,24 +137,55 @@ async def oauth_callback(
             user = existing
             logger.info(f"Updated existing user from OAuth: {username}")
         else:
-            # 创建新用户
-            # 注意：本地用户不需要密码，因为认证由 Platform 处理
-            from utils.auth import generate_salt, hash_password
-            salt = generate_salt()
-            dummy_password = hash_password(secrets.token_hex(32), salt)
-
-            is_admin = user_info.get("is_admin", False) or username == "admin"
-            user = User(
-                username=username,
-                platform_user_id=platform_user_id,
-                password_hash=dummy_password,
-                salt=salt,
-                is_admin=is_admin
-            )
-            db.add(user)
-            db.commit()
-            db.refresh(user)
-            logger.info(f"Created new user from OAuth: {username}")
+            # 按 username 查找（兼容本地注册后被 Platform 绑定的场景）
+            by_username = db.query(User).filter(User.username == username).first()
+            if by_username and by_username.platform_user_id is None:
+                # username 存在但未绑定 Platform → 绑定为当前 Platform 用户
+                by_username.platform_user_id = platform_user_id
+                by_username.email = user_info.get("email", by_username.email)
+                by_username.is_admin = user_info.get("is_admin", False) or username == "admin"
+                db.commit()
+                db.refresh(by_username)
+                user = by_username
+                logger.info(f"Linked local user to Platform: {username} (platform_user_id={platform_user_id})")
+            elif by_username and by_username.platform_user_id != platform_user_id:
+                # username 被占用且属于不同的 Platform 账号 → 强制创建新用户，避免账户劫持
+                logger.warning(
+                    f"Username collision: {username} is owned by platform_user_id={by_username.platform_user_id}, "
+                    f"but login attempt from platform_user_id={platform_user_id}. Creating separate account."
+                )
+                from utils.auth import generate_salt, hash_password
+                salt = generate_salt()
+                dummy_password = hash_password(secrets.token_hex(32), salt)
+                is_admin = user_info.get("is_admin", False) or username == "admin"
+                user = User(
+                    username=f"{username}_{platform_user_id}",
+                    platform_user_id=platform_user_id,
+                    password_hash=dummy_password,
+                    salt=salt,
+                    is_admin=is_admin
+                )
+                db.add(user)
+                db.commit()
+                db.refresh(user)
+                logger.info(f"Created new user from OAuth (username collision): {username}_{platform_user_id}")
+            else:
+                # 全新用户 → 创建
+                from utils.auth import generate_salt, hash_password
+                salt = generate_salt()
+                dummy_password = hash_password(secrets.token_hex(32), salt)
+                is_admin = user_info.get("is_admin", False) or username == "admin"
+                user = User(
+                    username=username,
+                    platform_user_id=platform_user_id,
+                    password_hash=dummy_password,
+                    salt=salt,
+                    is_admin=is_admin
+                )
+                db.add(user)
+                db.commit()
+                db.refresh(user)
+                logger.info(f"Created new user from OAuth: {username}")
     finally:
         db.close()
 
@@ -174,11 +200,10 @@ async def oauth_callback(
     # 重定向到前端，携带 token
     redirect_to = "/dashboard"
 
-    # 构建 redirect URL，携带 token
-    response = RedirectResponse(url=f"{redirect_to}?token={local_jwt}")
+    # P0-2 修复：token 只走 cookie，不暴露在 URL 中
+    domain = f".{settings.FECLAW_DOMAIN}" if settings.FECLAW_DOMAIN else None
+    response = RedirectResponse(url=redirect_to)
 
-    # 同时设置 cookie（共享跨子域名）
-    domain = f".{settings.FECLAW_DOMAIN}"
     response.set_cookie(
         key="feclaw_jwt",
         value=local_jwt,
@@ -188,6 +213,18 @@ async def oauth_callback(
         domain=domain,
         max_age=settings.JWT_EXPIRE_HOURS * 3600,
     )
+
+    # P1-4 修复：保存 id_token 到 cookie，供 logout 时传递 id_token_hint
+    if id_token:
+        response.set_cookie(
+            key="feclaw_id_token",
+            value=id_token,
+            httponly=True,
+            secure=True,
+            samesite="lax",
+            path="/",
+            max_age=3600
+        )
 
     return response
 
@@ -234,17 +271,49 @@ async def oauth_refresh(
 @router.post("/logout")
 async def oauth_logout(request: Request):
     """
-    OAuth 注销
-    清除本地 token cookie
+    OAuth 注销 - 清除本地 cookie 并返回 Platform end_session 跳转地址
     """
+    from services.oauth_service import OAuthService
+
+    # P1-4 修复：传递 id_token_hint，让 Platform 端正确完成 RP-Initiated Logout
+    id_token_hint = request.cookies.get("feclaw_id_token", "")
+    oauth_svc = OAuthService()
     response = JSONResponse(content={
         "status": "success",
-        "message": "Logged out successfully"
+        "message": "Logged out successfully",
+        "redirect_url": oauth_svc.build_logout_url(
+            id_token=id_token_hint,
+            post_logout_redirect_uri=f"https://{settings.FECLAW_DOMAIN}/login" if settings.FECLAW_DOMAIN else None
+        )
     })
 
-    # 清除 cookie
-    response.delete_cookie(key="feclaw_jwt")
+    # 清除 FeClaw 自身 cookie
+    response.delete_cookie(key="feclaw_jwt", path="/")
+    response.delete_cookie(key="feclaw_id_token", path="/")
 
+    return response
+
+
+@router.get("/logout")
+async def oauth_logout_get(
+    request: Request,
+    redirect: str = Query(default="", description="退出后跳转地址")
+):
+    """
+    OAuth 注销（GET）— 用于跨域退出跳转
+
+    Platform 退出时会重定向到这个地址，FeClaw 清掉自己的 cookie 后跳回。
+    """
+    # 检查 redirect 是否在白名单中
+    safe_redirect = "/login"
+    if redirect:
+        allowed_prefixes = ["https://platform.firstentrance.lizidaren.cn", "https://feclaw.lizidaren.cn"]
+        if any(redirect.startswith(p) for p in allowed_prefixes):
+            safe_redirect = redirect
+
+    response = RedirectResponse(url=safe_redirect, status_code=302)
+    response.delete_cookie(key="feclaw_jwt", path="/")
+    response.delete_cookie(key="feclaw_id_token", path="/")
     return response
 
 

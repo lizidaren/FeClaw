@@ -262,8 +262,9 @@ const Auth = {
 
   /**
    * 清除所有认证信息
+   * @param {object} options - { redirectToLogout: boolean } 是否重定向到 Platform OIDC end_session
    */
-  clearAuth() {
+  clearAuth(options = {}) {
     localStorage.removeItem(this.JWT_KEY);
     localStorage.removeItem(this.EXPIRES_KEY);
     localStorage.removeItem(this.USER_KEY);
@@ -279,6 +280,22 @@ const Auth = {
         document.cookie = parts[0] + '=; path=/; max-age=0';
         document.cookie = parts[0] + '=; path=/; domain=.feclaw.lizidaren.cn; SameSite=Lax; max-age=0';
       }
+    }
+
+    if (options.redirectToLogout) {
+      // 调用后端获取 OIDC end_session 跳转地址
+      fetch('/api/oauth/logout', { method: 'POST' })
+        .then(function(res) { return res.json(); })
+        .then(function(data) {
+          if (data.redirect_url) {
+            window.location.href = data.redirect_url;
+          } else {
+            window.location.href = this.LOGIN_PATH;
+          }
+        }.bind(this))
+        .catch(function() {
+          window.location.href = this.LOGIN_PATH;
+        }.bind(this));
     }
   },
 

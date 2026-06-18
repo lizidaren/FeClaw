@@ -821,11 +821,13 @@
 
         function doLogout(alsoPlatform) {
             closeLogoutDialog();
-            Auth.clearAuth();
             if (alsoPlatform) {
-                window.open('https://platform.firstentrance.lizidaren.cn/api/auth/logout-page', '_blank');
+                // OIDC RP-Initiated Logout：清除本地认证并跳转 Platform end_session
+                Auth.clearAuth({ redirectToLogout: true });
+            } else {
+                Auth.clearAuth();
+                window.location.href = '/login';
             }
-            window.location.href = '/login';
         }
 
         // ===== Init =====
