@@ -585,6 +585,9 @@ class AgentInitService:
                 ))
         db.commit()
 
+        vfs_base = self._get_vfs_base_path(agent.user_id, agent_hash)
+        vfs_dirs_created = []
+
         # 4. 创建 Agent 元数据文件（agents/{hash}/agent/）
         if self.storage:
             agent_files = {
@@ -599,6 +602,10 @@ class AgentInitService:
                 try:
                     self.storage.put_object(file_key, content.encode("utf-8"))
                     logger.info(f"Created agent metadata file: {file_key}")
+                    # 记录目录（去重）
+                    dir_name = rel_path.split("/")[0]
+                    if dir_name not in vfs_dirs_created:
+                        vfs_dirs_created.append(dir_name)
                 except Exception as e:
                     logger.warning(f"Failed to create agent metadata file {file_key}: {e}")
 
@@ -612,6 +619,8 @@ class AgentInitService:
             default_memory = f"# Agent {agent_hash} Memory\n\nCreated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}\n"
             try:
                 self.storage.put_object(memory_key, default_memory.encode("utf-8"))
+                if "memory" not in vfs_dirs_created:
+                    vfs_dirs_created.append("memory")
             except Exception as e:
                 logger.warning(f"Failed to create memory.md: {e}")
 
