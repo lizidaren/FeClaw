@@ -1876,14 +1876,17 @@ class WeChatService:
             if db and db.is_active:
                 db.close()
 
-    def get_binding_by_user(self, user_id: int) -> Optional[WeChatBinding]:
+    def get_binding_by_user(self, user_id: int, agent_hash: str = None) -> Optional[WeChatBinding]:
         """获取用户的微信绑定"""
         db = SessionLocal()
         try:
-            return db.query(WeChatBinding).filter(
+            query = db.query(WeChatBinding).filter(
                 WeChatBinding.user_id == user_id,
                 WeChatBinding.status == "active"
-            ).first()
+            )
+            if agent_hash:
+                query = query.filter(WeChatBinding.agent_hash == agent_hash)
+            return query.first()
         finally:
             db.close()
 

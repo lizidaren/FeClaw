@@ -333,11 +333,16 @@ class BindingInfoResponse(BaseModel):
 
 
 @router.get("/binding", response_model=BindingInfoResponse)
-async def get_binding_info(user: User = Depends(get_current_user)):
+async def get_binding_info(request: Request, user: User = Depends(get_current_user)):
     """
-    查询当前用户的微信绑定状态
+    查询当前用户的微信绑定状态（按子域名 Agent 隔离）
     """
-    binding = wechat_service.get_binding_by_user(user.id)
+    # 从 Host 头提取 agent_hash
+    from routers.feclaw_domain import extract_hash_from_host
+    host = request.headers.get("X-Forwarded-Host", "") or request.headers.get("host", "")
+    agent_hash = extract_hash_from_host(host) if host else None
+
+    binding = wechat_service.get_binding_by_user(user.id, agent_hash=agent_hash)
     if binding:
         return BindingInfoResponse(
             bound=True,
