@@ -70,11 +70,22 @@ async def oauth_login(request: Request):
 @router.get("/callback")
 async def oauth_callback(
     request: Request,
-    code: str = Query(...),
-    state: str = Query(...)
+    code: str = Query(None),
+    state: str = Query(...),
+    error: str = Query(None),
+    error_description: str = Query(None),
 ):
     """OAuth 回调处理（含性能日志）"""
     t0 = _time.time()
+
+    # 用户取消授权
+    if error:
+        logger.info(f"OAuth callback with error: {error} ({error_description})")
+        from fastapi.responses import RedirectResponse
+        from urllib.parse import urlencode
+        params = urlencode({"error": error})
+        redirect_url = f"{settings.FECLAW_DOMAIN or 'https://feclaw.lizidaren.cn'}/login?{params}"
+        return RedirectResponse(url=redirect_url)
 
     # 从 Cookie 读取 state，不依赖服务端内存
     cookie_name = f"oauth_state_{state[:16]}"
