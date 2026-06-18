@@ -19,7 +19,6 @@ from services.vfs_markdown_chunker import MarkdownChunker
 from services.embedding_service import EmbeddingService
 from services.vector_search_service import (
     VectorSearchService,
-    VECTOR_BUCKET,
 )
 
 logger = logging.getLogger(__name__)
@@ -111,21 +110,10 @@ class VfsIndexer:
         try:
             index_name = self._get_index_name()
             key_prefix = f"vfs::{self.file_path}::"
-            client = self._vector_service._get_client()
 
-            # 通过 list_objects 找出该文件的所有旧向量 key
-            _, data = await asyncio.to_thread(
-                client.list_objects,
-                Bucket=VECTOR_BUCKET,
-                Prefix=key_prefix,
+            keys = await asyncio.to_thread(
+                self._vector_service.list_keys_by_prefix, index_name, key_prefix
             )
-
-            keys = []
-            if data and isinstance(data, dict):
-                for obj in data.get("Contents", []):
-                    key = obj.get("Key", "")
-                    if key.startswith(key_prefix):
-                        keys.append(key)
 
             if keys:
                 await self._vector_service.delete(keys, index_name)

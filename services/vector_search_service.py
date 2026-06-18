@@ -1,7 +1,7 @@
 """
 向量搜索服务
 - Embedding: Qwen3 text-embedding-v4 (1024d) via DashScope OpenAI 兼容接口
-- 存储: COS 向量存储桶 CosVectorsClient
+- 存储: 可切换后端 — COS 向量存储桶 或 SQLite + sqlite-vec
 """
 
 import asyncio
@@ -10,9 +10,14 @@ import functools
 import json
 import logging
 import os
+import re
 import socket
 import sqlite3
-from typing import List, Optional
+import struct
+import threading
+import time
+from abc import ABC, abstractmethod
+from typing import Dict, List, Optional
 
 import httpx
 
@@ -21,8 +26,9 @@ from services.model_registry import resolve as _reg_resolve
 
 logger = logging.getLogger(__name__)
 
-# 向量存储桶名称
+# Legacy bucket constant (kept for backward compat with scripts/tests)
 VECTOR_BUCKET = "firstentrance-gzvec-1257148458"
+
 # 向量维度
 VECTOR_DIMENSION = 1024
 # COS 向量存储域名 & IP（WSL DNS 兜底）
@@ -87,8 +93,52 @@ TEXTBOOK_SUBJECT_INDEXES = [
 ]
 
 
-class VectorSearchService:
-    """向量搜索服务"""
+# ═══════════════════════════════════════════════════════════════════════
+# VectorStorage 抽象基类
+# ═══════════════════════════════════════════════════════════════════════
+
+class VectorStorage(ABC):
+    """向量存储后端抽象"""
+
+    @abstractmethod
+    def ensure_index(self, index: str) -> None:
+        """确保 index 存在，不存在则自动创建"""
+        ...
+
+    @abstractmethod
+    def query(self, index: str, query_vec: List[float], top_k: int,
+              filter: dict = None) -> List[Dict]:
+        """向量查询，返回 [{key, score, metadata}]"""
+        ...
+
+    @abstractmethod
+    def put(self, index: str, vectors: List[Dict]) -> None:
+        """写入向量。vectors: [{key, data: {float32: [...]}, metadata: {...}}]"""
+        ...
+
+    @abstractmethod
+    def delete(self, index: str, keys: List[str]) -> None:
+        """按 key 删除向量"""
+        ...
+
+    @abstractmethod
+    def list_keys_by_prefix(self, index: str, prefix: str) -> List[str]:
+        """列出 index 中指定前缀的所有 key"""
+        ...
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# CosVectorStorage — 腾讯云 COS VectorBucket 后端
+# ═══════════════════════════════════════════════════════════════════════
+
+class CosVectorStorage(VectorStorage):
+    """腾讯云 COS 向量存储后端"""
+
+    # Class-level caches (shared across all instances)
+    _bucket_cache: List[Dict] = []
+    _bucket_cache_ts: float = 0.0
+    _index_bucket_cache: Dict[str, str] = {}
+    _cache_ttl: float = 30.0
 
     __slots__ = ('agent_hash', '_client')
 
@@ -112,11 +162,696 @@ class VectorSearchService:
             Domain=VECTOR_ENDPOINT,
             Scheme="https",
         )
-        # WSL: 包装客户端，每次方法调用自动套上 DNS scope（保持 URL 域名不变）
         with _vector_dns_scope():
             raw = CosVectorsClient(config)
         self._client = _VectorClientWrapper(raw) if _is_wsl else raw
         return self._client
+
+    def _my_appid(self) -> str:
+        """Get APPID from config."""
+        return settings.TENCENT_COS_APPID
+
+    # ----- ensure_index -----
+
+    def ensure_index(self, index: str) -> None:
+        """确保 index 存在，不存在则自动创建（1024d, float32, cosine）"""
+        bucket = self._resolve_bucket_for_write(index)
+
+        try:
+            client = self._get_client()
+            _, data = client.get_index(Bucket=bucket, Index=index)
+            if data and isinstance(data, dict) and "indexName" in data:
+                self._index_bucket_cache[index] = bucket
+                return
+        except Exception as e:
+            if "not found" in str(e).lower():
+                pass
+            else:
+                logger.warning("ensure_index check_index failed: %s", e)
+                if "not found" not in str(e).lower():
+                    return
+
+        try:
+            client = self._get_client()
+            client.create_index(
+                Bucket=bucket,
+                Index=index,
+                DataType="float32",
+                Dimension=VECTOR_DIMENSION,
+                DistanceMetric="cosine",
+            )
+            self._index_bucket_cache[index] = bucket
+            logger.info("Created index %s in bucket %s", index, bucket)
+        except Exception as e:
+            logger.warning("create_index %s in bucket %s failed: %s", index, bucket, e)
+
+    # ----- query -----
+
+    def query(self, index: str, query_vec: List[float], top_k: int,
+              filter: dict = None) -> List[Dict]:
+        """COS 向量查询"""
+        client = self._get_client()
+        bucket = self._resolve_bucket(index)
+        kwargs = {
+            "Bucket": bucket,
+            "Index": index,
+            "QueryVector": {"float32": query_vec},
+            "TopK": top_k,
+            "ReturnDistance": True,
+            "ReturnMetaData": True,
+        }
+        if filter:
+            kwargs["Filter"] = filter
+        _, resp_data = client.query_vectors(**kwargs)
+        return self._parse_query_response(resp_data)
+
+    def _parse_query_response(self, resp_data) -> List[dict]:
+        """解析 COS query_vectors 的响应
+
+        入参: {vectors: [{key, distance, metadata}]}
+        返回: [{key, score(1-distance), metadata}]
+        """
+        if not resp_data or not isinstance(resp_data, dict):
+            return []
+
+        vectors = resp_data.get("vectors", [])
+        results = []
+        for v in vectors:
+            metadata = v.get("metadata", {})
+            # COS SDK returns metadata as string (JSON or Python repr), parse to dict
+            if isinstance(metadata, str):
+                try:
+                    metadata = json.loads(metadata)
+                except json.JSONDecodeError:
+                    try:
+                        import ast
+                        metadata = ast.literal_eval(metadata)
+                    except (ValueError, SyntaxError):
+                        pass
+            results.append({
+                "key": v.get("key", ""),
+                "score": max(0.0, min(1.0, 1.0 - v.get("distance", 0))),
+                "metadata": metadata,
+            })
+        return results
+
+    # ----- put -----
+
+    def put(self, index: str, vectors: List[Dict]) -> None:
+        """写入向量到 COS"""
+        if not vectors:
+            return
+        bucket = self._resolve_bucket_for_write(index)
+        self.ensure_index(index)
+
+        client = self._get_client()
+        try:
+            client.put_vectors(
+                Bucket=bucket,
+                Index=index,
+                Vectors=vectors,
+            )
+            logger.info("Indexed %d vectors to %s", len(vectors), index)
+        except Exception as e:
+            err_str = str(e)
+            if "duplicate" in err_str.lower():
+                logger.warning("Duplicate key in batch for %s, falling back to individual puts", index)
+                success = 0
+                for v in vectors:
+                    try:
+                        client.put_vectors(
+                            Bucket=bucket,
+                            Index=index,
+                            Vectors=[v],
+                        )
+                        success += 1
+                    except Exception as ve:
+                        logger.error("Individual put_vectors failed for key=%s: %s", v["key"], ve)
+                logger.info("Indexed %d/%d vectors to %s (fallback mode)", success, len(vectors), index)
+            else:
+                logger.error("COS put_vectors failed on index %s: %s", index, e)
+
+    # ----- delete -----
+
+    def delete(self, index: str, keys: List[str]) -> None:
+        """从 COS 删除向量"""
+        if not keys:
+            return
+        keys = list(dict.fromkeys(keys))
+        client = self._get_client()
+        bucket = self._resolve_bucket(index)
+        client.delete_vectors(
+            Bucket=bucket,
+            Index=index,
+            Keys=keys,
+        )
+        logger.info("Deleted %d vectors from %s", len(keys), index)
+
+    # ----- list_keys_by_prefix -----
+
+    def list_keys_by_prefix(self, index: str, prefix: str) -> List[str]:
+        """列出 index 中指定前缀的所有 key"""
+        client = self._get_client()
+        bucket = self._resolve_bucket(index)
+        _, data = client.list_objects(Bucket=bucket, Prefix=prefix)
+        keys = []
+        if data and isinstance(data, dict):
+            for obj in data.get("Contents", []):
+                key = obj.get("Key", "")
+                if key.startswith(prefix):
+                    keys.append(key)
+        return keys
+
+    # ----- Bucket Management (auto-scaling) -----
+
+    def _list_vector_buckets(self) -> List[Dict]:
+        """List ALL vector buckets. Cache with TTL to avoid excessive API calls.
+
+        The legacy bucket `firstentrance-gzvec-1257148458` is always included
+        even if it doesn't match the prefix (it has existing data).
+        """
+        cls = type(self)
+        now = time.time()
+        if now - cls._bucket_cache_ts < cls._cache_ttl and cls._bucket_cache:
+            return cls._bucket_cache
+
+        client = self._get_client()
+        _, data = client.list_vector_buckets()
+        buckets = data.get("VectorBuckets", data.get("vector_buckets", []))
+
+        # Ensure legacy bucket is included
+        legacy = "firstentrance-gzvec-1257148458"
+        if not any(b.get("Name", b.get("name", "")) == legacy for b in buckets):
+            buckets.append({"Name": legacy, "Status": "Active"})
+
+        cls._bucket_cache = buckets
+        cls._bucket_cache_ts = now
+        return buckets
+
+    def _resolve_bucket(self, index: str) -> str:
+        """Find which bucket an index lives in.
+
+        Strategy:
+        1. Check _index_bucket_cache
+        2. Scan all vector buckets for this index (list_indexes on each)
+        3. If not found, return the legacy bucket as default
+
+        This is the core abstraction: callers never need to know the bucket.
+        """
+        cls = type(self)
+        if index in cls._index_bucket_cache:
+            return cls._index_bucket_cache[index]
+
+        buckets = self._list_vector_buckets()
+        client = self._get_client()
+        for b in buckets:
+            name = b.get("Name", b.get("name", ""))
+            if not name:
+                continue
+            try:
+                _, data = client.list_indexes(Bucket=name, Prefix=index)
+                indexes = data.get("indexes", data.get("Indexes", []))
+                if any(i.get("IndexName", i.get("indexName", "")) == index for i in indexes):
+                    cls._index_bucket_cache[index] = name
+                    return name
+            except Exception:
+                continue
+
+        # Not found anywhere -> default to legacy bucket
+        legacy = "firstentrance-gzvec-1257148458"
+        cls._index_bucket_cache[index] = legacy
+        return legacy
+
+    def _resolve_bucket_for_write(self, index: str) -> str:
+        """Determine which bucket to write a new index into.
+
+        Strategy:
+        1. If index already exists somewhere -> use that bucket
+        2. If agent_hash is set, try to colocate with sibling indexes (same agent)
+        3. Otherwise, pick the least-loaded bucket (fewest indexes)
+        4. If all buckets are near capacity, auto-create a new one
+        """
+        # 1. Check if already exists
+        try:
+            existing = self._resolve_bucket(index)
+            client = self._get_client()
+            _, data = client.get_index(Bucket=existing, Index=index)
+            if data and isinstance(data, dict) and "indexName" in data:
+                return existing
+        except Exception:
+            pass
+
+        # 2. Agent colocation: check sibling indexes
+        if self.agent_hash:
+            siblings = [f"idx-{self.agent_hash}-kb", f"idx-{self.agent_hash}-conv"]
+            for sib in siblings:
+                if sib != index:
+                    try:
+                        bucket = self._resolve_bucket(sib)
+                        client = self._get_client()
+                        _, data = client.get_index(Bucket=bucket, Index=sib)
+                        if data and isinstance(data, dict) and "indexName" in data:
+                            logger.info("Colocating %s with sibling %s in bucket %s", index, sib, bucket)
+                            return bucket
+                    except Exception:
+                        continue
+
+        # 3. Pick least-loaded bucket
+        return self._pick_least_loaded_bucket()
+
+    def _pick_least_loaded_bucket(self) -> str:
+        """Find bucket with most remaining capacity, or create new one if all full."""
+        buckets = self._list_vector_buckets()
+        client = self._get_client()
+
+        best_bucket = None
+        best_count = float('inf')
+
+        for b in buckets:
+            name = b.get("Name", b.get("name", ""))
+            if not name:
+                continue
+            try:
+                _, data = client.list_indexes(Bucket=name)
+                indexes = data.get("indexes", data.get("Indexes", []))
+                count = len(indexes)
+                if count < best_count:
+                    best_count = count
+                    best_bucket = name
+            except Exception:
+                continue
+
+        # If all full or no bucket found, create new one
+        if best_bucket is None or best_count >= settings.MAX_INDEXES_PER_BUCKET:
+            best_bucket = self._create_next_bucket(buckets)
+
+        return best_bucket
+
+    def _create_next_bucket(self, existing_buckets: list = None) -> str:
+        """Auto-create the next vector bucket. Returns new bucket name."""
+        if existing_buckets is None:
+            existing_buckets = self._list_vector_buckets()
+
+        prefix = settings.VECTOR_BUCKET_PREFIX
+        appid = self._my_appid()
+
+        # Find the next available number
+        existing_names = set()
+        for b in existing_buckets:
+            name = b.get("Name", b.get("name", ""))
+            if name:
+                existing_names.add(name)
+        existing_names.add("firstentrance-gzvec-1257148458")
+
+        n = 1
+        while True:
+            candidate = f"{prefix}-{n:02d}-{appid}"
+            if candidate not in existing_names:
+                break
+            n += 1
+
+        # Create the bucket
+        client = self._get_client()
+        try:
+            client.create_vector_bucket(Bucket=candidate)
+            logger.info("Created new vector bucket %s", candidate)
+        except Exception as e:
+            logger.error("Failed to create vector bucket %s: %s", e)
+            return "firstentrance-gzvec-1257148458"
+
+        # Invalidate cache
+        cls = type(self)
+        cls._bucket_cache_ts = 0
+
+        return candidate
+
+    def _invalidate_bucket_cache(self):
+        """Force re-fetch of bucket list on next access."""
+        type(self)._bucket_cache_ts = 0
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# SqliteVecStorage — SQLite + sqlite-vec 本地后端
+# ═══════════════════════════════════════════════════════════════════════
+
+# Module-level connection (shared across all SqliteVecStorage instances)
+_sqlite_connection: Optional[sqlite3.Connection] = None
+_sqlite_lock = threading.Lock()
+
+# Index name validation
+_INDEX_NAME_RE = re.compile(r'^[a-zA-Z0-9_-]+$')
+INDEX_TABLE_PREFIX = "v0_"
+
+
+def _validate_index(index: str):
+    """校验 index 名：长度 ≤ 100，只含字母数字_-"""
+    if not index or len(index) > 100:
+        raise ValueError(f"Invalid index name: {index!r} (empty or too long, max 100)")
+    if not _INDEX_NAME_RE.match(index):
+        raise ValueError(f"Invalid index name: {index!r} (only a-zA-Z0-9_- allowed)")
+
+
+def _index_to_table(index: str) -> str:
+    """idx-abc123-kb → v0_idx_abc123_kb"""
+    _validate_index(index)
+    safe = index.replace('-', '_').replace('.', '_')
+    return f"{INDEX_TABLE_PREFIX}{safe}"
+
+
+def _escape_table(table: str) -> str:
+    """SQLite 表名转义：]] → ]]]（双写右方括号）"""
+    return table.replace(']', ']]')
+
+
+def _init_schema(conn: sqlite3.Connection):
+    """初始化 SQLite schema（vec_indexes + vec_entries + triggers）"""
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS vec_indexes (
+            index_name TEXT PRIMARY KEY,
+            table_name TEXT NOT NULL,
+            created_at TEXT DEFAULT (datetime('now')),
+            vector_count INTEGER DEFAULT 0
+        );
+
+        CREATE TABLE IF NOT EXISTS vec_entries (
+            rowid INTEGER PRIMARY KEY AUTOINCREMENT,
+            index_name TEXT NOT NULL
+                REFERENCES vec_indexes(index_name) ON DELETE CASCADE,
+            vec_key TEXT NOT NULL,
+            metadata TEXT DEFAULT '{}',
+            created_at TEXT DEFAULT (datetime('now')),
+            UNIQUE(index_name, vec_key)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_entries_index ON vec_entries(index_name);
+
+        CREATE TRIGGER IF NOT EXISTS tr_entries_insert
+        AFTER INSERT ON vec_entries
+        BEGIN
+            UPDATE vec_indexes SET vector_count = vector_count + 1
+            WHERE index_name = NEW.index_name;
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS tr_entries_delete
+        AFTER DELETE ON vec_entries
+        BEGIN
+            UPDATE vec_indexes SET vector_count = vector_count - 1
+            WHERE index_name = OLD.index_name;
+        END;
+    """)
+
+
+def _get_sqlite_conn() -> sqlite3.Connection:
+    """模块级单例连接
+    
+    优先使用 pysqlite3-binary（支持 extension loading），
+    回退到 stdlib sqlite3。
+    """
+    global _sqlite_connection
+    if _sqlite_connection is not None:
+        return _sqlite_connection
+
+    # 优先使用 pysqlite3-binary（带 extension loading 支持）
+    try:
+        import pysqlite3
+        _sqlite_mod = pysqlite3
+        logger.debug("Using pysqlite3-binary (supports extensions)")
+    except ImportError:
+        _sqlite_mod = sqlite3
+        logger.debug("Using stdlib sqlite3")
+
+    db_path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "data",
+        os.path.basename(settings.VECTOR_SQLITE_PATH),
+    )
+    os.makedirs(os.path.dirname(db_path), exist_ok=True)
+
+    conn = _sqlite_mod.connect(db_path, check_same_thread=False)
+    conn.row_factory = _sqlite_mod.Row
+
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=5000")
+
+    # 加载 sqlite-vec 扩展
+    try:
+        import sqlite_vec
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+        logger.info("sqlite-vec extension loaded successfully")
+    except (AttributeError, Exception) as e:
+        logger.error(
+            "Cannot load sqlite-vec extension: %s. "
+            "Try: pip install pysqlite3-binary",
+            e
+        )
+        raise RuntimeError(
+            f"sqlite-vec extension unavailable: {e}. "
+            f"VECTOR_STORAGE_BACKEND=sqlite requires extension loading support. "
+            f"Install pysqlite3-binary: pip install pysqlite3-binary"
+        )
+
+    _init_schema(conn)
+    _sqlite_connection = conn
+    return conn
+
+    _init_schema(conn)
+    _sqlite_connection = conn
+    return conn
+
+
+def _get_table_by_index(conn: sqlite3.Connection, index: str) -> str:
+    """从 vec_indexes 表查 table_name，不依赖字符串逆向映射"""
+    cur = conn.execute(
+        "SELECT table_name FROM vec_indexes WHERE index_name = ?", (index,)
+    )
+    row = cur.fetchone()
+    if row:
+        return row[0]
+    raise KeyError(f"Index {index!r} not registered")
+
+
+def _match_filter(metadata: dict, filter: dict) -> bool:
+    """Python 侧 metadata 过滤"""
+    for field, condition in filter.items():
+        if isinstance(condition, dict):
+            if "$in" in condition:
+                if metadata.get(field) not in condition["$in"]:
+                    return False
+        else:
+            if metadata.get(field) != condition:
+                return False
+    return True
+
+
+class SqliteVecStorage(VectorStorage):
+    """SQLite + sqlite-vec 本地向量存储后端"""
+
+    def __init__(self):
+        self._conn = _get_sqlite_conn()
+
+    # ----- ensure_index -----
+
+    def ensure_index(self, index: str) -> None:
+        """创建 index：vec0 表 + 元数据注册。幂等，单事务。"""
+        table = _index_to_table(index)
+        escaped_table = _escape_table(table)
+
+        with self._conn:
+            # 检查是否已注册
+            cur = self._conn.execute(
+                "SELECT 1 FROM vec_indexes WHERE index_name = ?", (index,)
+            )
+            if cur.fetchone():
+                return
+
+            # 创建 vec0 表
+            try:
+                self._conn.execute(f"""
+                    CREATE VIRTUAL TABLE IF NOT EXISTS [{escaped_table}]
+                    USING vec0(embedding float[1024] distance_metric=cosine)
+                """)
+            except sqlite3.OperationalError as e:
+                err = str(e).lower()
+                if "already exists" in err:
+                    pass  # 并发安全：另一线程刚建好
+                else:
+                    logger.error("Failed to create vec0 table %s: %s", table, e)
+                    raise
+
+            # 注册到 vec_indexes（幂等）
+            self._conn.execute(
+                "INSERT OR IGNORE INTO vec_indexes (index_name, table_name) VALUES (?, ?)",
+                (index, table)
+            )
+
+    # ----- query -----
+
+    def query(self, index: str, query_vec: List[float], top_k: int,
+              filter: dict = None) -> List[Dict]:
+        """拆表搜索：直接在对应 index 的 vec0 表上 MATCH"""
+        try:
+            table = _get_table_by_index(self._conn, index)
+        except KeyError:
+            logger.debug("query on unregistered index %s, returning []", index)
+            return []
+
+        escaped = _escape_table(table)
+        query_bytes = struct.pack(f'{VECTOR_DIMENSION}f', *query_vec)
+        fetch_k = top_k * 3
+
+        try:
+            cur = self._conn.execute(
+                f"SELECT v.rowid, v.distance FROM [{escaped}] v "
+                f"WHERE v.embedding MATCH ? AND k = ?",
+                (query_bytes, fetch_k)
+            )
+            candidates = cur.fetchall()
+        except Exception as e:
+            logger.warning("MATCH on %s failed: %s", table, e)
+            return []
+
+        if not candidates:
+            return []
+
+        # 从 vec_entries 获取元数据
+        rowids = [r[0] for r in candidates]
+        placeholders = ','.join('?' * len(rowids))
+
+        cur = self._conn.execute(
+            f"SELECT rowid, vec_key, metadata FROM vec_entries "
+            f"WHERE rowid IN ({placeholders})",
+            rowids
+        )
+        meta_map = {r[0]: (r[1], r[2]) for r in cur.fetchall()}
+
+        results = []
+        for rowid, distance in candidates:
+            if rowid not in meta_map:
+                continue
+            vec_key, metadata_str = meta_map[rowid]
+
+            # 应用 filter
+            if filter:
+                metadata = json.loads(metadata_str) if metadata_str else {}
+                if not _match_filter(metadata, filter):
+                    continue
+
+            score = max(0.0, min(1.0, 1.0 - distance))
+            results.append({
+                "key": vec_key,
+                "score": score,
+                "metadata": json.loads(metadata_str) if metadata_str else {},
+            })
+
+        return results
+
+    # ----- put -----
+
+    def put(self, index: str, vectors: List[Dict]) -> None:
+        """写入向量到 SQLite。每个向量：unified metadata + dedicated vec0 entry，同一事务。"""
+        if not vectors:
+            return
+
+        table = _index_to_table(index)
+        escaped = _escape_table(table)
+
+        with self._conn:
+            self.ensure_index(index)
+
+            for v in vectors:
+                vec_bytes = struct.pack(f'{VECTOR_DIMENSION}f', *v["data"]["float32"])
+
+                # 处理重复 key：先删旧的
+                cur = self._conn.execute(
+                    "SELECT rowid FROM vec_entries WHERE index_name = ? AND vec_key = ?",
+                    (index, v["key"])
+                )
+                existing = cur.fetchone()
+                if existing:
+                    self._conn.execute(
+                        f"DELETE FROM [{escaped}] WHERE rowid = ?", (existing[0],)
+                    )
+                    self._conn.execute(
+                        "DELETE FROM vec_entries WHERE rowid = ?", (existing[0],)
+                    )
+
+                # 插入新元数据（触发器自动更新 vec_indexes.vector_count）
+                cur = self._conn.execute(
+                    "INSERT INTO vec_entries (index_name, vec_key, metadata) VALUES (?, ?, ?)",
+                    (index, v["key"], json.dumps(v.get("metadata", {}), ensure_ascii=False))
+                )
+                new_id = cur.lastrowid
+
+                # 插入向量到专用的 vec0 表
+                self._conn.execute(
+                    f"INSERT INTO [{escaped}] (rowid, embedding) VALUES (?, ?)",
+                    (new_id, vec_bytes)
+                )
+
+    # ----- delete -----
+
+    def delete(self, index: str, keys: List[str]) -> None:
+        """从 SQLite 删除向量"""
+        if not keys:
+            return
+
+        table = _index_to_table(index)
+        escaped = _escape_table(table)
+
+        with self._conn:
+            for key in keys:
+                cur = self._conn.execute(
+                    "SELECT rowid FROM vec_entries WHERE index_name = ? AND vec_key = ?",
+                    (index, key)
+                )
+                row = cur.fetchone()
+                if not row:
+                    continue
+                entry_id = row[0]
+
+                self._conn.execute(f"DELETE FROM [{escaped}] WHERE rowid = ?", (entry_id,))
+                self._conn.execute("DELETE FROM vec_entries WHERE rowid = ?", (entry_id,))
+
+    # ----- list_keys_by_prefix -----
+
+    def list_keys_by_prefix(self, index: str, prefix: str) -> List[str]:
+        """列出 index 中指定前缀的所有 key"""
+        escaped = prefix.replace('%', '\\%').replace('_', '\\_')
+        cur = self._conn.execute(
+            "SELECT vec_key FROM vec_entries "
+            "WHERE index_name = ? AND vec_key LIKE ? ESCAPE '\\'",
+            (index, escaped + '%')
+        )
+        return [row[0] for row in cur.fetchall()]
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# VectorSearchService — 对外 API 层
+# ═══════════════════════════════════════════════════════════════════════
+
+class VectorSearchService:
+    """向量搜索服务（对外 API 层，底层存储可切换）"""
+
+    __slots__ = ('agent_hash', 'storage')
+
+    def __init__(self, agent_hash: str = None):
+        self.agent_hash = agent_hash
+        self.storage = self._create_storage()
+
+    def _create_storage(self) -> VectorStorage:
+        """根据配置创建存储后端"""
+        backend = settings.VECTOR_STORAGE_BACKEND or "cos"
+        if backend == "sqlite":
+            return SqliteVecStorage()
+        return CosVectorStorage(agent_hash=self.agent_hash)
+
+    # ----- Index Management -----
+
+    def ensure_index(self, index: str) -> None:
+        """确保 index 存在（公开方法，供 agent_init_service 等使用）"""
+        self.storage.ensure_index(index)
 
     def _get_index_name(self, prefix: str) -> str:
         """生成 index 名: idx-{agent_hash}-{prefix} 或 idx-{prefix}"""
@@ -124,32 +859,9 @@ class VectorSearchService:
             return f"idx-{self.agent_hash}-{prefix}"
         return f"idx-{prefix}"
 
-    def _ensure_index(self, index: str):
-        """确保 index 存在，不存在则自动创建（1024d, float32, cosine）"""
-        try:
-            client = self._get_client()
-            _, data = client.get_index(Bucket=VECTOR_BUCKET, Index=index)
-            if data and isinstance(data, dict) and "indexName" in data:
-                return  # 已存在
-        except Exception as e:
-            if "not found" in str(e).lower():
-                pass  # index 不存在，后面创建
-            else:
-                logger.warning(f"_ensure_index check_index failed: {e}")
-                return  # 其他错误直接返回
-
-        try:
-            client = self._get_client()
-            client.create_index(
-                Bucket=VECTOR_BUCKET,
-                Index=index,
-                DataType="float32",
-                Dimension=VECTOR_DIMENSION,
-                DistanceMetric="cosine",
-            )
-            logger.info("Created index %s", index)
-        except Exception as e:
-            logger.warning("create_index %s failed: %s", index, e)
+    def list_keys_by_prefix(self, index: str, prefix: str) -> List[str]:
+        """列出 index 中指定前缀的所有 key（公开方法，供 vfs_indexer 等使用）"""
+        return self.storage.list_keys_by_prefix(index, prefix)
 
     # ----- Embedding -----
 
@@ -251,7 +963,7 @@ class VectorSearchService:
            - 指定 index 则搜指定 index
            - 有 agent_hash：搜 idx-{hash}-kb + idx-public-kb
            - 无 agent_hash：搜 idx-public-kb
-        3. COS query_vectors() 搜索
+        3. 存储 query 搜索
         4. 按 score 降序返回 top_k
         """
         vec = await self.embed(query)
@@ -677,39 +1389,19 @@ class VectorSearchService:
         idx = self._get_index_name("conv")
         return await self._query_index(vec, idx, top_k)
 
-    async def _query_index(self, vec: List[float], index: str, top_k: int, filter: dict = None, timeout: float = 15.0) -> List[dict]:
-        """对单个 index 执行向量查询
-
-        Args:
-            vec: 查询向量
-            index: 索引名
-            top_k: 返回数量
-            filter: 元数据过滤条件（dict），如 {"source": {"$in": ["53-gaokao"]}}
-            timeout: 超时秒数（默认15s）
-        """
+    async def _query_index(self, vec: List[float], index: str, top_k: int,
+                           filter: dict = None, timeout: float = 15.0) -> List[dict]:
+        """对单个 index 执行向量查询（统一包装 storage.query）"""
         try:
-            client = self._get_client()
-            kwargs = {
-                "Bucket": VECTOR_BUCKET,
-                "Index": index,
-                "QueryVector": {"float32": vec},
-                "TopK": top_k,
-                "ReturnDistance": True,
-                "ReturnMetaData": True,
-            }
-            if filter:
-                kwargs["Filter"] = filter
-            # COS SDK 是同步的，用线程包装避免阻塞事件循环
-            resp_headers, resp_data = await asyncio.wait_for(
-                asyncio.to_thread(client.query_vectors, **kwargs),
+            return await asyncio.wait_for(
+                asyncio.to_thread(self.storage.query, index, vec, top_k, filter),
                 timeout=timeout
             )
-            return self._parse_query_response(resp_data)
         except asyncio.TimeoutError:
             logger.warning("_query_index timeout (%ss) on %s (top_k=%d)", timeout, index, top_k)
             return []
         except Exception as e:
-            logger.error("COS query_vectors failed on index %s: %s", index, e)
+            logger.error("query failed on index %s: %s", index, e)
             return []
 
     # ----- Index -----
@@ -744,37 +1436,7 @@ class VectorSearchService:
         if not cos_vectors:
             return
 
-        # 确保 index 存在
-        await asyncio.to_thread(self._ensure_index, index)
-
-        try:
-            client = self._get_client()
-            await asyncio.to_thread(
-                client.put_vectors,
-                Bucket=VECTOR_BUCKET,
-                Index=index,
-                Vectors=cos_vectors,
-            )
-            logger.info("Indexed %d vectors to %s", len(cos_vectors), index)
-        except Exception as e:
-            err_str = str(e)
-            if "duplicate" in err_str.lower():
-                logger.warning("Duplicate key in batch for %s, falling back to individual puts", index)
-                success = 0
-                for v in cos_vectors:
-                    try:
-                        await asyncio.to_thread(
-                            client.put_vectors,
-                            Bucket=VECTOR_BUCKET,
-                            Index=index,
-                            Vectors=[v],
-                        )
-                        success += 1
-                    except Exception as ve:
-                        logger.error("Individual put_vectors failed for key=%s: %s", v["key"], ve)
-                logger.info("Indexed %d/%d vectors to %s (fallback mode)", success, len(cos_vectors), index)
-            else:
-                logger.error("COS put_vectors failed on index %s: %s", index, e)
+        await asyncio.to_thread(self.storage.put, index, cos_vectors)
 
     # ----- Delete -----
 
@@ -782,48 +1444,4 @@ class VectorSearchService:
         """删除向量数据"""
         if not keys:
             return
-        keys = list(dict.fromkeys(keys))  # 去重，保留顺序
-        try:
-            client = self._get_client()
-            await asyncio.to_thread(
-                client.delete_vectors,
-                Bucket=VECTOR_BUCKET,
-                Index=index,
-                Keys=keys,
-            )
-            logger.info("Deleted %d vectors from %s", len(keys), index)
-        except Exception as e:
-            logger.error("COS delete_vectors failed on index %s: %s", index, e)
-
-    # ----- Response Parsing -----
-
-    def _parse_query_response(self, resp_data) -> List[dict]:
-        """解析 COS query_vectors 的响应
-
-        入参: {vectors: [{key, distance, metadata}]}
-        返回: [{key, score(1-distance), metadata}]
-        """
-        if not resp_data or not isinstance(resp_data, dict):
-            return []
-
-        vectors = resp_data.get("vectors", [])
-        results = []
-        for v in vectors:
-            metadata = v.get("metadata", {})
-            # COS SDK returns metadata as string (JSON or Python repr), parse to dict
-            if isinstance(metadata, str):
-                import json
-                try:
-                    metadata = json.loads(metadata)
-                except json.JSONDecodeError:
-                    try:
-                        import ast
-                        metadata = ast.literal_eval(metadata)
-                    except (ValueError, SyntaxError):
-                        pass
-            results.append({
-                "key": v.get("key", ""),
-                "score": max(0.0, min(1.0, 1.0 - v.get("distance", 0))),
-                "metadata": metadata,
-            })
-        return results
+        await asyncio.to_thread(self.storage.delete, index, keys)

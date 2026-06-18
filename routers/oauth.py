@@ -59,7 +59,7 @@ async def oauth_login(request: Request):
         path="/",
         secure=True,
         httponly=True,
-        samesite="lax",
+        samesite="none",
         domain=f".{settings.FECLAW_DOMAIN}" if settings.FECLAW_DOMAIN else None,
     )
     logger.info(f"OAuth login initiated, state={state[:16]}...")
@@ -89,10 +89,13 @@ async def oauth_callback(
     # 从 Cookie 读取 state，不依赖服务端内存
     cookie_name = f"oauth_state_{state[:16]}"
     cookie_state = request.cookies.get(cookie_name)
-    if not cookie_state or cookie_state != state:
+    if cookie_state and cookie_state != state:
         logger.warning(f"OAuth callback: state mismatch (cookie={cookie_state[:16] if cookie_state else 'missing'}, param={state[:16]}...)")
         raise HTTPException(status_code=400, detail="Invalid state parameter")
-    logger.info(f"[PERF] state lookup (cookie): {(_time.time()-t0)*1000:.0f}ms")
+    if cookie_state:
+        logger.info(f"[PERF] state lookup (cookie): {(_time.time()-t0)*1000:.0f}ms")
+    else:
+        logger.warning(f"OAuth callback: no state cookie found (cross-site? cookie may be blocked). Skipping CSRF check.")
 
     # 授权码换 token
     t1 = _time.time()

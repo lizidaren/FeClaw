@@ -636,8 +636,8 @@ class AgentInitService:
         try:
             from services.vector_search_service import VectorSearchService
             vs = VectorSearchService(agent_hash=agent_hash)
-            vs._ensure_index(vs._get_index_name("kb"))
-            vs._ensure_index(vs._get_index_name("conv"))
+            vs.ensure_index(vs._get_index_name("kb"))
+            vs.ensure_index(vs._get_index_name("conv"))
             logger.info(f"Vector indexes created for agent {agent_hash}")
         except Exception as e:
             logger.warning(f"Failed to create vector indexes for {agent_hash}: {e}")
