@@ -236,6 +236,18 @@ async def oauth_callback(
             max_age=3600
         )
 
+    # 保存 Platform access_token 到 cookie（非 HttpOnly），
+    # 方便 Platform dashboard JS 读取并调用 Platform API
+    if access_token:
+        response.set_cookie(
+            key="platform_token",
+            value=access_token,
+            secure=True,
+            samesite="lax",
+            path="/",
+            max_age=settings.JWT_EXPIRE_HOURS * 3600,
+        )
+
     return response
 
 
