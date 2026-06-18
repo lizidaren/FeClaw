@@ -12,3 +12,5 @@ aiohttp>=3.9.0  # Async HTTP client
 pyotp>=2.9.0   # TOTP support
 Pillow>=10.0.0  # Image processing
 qrcode[pil]     # QR code generation
+
+pyfuse3>=1.4.0  # FUSE 3 filesystem in userspace
