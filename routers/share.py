@@ -141,7 +141,6 @@ async def resolve_share_by_slug(slug: str, request: Request, db: Session = Depen
         raise HTTPException(status_code=404, detail="分享链接不存在或已过期")
 
     vfs_path = mapping.vfs_path
-    logger.warning(f"[SHARE DEBUG] slug={slug} agent_hash={agent_hash!r} mapping.agent_hash={mapping.agent_hash!r} vfs_path={vfs_path}")
 
     # 通过 COS 获取文件（复用现有逻辑）
     from services.storage_service import StorageService
@@ -208,7 +207,6 @@ mermaid.run({{nodes:document.querySelectorAll('.mermaid')}});
 <script>var SHARE_HASH = {json.dumps(mapping.share_hash)}; var VFS_PATH = {json.dumps(vfs_path)};</script>
 <script src="/static/js/share-reference.js"></script>
 </body></html>"""
-                    logger.warning(f"[SHARE DEBUG] slug html_page len={len(html_page)} first80={html_page[:80]!r}")
                     return Response(content=html_page, media_type="text/html")
                 elif ext == ".2dggb":
                     return Response(content=_render_ggb_file(content, is_3d=False), media_type="text/html")
@@ -222,8 +220,7 @@ mermaid.run({{nodes:document.querySelectorAll('.mermaid')}});
                 _fname = os.path.basename(vfs_path)
                 return Response(content=content, media_type=ct,
                               headers={"Content-Disposition": f"inline; filename*=UTF-8''{quote(_fname)}"})
-        except Exception as e:
-            logger.error(f"[SHARE DEBUG] Exception for key {cos_key}: {type(e).__name__}: {e}")
+        except Exception:
             continue
 
     raise HTTPException(status_code=404, detail="文件不存在或已删除")
