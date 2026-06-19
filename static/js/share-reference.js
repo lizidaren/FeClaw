@@ -213,20 +213,17 @@
             "animation:fadeIn .2s;";
 
         // Build selected text display — 连续段落中高亮选中部分
-        var displayMd = "";
+                // Build selected text display — DOM 文本已是渲染后纯文本，直接拼 HTML 突出选中部分
+        var displayHtml = "";
         if (ctxBefore) {
-            displayMd += ctxBefore.slice(-150);
+            displayHtml += escapeHtml(ctxBefore.slice(-150));
         }
-        displayMd += "**" + selText + "**";
+        displayHtml += "<strong>" + escapeHtml(selText) + "</strong>";
         if (ctxAfter) {
-            displayMd += ctxAfter.slice(0, 150);
+            displayHtml += escapeHtml(ctxAfter.slice(0, 150));
         }
-        var renderedHtml = marked.parse(displayMd);
-        var renderedHtml = marked.parse(displayMd);
-
-        // Strip github-markdown-body white background: wrap in a div that resets it
         renderedHtml = '<div class="feclaw-ref-markdown" style="color:#d4d4d4;font-size:14px;line-height:1.8;">' +
-            renderedHtml + '</div>';
+            displayHtml + '</div>';
 
         var modal = document.createElement("div");
         modal.style.cssText =
