@@ -228,7 +228,6 @@ async def lifespan(app: FastAPI):
     # 启动定期清理任务（每小时清理过期的 ShareReference）
     import asyncio
     from services.share_service import cleanup_expired_references
-    from models.database import SessionLocal
 
     async def periodic_share_ref_cleanup():
         while True:
