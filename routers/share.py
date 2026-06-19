@@ -27,6 +27,7 @@ GGB_TEMPLATE_2D = """<!DOCTYPE html>
     #c img{{max-width:100%;height:auto;}}
 .markdown-body pre{{overflow-x:auto;}}
 .katex-display{{overflow-x:auto;overflow-y:hidden;max-width:100%;}}
+@keyframes fadeIn{{from{{opacity:0;}}to{{opacity:1;}}}}
 </style>
 </head>
 <body>
@@ -72,6 +73,7 @@ GGB_TEMPLATE_3D = """<!DOCTYPE html>
     #c img{{max-width:100%;height:auto;}}
 .markdown-body pre{{overflow-x:auto;}}
 .katex-display{{overflow-x:auto;overflow-y:hidden;max-width:100%;}}
+@keyframes fadeIn{{from{{opacity:0;}}to{{opacity:1;}}}}
 </style>
 </head>
 <body>
@@ -186,6 +188,7 @@ body{{max-width:800px;margin:40px auto;padding:0 20px;-webkit-touch-callout:none
 #c img{{max-width:100%;height:auto;}}
 .markdown-body pre{{overflow-x:auto;}}
 .katex-display{{overflow-x:auto;overflow-y:hidden;max-width:100%;}}
+@keyframes fadeIn{{from{{opacity:0;}}to{{opacity:1;}}}}
 </style>
 </head><body><article class="markdown-body" id="c"></article>
 <script>
@@ -302,6 +305,7 @@ body{{max-width:800px;margin:40px auto;padding:0 20px;-webkit-touch-callout:none
 #c img{{max-width:100%;height:auto;}}
 .markdown-body pre{{overflow-x:auto;}}
 .katex-display{{overflow-x:auto;overflow-y:hidden;max-width:100%;}}
+@keyframes fadeIn{{from{{opacity:0;}}to{{opacity:1;}}}}
 </style>
 </head><body><article class="markdown-body" id="c"></article>
 <script>

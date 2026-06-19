@@ -183,31 +183,103 @@
             .then(function (data) {
                 var refToken = "[reference:" + data.ref_hash + "]";
                 return copyToClipboard(refToken).then(function () {
-                    showToast("\u2705 \u5F15\u7528\u5DF2\u590D\u5236\uFF01\u7C98\u8D34\u5230\u804A\u5929\u4E2D\u5373\u53EF\u8BA9Agent\u67E5\u770B\u9009\u4E2D\u5185\u5BB9");
+                    showReferenceModal(selText, contextBefore, contextAfter, refToken);
                 });
             })
             .catch(function (err) {
-                showToast("\u274C \u5F15\u7528\u5931\u8D25\uFF1A" + err.message);
+                showErrorToast("\u274C \u5F15\u7528\u5931\u8D25\uFF1A" + err.message);
             });
     }
 
-    // ── Toast ────────────────────────────────────────────────────
-    function showToast(msg) {
+    // ── 引用成功弹窗 ─────────────────────────────────────────────
+    function showReferenceModal(selText, ctxBefore, ctxAfter, refToken) {
+        var overlay = document.createElement("div");
+        overlay.className = "feclaw-ref-overlay";
+        overlay.style.cssText =
+            "position:fixed;top:0;left:0;width:100%;height:100%;z-index:99998;" +
+            "background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;" +
+            "animation:fadeIn .2s;";
+
+        // Build selected text display
+        var displayText = "";
+        if (ctxBefore) {
+            displayText += escapeHtml(ctxBefore.slice(-120));
+        }
+        displayText += "<mark style=\"background:#fff3bf;padding:2px 4px;border-radius:3px;\">" + escapeHtml(selText) + "</mark>";
+        if (ctxAfter) {
+            displayText += escapeHtml(ctxAfter.slice(0, 120));
+        }
+
+        var modal = document.createElement("div");
+        modal.style.cssText =
+            "background:#2a2a2a;color:#e0e0e0;border-radius:16px;padding:0;max-width:520px;" +
+            "width:90vw;box-shadow:0 12px 48px rgba(0,0,0,0.5);overflow:hidden;";
+
+        modal.innerHTML =
+            // Header
+            '<div style="background:#3a3a3a;padding:16px 20px;font-size:17px;font-weight:600;' +
+            'display:flex;align-items:center;gap:8px;">' +
+            '\uD83D\uDCCC \u5F15\u7528\u590D\u5236\u6210\u529F\uFF01</div>' +
+            // Selected text
+            '<div style="padding:16px 20px 8px;">' +
+            '<div style="font-size:12px;color:#888;margin-bottom:6px;">\u9009\u4E2D\u5185\u5BB9</div>' +
+            '<div style="background:#333;border-radius:8px;padding:12px;font-size:14px;line-height:1.7;' +
+            'max-height:180px;overflow-y:auto;word-break:break-word;">' +
+            displayText +
+            '</div></div>' +
+            // Reference token
+            '<div style="padding:0 20px 8px;">' +
+            '<div style="font-size:12px;color:#888;margin-bottom:6px;">\u5F15\u7528\u6807\u8BB0\uFF08\u5DF2\u81EA\u52A8\u590D\u5236\uFF09</div>' +
+            '<div style="background:#1e1e1e;border:1px solid #555;border-radius:8px;padding:10px 14px;' +
+            'font-family:monospace;font-size:14px;color:#7ecfff;word-break:break-all;cursor:pointer;" ' +
+            'id="feclaw-ref-token" onclick="navigator.clipboard.writeText(this.textContent).catch(()=>{})">' +
+            refToken +
+            '</div></div>' +
+            // Instruction
+            '<div style="padding:0 20px 16px;">' +
+            '<div style="font-size:13px;color:#aaa;line-height:1.6;">' +
+            '\u53D1\u9001\u8FD9\u4E2A\u5F15\u7528\u6807\u8BB0\u7ED9Agent\uFF0CAgent\u53EF\u4EE5\u770B\u5230\u4F60\u5F15\u7528\u7684\u5185\u5BB9\u3002' +
+            '\u4F8B\u5982\uFF1A<span style="color:#7ecfff;font-family:monospace;">' + refToken + '</span>\u80FD\u89E3\u91CA\u4E00\u4E0B\u8FD9\u4E2A\u5417' +
+            '</div></div>' +
+            // Close button
+            '<div style="padding:0 20px 16px;text-align:right;">' +
+            '<button style="background:#5b7cfa;color:#fff;border:none;border-radius:8px;' +
+            'padding:10px 28px;font-size:15px;cursor:pointer;" ' +
+            'onclick="this.closest(\'.feclaw-ref-overlay\').remove()">\u77E5\u9053\u4E86</button>' +
+            '</div>';
+
+        overlay.appendChild(modal);
+        document.body.appendChild(overlay);
+
+        // Click outside to close
+        overlay.addEventListener("click", function (e) {
+            if (e.target === overlay) overlay.remove();
+        });
+    }
+
+    function escapeHtml(str) {
+        var div = document.createElement("div");
+        div.appendChild(document.createTextNode(str));
+        return div.innerHTML;
+    }
+
+    // ── Toast (only for errors now) ─────────────────────────────
+    function showErrorToast(msg) {
         if (toastEl && toastEl.parentNode) toastEl.parentNode.removeChild(toastEl);
         toastEl = document.createElement("div");
         toastEl.textContent = msg;
         toastEl.style.cssText =
             "position:fixed;bottom:32px;left:50%;transform:translateX(-50%);z-index:99999;" +
-            "background:#323232;color:#fff;padding:12px 24px;border-radius:8px;" +
+            "background:#c0392b;color:#fff;padding:12px 24px;border-radius:8px;" +
             "font-size:15px;box-shadow:0 4px 12px rgba(0,0,0,.25);" +
-            "transition:opacity .3s;opacity:1;max-width:90vw;text-align:center;";
+            "opacity:1;max-width:90vw;text-align:center;";
         document.body.appendChild(toastEl);
         setTimeout(function () {
             toastEl.style.opacity = "0";
             setTimeout(function () {
                 if (toastEl && toastEl.parentNode) toastEl.parentNode.removeChild(toastEl);
             }, 300);
-        }, 2000);
+        }, 2500);
     }
 
     // ── 剪贴板 ────────────────────────────────────────────────────
