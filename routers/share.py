@@ -174,7 +174,7 @@ async def resolve_share_by_slug(slug: str, request: Request, db: Session = Depen
 <script src="https://cdn.jsdelivr.net/npm/marked@12.0.1/marked.min.js"></script>
 <script src="/static/mermaid.min.js"></script>
 <style>
-body{{max-width:800px;margin:40px auto;padding:0 20px;}}
+body{{max-width:800px;margin:40px auto;padding:0 20px;-webkit-touch-callout:none;}}
 @media (max-width:640px){{body{{font-size:16px;line-height:1.8;padding:0 16px;margin:24px auto;}}}}
 @media (max-width:480px){{body{{font-size:17px;line-height:1.9;margin:16px auto;}}}}
 </style>
@@ -287,7 +287,7 @@ async def resolve_share(token: str, db: Session = Depends(get_db)):
 <script src="https://cdn.jsdelivr.net/npm/marked@12.0.1/marked.min.js"></script>
 <script src="/static/mermaid.min.js"></script>
 <style>
-body{{max-width:800px;margin:40px auto;padding:0 20px;}}
+body{{max-width:800px;margin:40px auto;padding:0 20px;-webkit-touch-callout:none;}}
 @media (max-width:640px){{body{{font-size:16px;line-height:1.8;padding:0 16px;margin:24px auto;}}}}
 @media (max-width:480px){{body{{font-size:17px;line-height:1.9;margin:16px auto;}}}}
 </style>
