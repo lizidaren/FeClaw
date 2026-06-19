@@ -165,14 +165,25 @@ async def resolve_share_by_slug(slug: str, request: Request, db: Session = Depen
                     import json
                     safe_md = json.dumps(md_content)
                     html_page = f"""<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>{os.path.basename(vfs_path)}</title>
+<html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{os.path.basename(vfs_path)}</title>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/github-markdown-css@5.5.1/github-markdown.min.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
 <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/marked@12.0.1/marked.min.js"></script>
-<style>body{{max-width:800px;margin:40px auto;padding:0 20px;}}</style>
+<script src="/static/mermaid.min.js"></script>
+<style>
+body{{max-width:800px;margin:40px auto;padding:0 20px;}}
+@media (max-width:640px){{body{{font-size:16px;line-height:1.8;padding:0 16px;margin:24px auto;}}}}
+@media (max-width:480px){{body{{font-size:17px;line-height:1.9;margin:16px auto;}}}}
+</style>
 </head><body><article class="markdown-body" id="c"></article>
 <script>
+mermaid.initialize({{startOnLoad:false,theme:'default'}});
+
+marked.use({{renderer:{{code:function({{text,lang}}){{if(lang==='mermaid')return'<pre class="mermaid">'+text+'</pre>';return'<pre><code class="language-'+lang+'">'+text+'</code></pre>';}}}}}});
+
 var html = marked.parse({safe_md});
 html = html.replace(/\\$\\$([\\s\\S]*?)\\$\\$/g, function(_, eq) {{
     try {{ return katex.renderToString(eq, {{displayMode:true,throwOnError:false}}); }} catch(e) {{ return '$$'+eq+'$$'; }}
@@ -181,7 +192,11 @@ html = html.replace(/\\$([^\\$\\n]+?)\\$/g, function(_, eq) {{
     try {{ return katex.renderToString(eq, {{displayMode:false,throwOnError:false}}); }} catch(e) {{ return '$'+eq+'$'; }}
 }});
 document.getElementById('c').innerHTML = html;
+window._RAW_MD = safe_md;
+mermaid.run({{nodes:document.querySelectorAll('.mermaid')}});
 </script>
+<script>var SHARE_HASH = "{mapping.share_hash}"; var VFS_PATH = "{vfs_path}";</script>
+<script src="/static/js/share-reference.js"></script>
 </body></html>"""
                     return Response(content=html_page, media_type="text/html")
                 elif ext == ".2dggb":
@@ -263,15 +278,23 @@ async def resolve_share(token: str, db: Session = Depends(get_db)):
                     import json
                     safe_md = json.dumps(md_content)
                     html_page = f"""<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>{os.path.basename(vfs_path)}</title>
+<html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{os.path.basename(vfs_path)}</title>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/github-markdown-css@5.5.1/github-markdown.min.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
 <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/marked@12.0.1/marked.min.js"></script>
-<style>body{{max-width:800px;margin:40px auto;padding:0 20px;}}</style>
+<script src="/static/mermaid.min.js"></script>
+<style>
+body{{max-width:800px;margin:40px auto;padding:0 20px;}}
+@media (max-width:640px){{body{{font-size:16px;line-height:1.8;padding:0 16px;margin:24px auto;}}}}
+@media (max-width:480px){{body{{font-size:17px;line-height:1.9;margin:16px auto;}}}}
+</style>
 </head><body><article class="markdown-body" id="c"></article>
 <script>
-// 渲染 Markdown 后替换公式
+mermaid.initialize({{startOnLoad:false,theme:'default'}});
+marked.use({{renderer:{{code:function({{text,lang}}){{if(lang==='mermaid')return'<pre class="mermaid">'+text+'</pre>';return'<pre><code class="language-'+lang+'">'+text+'</code></pre>';}}}}}});
 var html = marked.parse({safe_md});
 html = html.replace(/\\$\\$([\\s\\S]*?)\\$\\$/g, function(_, eq) {{
     try {{ return katex.renderToString(eq, {{displayMode:true,throwOnError:false}}); }} catch(e) {{ return '$$'+eq+'$$'; }}
@@ -280,7 +303,11 @@ html = html.replace(/\\$([^\\$\\n]+?)\\$/g, function(_, eq) {{
     try {{ return katex.renderToString(eq, {{displayMode:false,throwOnError:false}}); }} catch(e) {{ return '$'+eq+'$'; }}
 }});
 document.getElementById('c').innerHTML = html;
+window._RAW_MD = safe_md;
+mermaid.run({{nodes:document.querySelectorAll('.mermaid')}});
 </script>
+<script>var SHARE_HASH = "{share_hash or ''}"; var VFS_PATH = "{vfs_path}";</script>
+<script src="/static/js/share-reference.js"></script>
 </body></html>"""
                     return Response(content=html_page, media_type="text/html")
                 elif ext == ".2dggb":
