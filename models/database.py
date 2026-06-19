@@ -283,6 +283,26 @@ def cleanup_expired_share_mappings(db: Session) -> int:
     return deleted
 
 
+class ShareReference(Base):
+    """分享页引用令牌表 — 记录用户在分享页选中的文本片段"""
+    __tablename__ = "share_references"
+    __table_args__ = (
+        Index("idx_share_refs_hash_created", "share_hash", "created_at"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    ref_hash = Column(String(8), unique=True, index=True, nullable=False)
+    share_hash = Column(String(16), nullable=False, index=True)
+    vfs_path = Column(String(512), nullable=False)
+    selected_text = Column(Text, nullable=False)
+    context_before = Column(Text, default="", server_default="")
+    context_after = Column(Text, default="", server_default="")
+    creator_ip = Column(String(45), nullable=True)
+    expires_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class StaticSite(Base):
     """静态网站表"""
     __tablename__ = "static_sites"

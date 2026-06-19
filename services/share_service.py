@@ -54,7 +54,7 @@ _SHARE_WORDS_COUNT = len(_SHARE_WORDS)
 
 
 def _generate_slug() -> str:
-    """生成 3 词中文友好短链，如 '春风-明月-星辰'"""
+    """生成 3 词英文友好短链，如 'sunset-ocean-river'"""
     import random
     w1 = _SHARE_WORDS[random.randint(0, _SHARE_WORDS_COUNT - 1)]
     w2 = _SHARE_WORDS[random.randint(0, _SHARE_WORDS_COUNT - 1)]
@@ -152,6 +152,19 @@ def decode_share_token(token: str, db=None) -> Optional[str]:
         return None
     except Exception:
         return None
+
+
+def cleanup_expired_references(db) -> int:
+    """清理过期的 ShareReference 记录"""
+    from models.database import ShareReference
+    now = datetime.utcnow()
+    deleted = db.query(ShareReference).filter(
+        ShareReference.expires_at.isnot(None),
+        ShareReference.expires_at < now
+    ).delete()
+    if deleted:
+        db.commit()
+    return deleted
 
 
 def create_share_link(
