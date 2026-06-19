@@ -94,6 +94,10 @@ class Settings(BaseSettings):
     VECTOR_BUCKET_PREFIX: str = "feclaw-vec"    # 新建向量桶的前缀（不含-APPID）
     MAX_INDEXES_PER_BUCKET: int = 85            # 每个桶最大索引数（留余量给 100 上限）
 
+    # 文件存储后端: "auto" | "cos" | "local"
+    STORAGE_MODE: str = "auto"
+    LOCAL_STORAGE_ROOT: str = "./feclaw-storage"
+
     # 向量存储后端: "cos"（腾讯云）或 "sqlite"（本地 sqlite-vec）
     VECTOR_STORAGE_BACKEND: str = "cos"
     VECTOR_SQLITE_PATH: str = "data/vectors.db"

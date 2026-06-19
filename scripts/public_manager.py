@@ -51,15 +51,11 @@ class PublicFileManager:
             cos_prefix += "/"
         
         try:
-            result = self.storage.client.list_objects(
-                Bucket=settings.TENCENT_COS_BUCKET,
-                Prefix=cos_prefix,
-                MaxKeys=1000
-            )
-            
+            result = self.storage.list_objects(cos_prefix, max_keys=1000)
+
             files = []
-            if "Contents" in result:
-                for obj in result["Contents"]:
+            if result:
+                for obj in result:
                     key = obj["Key"]
                     rel_path = key[len(self.public_prefix):]
                     files.append({
@@ -176,10 +172,7 @@ class PublicFileManager:
             return False
         
         try:
-            self.storage.client.delete_object(
-                Bucket=settings.TENCENT_COS_BUCKET,
-                Key=cos_key
-            )
+            self.storage.delete_file_by_key(cos_key)
             print(f"✅ 删除成功: /public/{remote_path}")
             return True
         except Exception as e:
@@ -215,13 +208,13 @@ class PublicFileManager:
             cos_key = self.public_prefix + path.lstrip("/")
             try:
                 # 尝试获取文件元信息
-                result = self.storage.client.head_object(
-                    Bucket=settings.TENCENT_COS_BUCKET,
-                    Key=cos_key
-                )
-                size = result.get("ContentLength", 0)
-                results["found"].append({"path": path, "desc": desc, "size": size})
-                print(f"  ✅ {path} ({size} bytes) - {desc}")
+                result = self.storage.file_exists(cos_key)
+                if result:
+                    size = result.get("size", 0)
+                    results["found"].append({"path": path, "desc": desc, "size": size})
+                    print(f"  ✅ {path} ({size} bytes) - {desc}")
+                else:
+                    raise FileNotFoundError
             except Exception:
                 results["missing"].append({"path": path, "desc": desc})
                 results["status"] = "incomplete"
@@ -317,14 +310,7 @@ FeClaw 是一个智能体网关平台，为 AI Agent 提供统一的接口和服
             cos_key = self.public_prefix + path.lstrip("/")
             
             # 检查文件是否已存在
-            try:
-                self.storage.client.head_object(
-                    Bucket=settings.TENCENT_COS_BUCKET,
-                    Key=cos_key
-                )
-                exists = True
-            except Exception:
-                exists = False
+            exists = self.storage.file_exists(cos_key) is not None
             
             if exists and not force:
                 print(f"  ⏭️ {path} 已存在，跳过")

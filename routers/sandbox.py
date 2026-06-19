@@ -260,9 +260,7 @@ async def vfs_file_delete(path: str, request: Request):
     cos_key, err = manager.vfs._resolve_path(path)
     if err:
         return {"error": err}
-    manager.vfs.storage.client.delete_object(
-        Bucket=settings.TENCENT_COS_BUCKET, Key=cos_key
-    )
+    manager.vfs.storage.delete_file_by_key(cos_key)
     manager.meta_cache.invalidate_dir(
         cos_key.rsplit("/", 1)[0] if "/" in cos_key else ""
     )

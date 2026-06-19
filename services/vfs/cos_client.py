@@ -63,16 +63,10 @@ class CosClient:
             return []
 
     def list_objects_raw(self, bucket: str, prefix: str, max_keys: int = 1000) -> List[Dict]:
-        """使用原始 COS client 列出对象"""
+        """列出 COS 对象（通过抽象接口）"""
         try:
-            objects = self.storage.client.list_objects(
-                Bucket=bucket,
-                Prefix=prefix,
-                MaxKeys=max_keys
-            )
-            if "Contents" in objects:
-                return objects["Contents"]
-            return []
+            objects = self.storage.list_objects(prefix, max_keys)
+            return objects if objects else []
         except Exception as e:
             logger.error(f"[CosClient] list_objects_raw failed for {prefix}: {e}")
             return []

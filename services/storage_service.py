@@ -1,5 +1,5 @@
 """
-腾讯云对象存储服务
+腾讯云对象存储服务 + CosStorage (FileStorage 实现)
 """
 
 import logging
@@ -9,14 +9,16 @@ from qcloud_cos import CosConfig, CosS3Client
 from typing import Tuple, Optional, List, Dict
 import uuid
 
+from services.file_storage import FileStorage
+
 logger = logging.getLogger(__name__)
 
 
-class StorageService:
-    """腾讯云COS存储服务"""
+class CosStorage(FileStorage):
+    """COS 文件存储实现 — 继承 FileStorage，实现 5 个抽象方法"""
 
     def __init__(self):
-        """初始化COS客户端"""
+        """初始化 COS 客户端"""
         if not all([settings.TENCENT_COS_SECRET_ID, settings.TENCENT_COS_SECRET_KEY, settings.TENCENT_COS_BUCKET]):
             raise ValueError("腾讯云COS配置不完整，请检查TENCENT_COS_SECRET_ID、TENCENT_COS_SECRET_KEY和TENCENT_COS_BUCKET")
 
@@ -29,6 +31,92 @@ class StorageService:
 
         # 创建COS客户端
         self.client = CosS3Client(self.config)
+
+    # ==================== FileStorage 抽象方法实现 ====================
+
+    def get_file_content(self, key: str) -> Optional[bytes]:
+        """获取文件内容"""
+        try:
+            response = self.client.get_object(
+                Bucket=settings.TENCENT_COS_BUCKET,
+                Key=key
+            )
+            # response['Body'] 是 StreamBody 对象
+            chunks = []
+            while True:
+                chunk = response['Body'].read(4096)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            content = b''.join(chunks)
+            logger.info(f"[CosStorage] 文件读取成功: {key}, 大小: {len(content)} bytes")
+            return content
+        except Exception as e:
+            logger.error(f"[CosStorage] 读取文件失败: {key}, 错误: {e}")
+            return None
+
+    def put_object(self, key: str, file_bytes: bytes) -> None:
+        """上传文件到 COS"""
+        self.client.put_object(
+            Bucket=settings.TENCENT_COS_BUCKET,
+            Body=file_bytes,
+            Key=key
+        )
+        logger.info(f"[CosStorage] 文件上传成功: {key}")
+
+    def delete_file_by_key(self, key: str) -> bool:
+        """通过 COS key 直接删除文件"""
+        try:
+            self.client.delete_object(
+                Bucket=settings.TENCENT_COS_BUCKET,
+                Key=key
+            )
+            logger.info(f"[CosStorage] 文件删除成功(key): {key}")
+            return True
+        except Exception as e:
+            logger.error(f"[CosStorage] 删除文件失败(key): {key}, 错误: {e}")
+            return False
+
+    def list_objects(self, prefix: str, max_keys: int = 1000) -> Optional[List[Dict]]:
+        """列出指定前缀下的所有对象"""
+        try:
+            all_objects = []
+            marker = ""
+            while True:
+                response = self.client.list_objects(
+                    Bucket=settings.TENCENT_COS_BUCKET,
+                    Prefix=prefix,
+                    MaxKeys=min(max_keys, 1000),
+                    Marker=marker
+                )
+                contents = response.get("Contents", [])
+                all_objects.extend(contents)
+                # 检查是否还有更多对象
+                if response.get("IsTruncated") == "true":
+                    marker = contents[-1]["Key"]
+                else:
+                    break
+                if len(all_objects) >= max_keys:
+                    break
+            return all_objects
+        except Exception as e:
+            logger.error(f"[CosStorage] 列出对象失败: {prefix}, 错误: {e}")
+            return None
+
+    def file_exists(self, key: str) -> Optional[Dict]:
+        """检查 COS 文件是否存在（head_object，不下载内容）"""
+        try:
+            result = self.client.head_object(
+                Bucket=settings.TENCENT_COS_BUCKET,
+                Key=key
+            )
+            return {
+                "exists": True,
+                "size": result.get("ContentLength", 0),
+                "content_type": result.get("ContentType", ""),
+            }
+        except Exception:
+            return None
 
     # ==================== COS 路径生成方法 ====================
 
@@ -79,7 +167,7 @@ class StorageService:
                     user_part = parts[1].split("/")[0]
                     return int(user_part)
         except Exception as e:
-            logger.debug(f"[StorageService] Failed to parse user_id from key {key}: {e}")
+            logger.debug(f"[CosStorage] Failed to parse user_id from key {key}: {e}")
         return None
 
     # ==================== 文件上传下载方法 ====================
@@ -98,7 +186,6 @@ class StorageService:
         key = self.generate_original_file_key(user_id, filename)
 
         # 生成预签名上传URL（PUT方式，有效期1小时）
-        # 不指定Content-Type参数，让前端自由设置
         presigned_url = self.client.get_presigned_url(
             Method='PUT',
             Bucket=settings.TENCENT_COS_BUCKET,
@@ -140,7 +227,7 @@ class StorageService:
 
             return presigned_url
         except Exception as e:
-            logger.error(f"[StorageService] 生成预签名GET URL失败: {e}")
+            logger.error(f"[CosStorage] 生成预签名GET URL失败: {e}")
             return url  # 失败时返回原URL
 
     def upload_file(self, file_bytes: bytes, key: str, max_retries: int = 3) -> str:
@@ -169,78 +256,27 @@ class StorageService:
                     Key=key
                 )
 
-                # 腾讯云COS SDK返回的响应是一个字典，通常包含ETag等
-                # 成功时不需要检查StatusCode，只要没有抛异常就是成功
                 url = f"https://{settings.TENCENT_COS_BUCKET}.cos.{settings.TENCENT_COS_REGION}.myqcloud.com/{key}"
-                logger.info(f"[StorageService] 文件上传成功: {key}")
+                logger.info(f"[CosStorage] 文件上传成功: {key}")
                 return url
 
             except CosServiceError as e:
                 last_error = e
-                logger.warning(f"[StorageService] COS服务错误 (尝试 {retry_count + 1}/{max_retries}): {e}")
+                logger.warning(f"[CosStorage] COS服务错误 (尝试 {retry_count + 1}/{max_retries}): {e}")
             except CosClientError as e:
                 last_error = e
-                logger.warning(f"[StorageService] COS客户端错误 (尝试 {retry_count + 1}/{max_retries}): {e}")
+                logger.warning(f"[CosStorage] COS客户端错误 (尝试 {retry_count + 1}/{max_retries}): {e}")
             except Exception as e:
                 last_error = e
-                logger.warning(f"[StorageService] 上传异常 (尝试 {retry_count + 1}/{max_retries}): {e}")
+                logger.warning(f"[CosStorage] 上传异常 (尝试 {retry_count + 1}/{max_retries}): {e}")
 
             retry_count += 1
             if retry_count < max_retries:
-                wait_time = 0.1  # 固定等待100ms
-                logger.info(f"[StorageService] {wait_time}秒后重试...")
+                wait_time = 0.1
+                logger.info(f"[CosStorage] {wait_time}秒后重试...")
                 time.sleep(wait_time)
 
         raise Exception(f"COS上传失败，已重试{max_retries}次: {last_error}")
-
-    def put_object(self, key: str, file_bytes: bytes, max_retries: int = 3) -> str:
-        """
-        上传文件的别名方法（参数顺序与调用方一致: key在前, bytes在后）
-
-        Args:
-            key: 存储路径
-            file_bytes: 文件字节数据
-            max_retries: 最大重试次数
-
-        Returns:
-            访问URL
-        """
-        return self.upload_file(file_bytes, key, max_retries)
-
-    def list_objects(self, prefix: str, max_keys: int = 1000) -> Optional[List[Dict]]:
-        """
-        列出指定前缀下的所有对象
-
-        Args:
-            prefix: COS 前缀
-            max_keys: 最大返回数量
-
-        Returns:
-            对象列表，每个对象包含 Key, LastModified, Size, ETag 等字段
-        """
-        try:
-            all_objects = []
-            marker = ""
-            while True:
-                response = self.client.list_objects(
-                    Bucket=settings.TENCENT_COS_BUCKET,
-                    Prefix=prefix,
-                    MaxKeys=min(max_keys, 1000),
-                    Marker=marker
-                )
-                contents = response.get("Contents", [])
-                all_objects.extend(contents)
-                # 检查是否还有更多对象
-                if response.get("IsTruncated") == "true":
-                    marker = contents[-1]["Key"]
-                else:
-                    break
-                if len(all_objects) >= max_keys:
-                    break
-            return all_objects
-        except Exception as e:
-            logger.error(f"[StorageService] 列出对象失败: {prefix}, 错误: {e}")
-            return None
 
     def delete_file(self, url: str) -> bool:
         """
@@ -261,63 +297,11 @@ class StorageService:
                 Key=key
             )
 
-            # 没有抛异常就是成功
-            logger.info(f"[StorageService] 文件删除成功: {key}")
+            logger.info(f"[CosStorage] 文件删除成功: {key}")
             return True
         except Exception as e:
-            logger.error(f"[StorageService] 删除文件失败: {e}")
+            logger.error(f"[CosStorage] 删除文件失败: {e}")
             return False
-
-    def delete_file_by_key(self, key: str) -> bool:
-        """
-        通过 COS key 直接删除文件
-
-        Args:
-            key: COS 文件 key（存储路径）
-
-        Returns:
-            是否删除成功
-        """
-        try:
-            self.client.delete_object(
-                Bucket=settings.TENCENT_COS_BUCKET,
-                Key=key
-            )
-            logger.info(f"[StorageService] 文件删除成功(key): {key}")
-            return True
-        except Exception as e:
-            logger.error(f"[StorageService] 删除文件失败(key): {key}, 错误: {e}")
-            return False
-
-    def get_file_content(self, key: str) -> Optional[bytes]:
-        """
-        获取文件内容
-
-        Args:
-            key: COS文件key（存储路径）
-
-        Returns:
-            文件字节数据，如果文件不存在或读取失败则返回None
-        """
-        try:
-            response = self.client.get_object(
-                Bucket=settings.TENCENT_COS_BUCKET,
-                Key=key
-            )
-            # response['Body'] 是 StreamBody 对象
-            # StreamBody.read() 默认只读取 1024 字节，需要循环读取全部内容
-            chunks = []
-            while True:
-                chunk = response['Body'].read(4096)
-                if not chunk:
-                    break
-                chunks.append(chunk)
-            content = b''.join(chunks)
-            logger.info(f"[StorageService] 文件读取成功: {key}, 大小: {len(content)} bytes")
-            return content
-        except Exception as e:
-            logger.error(f"[StorageService] 读取文件失败: {key}, 错误: {e}")
-            return None
 
     def ensure_public_file(self, rel_path: str, content: str) -> bool:
         """
@@ -341,19 +325,19 @@ class StorageService:
                 Bucket=settings.TENCENT_COS_BUCKET,
                 Key=public_key
             )
-            logger.info(f"[StorageService] Public file already exists: {public_key}")
+            logger.info(f"[CosStorage] Public file already exists: {public_key}")
             return True
         except CosServiceError as e:
             if e.get_status_code() == 404:
                 pass  # 文件不存在，需要创建
             else:
-                logger.error(f"[StorageService] Head object error: {e}")
+                logger.error(f"[CosStorage] Head object error: {e}")
                 return False
         except CosClientError as e:
-            logger.error(f"[StorageService] Head object client error: {e}")
+            logger.error(f"[CosStorage] Head object client error: {e}")
             return False
         except Exception as e:
-            logger.error(f"[StorageService] Head object unexpected error: {e}")
+            logger.error(f"[CosStorage] Head object unexpected error: {e}")
             return False
 
         # 文件不存在，创建它
@@ -364,10 +348,10 @@ class StorageService:
                 Key=public_key,
                 ContentType="text/markdown; charset=utf-8"
             )
-            logger.info(f"[StorageService] Public file created: {public_key}")
+            logger.info(f"[CosStorage] Public file created: {public_key}")
             return True
         except (CosServiceError, CosClientError) as e:
-            logger.error(f"[StorageService] Create public file failed: {e}")
+            logger.error(f"[CosStorage] Create public file failed: {e}")
             return False
 
     def generate_presigned_put_url(self, key: str, expired: int = 3600) -> str:
@@ -390,7 +374,7 @@ class StorageService:
             )
             return presigned_url
         except Exception as e:
-            logger.error(f"[StorageService] 生成预签名 PUT URL 失败: {e}")
+            logger.error(f"[CosStorage] 生成预签名 PUT URL 失败: {e}")
             return ""
 
     def generate_sts_credential(self, user_id: str, prefix: str = None, duration: int = 3600) -> dict:
@@ -403,18 +387,7 @@ class StorageService:
             duration: 有效期（秒），默认 1 小时
 
         Returns:
-            包含临时凭证的字典:
-            {
-                "credentials": {
-                    "secret_id": "...",
-                    "secret_key": "...",
-                    "session_token": "...",
-                    "expired_time": ...
-                },
-                "bucket": "...",
-                "region": "...",
-                "prefix": "..."
-            }
+            包含临时凭证的字典
         """
 
         if prefix is None:
@@ -424,7 +397,6 @@ class StorageService:
             from sts.sts import Sts
             import json as _json
 
-            # 使用自定义 policy + condition 限制前缀（resource=* 配合 condition 比 resource-scoping 更通用）
             custom_policy = {
                 "version": "2.0",
                 "statement": [
@@ -476,24 +448,24 @@ class StorageService:
                     "base_url": f"https://{settings.TENCENT_COS_BUCKET}.cos.{settings.TENCENT_COS_REGION}.myqcloud.com"
                 }
             else:
-                logger.error(f"[StorageService] STS 响应无效: {response}")
+                logger.error(f"[CosStorage] STS 响应无效: {response}")
                 return None
 
         except Exception as e:
-            logger.error(f"[StorageService] 生成 STS 凭证失败: {e}")
+            logger.error(f"[CosStorage] 生成 STS 凭证失败: {e}")
             import traceback as _tb
             logger.debug(_tb.format_exc())
             return None
 
-    # ==================== 异步包装方法（避免同步 COS 调用阻塞事件循环） ====================
+    # ==================== 异步包装方法 ====================
 
     async def upload_file_async(self, file_bytes: bytes, key: str, max_retries: int = 3) -> str:
         """异步包装：上传文件"""
         return await asyncio.to_thread(self.upload_file, file_bytes, key, max_retries)
 
-    async def put_object_async(self, key: str, file_bytes: bytes, max_retries: int = 3) -> str:
+    async def put_object_async(self, key: str, file_bytes: bytes) -> None:
         """异步包装：上传文件（别名）"""
-        return await asyncio.to_thread(self.put_object, key, file_bytes, max_retries)
+        return await asyncio.to_thread(self.put_object, key, file_bytes)
 
     async def get_file_content_async(self, key: str) -> Optional[bytes]:
         """异步包装：获取文件内容"""
@@ -518,6 +490,15 @@ class StorageService:
     async def generate_presigned_url_async(self, user_id: int, filename: str) -> Tuple[str, str]:
         """异步包装：生成预签名上传 URL"""
         return await asyncio.to_thread(self.generate_presigned_url, user_id, filename)
+
+
+class StorageService(CosStorage):
+    """兼容旧代码——直接继承 CosStorage，一切接口不变
+
+    所有调用 ``StorageService(...)`` 的旧代码无需改动。
+    新增代码应使用 ``create_file_storage()`` 或直接 ``CosStorage()``。
+    """
+    pass
 
 
 # 全局存储服务实例

@@ -54,7 +54,7 @@ import uvicorn
 from config import settings
 from models.database import init_db, SessionLocal, User, engine
 from utils.auth import generate_salt, hash_password
-from routers import static_site, static_site_public, workspace, wechat, oauth, console, health, vfs_image_dedup, sandbox, share, vfs_view, apps_gateway
+from routers import static_site, static_site_public, workspace, wechat, oauth, console, health, vfs_image_dedup, sandbox, share, share_reference, vfs_view, apps_gateway
 from routers.feclaw_domain import router as feclaw_domain_router
 from routers.feclaw_chat import router as feclaw_chat_router
 from routers.agent_config_ui import router as agent_config_ui_router
@@ -195,8 +195,10 @@ async def lifespan(app: FastAPI):
             try:
                 from services.vfs_fuse_daemon import start_fuse_background, unmount_fuse
                 from services.virtual_filesystem import VirtualFileSystem
+                from services.file_storage import create_file_storage
 
-                vfs = VirtualFileSystem()
+                storage = create_file_storage(mode=settings.STORAGE_MODE)
+                vfs = VirtualFileSystem(storage=storage)
                 fuse_thread = start_fuse_background(
                     vfs, settings.FUSE_MOUNT_DIR, settings.FUSE_CACHE_TTL,
                     cos_prefix="feclaw/"
@@ -322,6 +324,7 @@ app.include_router(health.router)  # 健康检查 API (必须在 static_site_pub
 app.include_router(vfs_image_dedup.router)  # VFS 图片去重管理 API
 app.include_router(sandbox.router)  # 安全沙箱执行环境 API
 app.include_router(share.router)  # 分享链接解析
+app.include_router(share_reference.router)  # 分享页引用令牌
 app.include_router(vfs_view.router)  # VFS 文件查看（历史图片/文件展示）
 app.include_router(oauth.router)  # OAuth 认证 (必须在 static_site_public 之前)
 

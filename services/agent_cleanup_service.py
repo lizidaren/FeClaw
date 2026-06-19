@@ -230,10 +230,7 @@ class AgentCleanupService:
                 key = obj.get("Key")
                 if key:
                     try:
-                        self.storage.client.delete_object(
-                            Bucket=settings.TENCENT_COS_BUCKET,
-                            Key=key
-                        )
+                        self.storage.delete_file_by_key(key)
                         deleted_count += 1
                         logger.debug(f"Deleted VFS file: {key}")
                     except Exception as e:

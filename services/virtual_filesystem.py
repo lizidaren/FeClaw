@@ -130,15 +130,16 @@ class VirtualFileSystem:
     DATE_FORMAT = "%b %d %H:%M"
     DATE_FORMAT_YEAR = "%b %d  %Y"
 
-    def __init__(self, user_id: str = None, storage_service=None, agent_id: str = None, agent_hash: str = None):
+    def __init__(self, user_id: str = None, storage_service=None, agent_id: str = None, agent_hash: str = None, storage=None):
         """
         初始化虚拟文件系统
 
         Args:
             user_id: 用户 ID（向后兼容，或从 agent_hash 获取）
-            storage_service: 可选的存储服务实例（用于测试）
-            agent_id: 可选的 Agent ID（4 位 hash），用于 Agent 绑定（已弃用，使用 agent_hash）
+            storage_service: 可选的存储服务实例（向后兼容，已弃用）
+            agent_id: 可选的 Agent ID（已弃用，使用 agent_hash）
             agent_hash: Agent 的 4 位 hash（推荐）
+            storage: 可选的 FileStorage 实例（新，优先于 storage_service）
         """
         # 支持 agent_hash 参数（推荐）
         if agent_hash:
@@ -172,7 +173,13 @@ class VirtualFileSystem:
 
         self._cwd = ""  # 默认工作目录设为根目录（/），包含 agent/ 和 workspace/
         self._prev_cwd = ""  # 上一个工作目录（用于 cd -）
-        self._storage = storage_service
+        # storage 参数优先于 storage_service（向后兼容）
+        if storage is not None:
+            self._storage = storage
+        elif storage_service is not None:
+            self._storage = storage_service
+        else:
+            self._storage = None
         self._cos_client = None  # CosClient 实例（懒加载）
         self._dir_cache: Dict[str, List[VirtualDirEntry]] = {}  # 目录缓存
 
@@ -185,10 +192,10 @@ class VirtualFileSystem:
 
     @property
     def storage(self):
-        """懒加载 StorageService"""
+        """懒加载 FileStorage（通过工厂自动选择后端）"""
         if self._storage is None:
-            from services.storage_service import StorageService
-            self._storage = StorageService()
+            from services.file_storage import create_file_storage
+            self._storage = create_file_storage(mode=getattr(settings, "STORAGE_MODE", "auto"))
         return self._storage
 
     @property
