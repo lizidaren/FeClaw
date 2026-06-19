@@ -263,10 +263,15 @@ class ChatService:
                     metadata={"count": len(self.context.history)}
                 )
 
-            # ⑥ 构建消息列表
+            # ⑥ 自动解析引用令牌 [reference:xxx]
+            _resolved = await self._resolve_references(actual.text)
+            if _resolved != actual.text:
+                actual.text = _resolved
+
+            # ⑦ 构建消息列表
             messages = self._build_messages(system_prompt, actual.text, image_url)
 
-            # ⑦ 调用 AI 进行对话
+            # ⑧ 调用 AI 进行对话
             _t_ai = time.time()
             full_response = ""
             async for event in self._stream_ai_response(messages):
@@ -471,15 +476,6 @@ class ChatService:
 规则3️⃣：**预识别提供 {场景/文字/风格/意图} 供参考，但你仍须遵循规则1。**
 
 注意：微信默认图片先发文字后到，所以看到无文字图片时极大概率是用户还在编辑文字。""")
-
-        # 分享页引用令牌
-        parts.append("""【分享页引用】
-用户在分享页选中文本后，可以通过「引用」按钮生成一个引用标记，粘贴到聊天中。
-当你看到消息中包含 `[reference:xxxxxxxx]` 格式的引用标记时：
-1. **必须**调用 resolve_share_reference 工具解析引用标记，获取引用的文本内容
-2. 引用内容是对用户选中文本的记录，可用于理解上下文
-3. 引用标记可能出现在消息中间或开头，注意提取解析
-4. 如果看不到引用令牌所属的分享页，凭引用内容理解即可""")
 
         # 微信渠道 - 长内容输出规则
         if self.channel == "wechat":
@@ -689,6 +685,29 @@ class ChatService:
                     )
                 break
         return msgs
+
+    async def _resolve_references(self, text: str) -> str:
+        """自动解析消息中的 [reference:xxx] 引用令牌，替换为实际内容"""
+        import re as _re
+        refs = _re.findall(r'\[reference:([a-zA-Z0-9]+)\]', text)
+        if not refs:
+            return text
+        try:
+            from models.database import get_session, ShareReference
+            with get_session() as db:
+                for ref_hash in set(refs):
+                    ref = db.query(ShareReference).filter(
+                        ShareReference.ref_hash == ref_hash
+                    ).first()
+                    if ref and ref.selected_text:
+                        insert = f"\n\n> 📖 引用内容（{ref_hash}）：{ref.selected_text}"
+                        if ref.context_before:
+                            insert = f"\n\n> 【引用上下文】...{ref.context_before[-100:]}{ref.selected_text}{ref.context_after[:100]}..."
+                        text = text.replace(f"[reference:{ref_hash}]", "")
+                        text += insert
+        except Exception as e:
+            logger.warning(f"[ChatService] Reference resolution failed: {e}")
+        return text
 
     def _build_messages(
         self, 
