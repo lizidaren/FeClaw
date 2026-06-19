@@ -65,6 +65,7 @@ from routers.admin import router as admin_router
 from routers.wechat import ensure_message_handler
 from services.agent_init_service import ensure_default_agent_5178
 from routers.desktop_ws import router as desktop_ws_router
+from routers.well_known import router as well_known_router
 
 
 @asynccontextmanager
@@ -356,6 +357,7 @@ app.include_router(vfs_view.router)  # VFS 文件查看（历史图片/文件展
 app.include_router(oauth.router)  # OAuth 认证 (必须在 static_site_public 之前)
 
 app.include_router(static_site_public.router)  # 静态网站公开访问
+app.include_router(well_known_router)  # .well-known/feclaw-desktop 发现端点
 
 # Desktop WS 通道（条件启用）
 if settings.DESKTOP_ENABLED:
