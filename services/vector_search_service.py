@@ -370,7 +370,11 @@ class CosVectorStorage(VectorStorage):
         if index in cls._index_bucket_cache:
             return cls._index_bucket_cache[index]
 
-        buckets = self._list_vector_buckets()
+        try:
+            buckets = self._list_vector_buckets()
+        except Exception as e:
+            logger.warning("list_vector_buckets failed, falling back to legacy bucket: %s", e)
+            buckets = []
         client = self._get_client()
         for b in buckets:
             name = b.get("Name", b.get("name", ""))
@@ -429,7 +433,11 @@ class CosVectorStorage(VectorStorage):
 
     def _pick_least_loaded_bucket(self) -> str:
         """Find bucket with most remaining capacity, or create new one if all full."""
-        buckets = self._list_vector_buckets()
+        try:
+            buckets = self._list_vector_buckets()
+        except Exception as e:
+            logger.warning("list_vector_buckets failed in _pick_least_loaded_bucket: %s", e)
+            return "firstentrance-gzvec-1257148458"
         client = self._get_client()
 
         best_bucket = None
