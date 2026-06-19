@@ -516,6 +516,14 @@ class ChatService:
         if bootstrap_content:
             parts.append(f"【初始化引导 — BOOTSTRAP.md】\n{bootstrap_content}")
 
+        # 平台能力提示
+        parts.append(
+            "【平台能力】\n"
+            "Markdown 分享链接支持渲染 Mermaid 图表。"
+            "当你需要展示思维导图、流程图、时序图、类图等时，"
+            "可用 ```mermaid 代码块语法编写，分享后自动渲染为矢量图。"
+        )
+
         return "\n\n".join(parts)
     
     def _read_vfs_file(self, path: str) -> Optional[str]:
