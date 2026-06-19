@@ -172,7 +172,7 @@
             .then(function (data) {
                 var refToken = "[reference:" + data.ref_hash + "]";
                 return copyToClipboard(refToken).then(function () {
-                    showToast("\uD83D\uDCCC \u5F15\u7528\u5DF2\u590D\u5236\uFF1A" + refToken);
+                    showToast("\u2705 \u5F15\u7528\u5DF2\u590D\u5236\uFF01\u7C98\u8D34\u5230\u804A\u5929\u4E2D\u5373\u53EF\u8BA9Agent\u67E5\u770B\u9009\u4E2D\u5185\u5BB9");
                 });
             })
             .catch(function (err) {
