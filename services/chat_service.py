@@ -703,8 +703,7 @@ class ChatService:
                         insert = f"\n\n> 📖 引用内容（{ref_hash}）：{ref.selected_text}"
                         if ref.context_before:
                             insert = f"\n\n> 【引用上下文】...{ref.context_before[-100:]}{ref.selected_text}{ref.context_after[:100]}..."
-                        text = text.replace(f"[reference:{ref_hash}]", "")
-                        text += insert
+                        text = text + insert
         except Exception as e:
             logger.warning(f"[ChatService] Reference resolution failed: {e}")
         return text
