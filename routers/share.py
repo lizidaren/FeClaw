@@ -192,7 +192,7 @@ html = html.replace(/\\$([^\\$\\n]+?)\\$/g, function(_, eq) {{
     try {{ return katex.renderToString(eq, {{displayMode:false,throwOnError:false}}); }} catch(e) {{ return '$'+eq+'$'; }}
 }});
 document.getElementById('c').innerHTML = html;
-window._RAW_MD = safe_md;
+window._RAW_MD = {safe_md};
 mermaid.run({{nodes:document.querySelectorAll('.mermaid')}});
 </script>
 <script>var SHARE_HASH = {json.dumps(mapping.share_hash)}; var VFS_PATH = {json.dumps(vfs_path)};</script>
@@ -303,7 +303,7 @@ html = html.replace(/\\$([^\\$\\n]+?)\\$/g, function(_, eq) {{
     try {{ return katex.renderToString(eq, {{displayMode:false,throwOnError:false}}); }} catch(e) {{ return '$'+eq+'$'; }}
 }});
 document.getElementById('c').innerHTML = html;
-window._RAW_MD = safe_md;
+window._RAW_MD = {safe_md};
 mermaid.run({{nodes:document.querySelectorAll('.mermaid')}});
 </script>
 <script>var SHARE_HASH = {json.dumps(share_hash or '')}; var VFS_PATH = {json.dumps(vfs_path)};</script>
