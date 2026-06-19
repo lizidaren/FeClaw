@@ -1,128 +1,205 @@
 /**
- * Share Reference Token — 分享页文本选中引用功能
+ * Share Reference Token — 分享页文本选中工具栏
  *
- * 用户在分享页选中文本 → 浮动按钮 → 标记为引用 → 复制 reference token
+ * 完全接管文本选中菜单，显示：复制 / 引用 / 全选
+ * 拦截手机长按系统菜单（contextmenu），自定义弹出工具栏
  */
 (function () {
     "use strict";
-
     if (typeof SHARE_HASH === "undefined" || typeof VFS_PATH === "undefined") return;
 
     var SHARE_HASH_VAL = SHARE_HASH;
     var VFS_PATH_VAL = VFS_PATH;
-
-    // rawMd 从 window._RAW_MD 获取（share.py 模板中注入的 JSON 转义字符串）
     var rawMd = window._RAW_MD || "";
+    var toolbar = null;
+    var toastEl = null;
 
-    // ── rawMd 文本查找（用于上下文提取）──────────────────────────────
-    // 不再用 DOM 偏移映射到 rawMd（marked.js 渲染后 HTML 转义导致偏移错位）。
-    // 改用 getSelection().toString() 直接在 rawMd 中用 lastIndexOf 反向搜索，
-    // 取最后一次出现位置以避开 HTML 转义干扰。
+    // ── rawMd 文本查找 ──────────────────────────────────────────────
     function findTextInRawMd(selectedText) {
         if (!rawMd || !selectedText) return null;
-        // lastIndexOf 取最后出现，避免 HTML 标签干扰
         var idx = rawMd.lastIndexOf(selectedText);
         if (idx === -1) return null;
         return { start: idx, end: idx + selectedText.length };
     }
 
-    // ── 浮动按钮 ──────────────────────────────────────────────────
-    var floatBtn = null;
-    var lastSelection = null;
+    // ── 工具栏 DOM ─────────────────────────────────────────────────
+    function createToolbar() {
+        if (toolbar) return;
+        toolbar = document.createElement("div");
+        toolbar.style.cssText =
+            "position:fixed;z-index:9999;display:none;" +
+            "background:#2d2d2d;color:#fff;border-radius:10px;" +
+            "padding:4px;box-shadow:0 4px 16px rgba(0,0,0,.3);" +
+            "font-size:14px;white-space:nowrap;user-select:none;" +
+            "-webkit-user-select:none;";
 
-    function createFloatButton() {
-        if (floatBtn) return;
-        floatBtn = document.createElement("button");
-        floatBtn.textContent = "\uD83D\uDCCC \u6807\u8BB0\u6B64\u6BB5"; // 📌 标记此段
-        floatBtn.style.cssText =
-            "position:absolute;z-index:9999;display:none;padding:6px 14px;" +
-            "background:#1a73e8;color:#fff;border:none;border-radius:6px;" +
-            "cursor:pointer;font-size:14px;box-shadow:0 2px 8px rgba(0,0,0,.2);" +
-            "white-space:nowrap;transition:opacity .15s;-webkit-tap-highlight-color:transparent;";
-        document.body.appendChild(floatBtn);
+        var btnStyle =
+            "background:transparent;color:#fff;border:none;" +
+            "padding:8px 14px;font-size:14px;cursor:pointer;" +
+            "border-radius:6px;white-space:nowrap;";
 
-        floatBtn.addEventListener("click", function (e) {
-            e.preventDefault();
-            e.stopPropagation();
-            handleMarkSelection();
+        toolbar.innerHTML =
+            '<button style="' + btnStyle + '" data-action="copy">\uD83D\uDCCB \u590D\u5236</button>' +
+            '<span style="color:#555;padding:0 2px;">|</span>' +
+            '<button style="' + btnStyle + '" data-action="reference">\uD83D\uDCCC \u5F15\u7528</button>' +
+            '<span style="color:#555;padding:0 2px;">|</span>' +
+            '<button style="' + btnStyle + '" data-action="selectall">\uD83D\uDD0D \u5168\u9009</button>';
+
+        // Hover feedback
+        toolbar.querySelectorAll("button").forEach(function (btn) {
+            btn.addEventListener("mouseenter", function () {
+                this.style.background = "rgba(255,255,255,0.1)";
+            });
+            btn.addEventListener("mouseleave", function () {
+                this.style.background = "transparent";
+            });
+            btn.addEventListener("click", function (e) {
+                e.preventDefault();
+                e.stopPropagation();
+                handleAction(this.getAttribute("data-action"));
+            });
+            // Mobile
+            btn.addEventListener("touchend", function (e) {
+                e.preventDefault();
+                e.stopPropagation();
+                handleAction(this.getAttribute("data-action"));
+            });
         });
 
-        // 移动端 touch
-        floatBtn.addEventListener("touchend", function (e) {
-            e.preventDefault();
-            e.stopPropagation();
-            handleMarkSelection();
-        });
+        document.body.appendChild(toolbar);
     }
 
-    function positionFloatButton() {
+    function getSelectedText() {
+        var sel = window.getSelection();
+        return sel && !sel.isCollapsed ? sel.toString().trim() : "";
+    }
+
+    function positionToolbar() {
         var sel = window.getSelection();
         if (!sel || sel.isCollapsed || !sel.rangeCount) {
-            if (floatBtn) floatBtn.style.display = "none";
-            return;
+            hideToolbar();
+            return false;
         }
 
         var range = sel.getRangeAt(0);
         var rect = range.getBoundingClientRect();
         if (!rect || (rect.width === 0 && rect.height === 0)) {
-            if (floatBtn) floatBtn.style.display = "none";
-            return;
+            hideToolbar();
+            return false;
         }
 
-        var scrollX = window.scrollX || window.pageXOffset;
-        var scrollY = window.scrollY || window.pageYOffset;
+        var w = toolbar.offsetWidth || 280;
+        var h = toolbar.offsetHeight || 40;
+        var left = rect.left + rect.width / 2 - w / 2;
+        var top = rect.top - h - 8;
 
-        var top = rect.top + scrollY - 40;
-        if (top < scrollY + 10) top = rect.bottom + scrollY + 8;
+        // 上边空间不够则显示在下方
+        if (top < 8) top = rect.bottom + 8;
 
-        var left = rect.left + scrollX + rect.width / 2;
-        // 转为从左边定位
-        floatBtn.style.top = top + "px";
-        floatBtn.style.left = left + "px";
-        floatBtn.style.transform = "translate(-50%, 0)";
-        floatBtn.style.display = "block";
-        floatBtn.style.opacity = "1";
+        // 不超出屏幕
+        if (left < 8) left = 8;
+        if (left + w > window.innerWidth - 8) left = window.innerWidth - w - 8;
 
-        lastSelection = {
-            text: sel.toString().trim(),
-        };
+        toolbar.style.left = left + "px";
+        toolbar.style.top = top + "px";
+        toolbar.style.display = "block";
+        return true;
     }
 
-    var debounceTimer = null;
-    function onSelectionChange() {
-        if (debounceTimer) clearTimeout(debounceTimer);
-        debounceTimer = setTimeout(function () {
-            positionFloatButton();
-        }, 200);
+    function hideToolbar() {
+        if (toolbar) toolbar.style.display = "none";
     }
 
-    function hideFloatButton(e) {
-        if (floatBtn && e && floatBtn.contains(e.target)) return;
-        if (floatBtn) {
-            floatBtn.style.display = "none";
+    // ── 操作 ──────────────────────────────────────────────────────
+    function handleAction(action) {
+        hideToolbar();
+        var text = getSelectedText();
+        if (!text) return;
+
+        if (action === "copy") {
+            copyToClipboard(text).then(function () {
+                showToast("\u2705 \u5DF2\u590D\u5236");
+            });
+        } else if (action === "selectall") {
+            var article = document.getElementById("c");
+            if (article) {
+                var range = document.createRange();
+                range.selectNodeContents(article);
+                var sel = window.getSelection();
+                sel.removeAllRanges();
+                sel.addRange(range);
+                setTimeout(positionToolbar, 100);
+            }
+        } else if (action === "reference") {
+            handleReference(text);
         }
-        lastSelection = null;
     }
 
-    // ── 标记请求 ──────────────────────────────────────────────────
-    function showToast(msg, duration) {
-        duration = duration || 1500;
-        var toast = document.createElement("div");
-        toast.textContent = msg;
-        toast.style.cssText =
+    function handleReference(selText) {
+        selText = selText.substring(0, 2000);
+
+        var contextBefore = "";
+        var contextAfter = "";
+        if (rawMd && selText) {
+            var offsets = findTextInRawMd(selText);
+            if (offsets) {
+                var s = Math.max(0, offsets.start - 200);
+                contextBefore = rawMd.substring(s, offsets.start);
+                var e = Math.min(rawMd.length, offsets.end + 200);
+                contextAfter = rawMd.substring(offsets.end, e);
+            }
+        }
+
+        fetch("/api/share/reference", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                share_hash: SHARE_HASH_VAL,
+                vfs_path: VFS_PATH_VAL,
+                selected_text: selText,
+                context_before: contextBefore.substring(0, 500),
+                context_after: contextAfter.substring(0, 500),
+            }),
+        })
+            .then(function (resp) {
+                if (!resp.ok) {
+                    return resp.json().then(function (data) {
+                        throw new Error(data.detail || "Request failed");
+                    });
+                }
+                return resp.json();
+            })
+            .then(function (data) {
+                var refToken = "[reference:" + data.ref_hash + "]";
+                return copyToClipboard(refToken).then(function () {
+                    showToast("\uD83D\uDCCC \u5F15\u7528\u5DF2\u590D\u5236\uFF1A" + refToken);
+                });
+            })
+            .catch(function (err) {
+                showToast("\u274C \u5F15\u7528\u5931\u8D25\uFF1A" + err.message);
+            });
+    }
+
+    // ── Toast ────────────────────────────────────────────────────
+    function showToast(msg) {
+        if (toastEl && toastEl.parentNode) toastEl.parentNode.removeChild(toastEl);
+        toastEl = document.createElement("div");
+        toastEl.textContent = msg;
+        toastEl.style.cssText =
             "position:fixed;bottom:32px;left:50%;transform:translateX(-50%);z-index:99999;" +
             "background:#323232;color:#fff;padding:12px 24px;border-radius:8px;" +
             "font-size:15px;box-shadow:0 4px 12px rgba(0,0,0,.25);" +
             "transition:opacity .3s;opacity:1;max-width:90vw;text-align:center;";
-        document.body.appendChild(toast);
+        document.body.appendChild(toastEl);
         setTimeout(function () {
-            toast.style.opacity = "0";
+            toastEl.style.opacity = "0";
             setTimeout(function () {
-                if (toast.parentNode) toast.parentNode.removeChild(toast);
+                if (toastEl && toastEl.parentNode) toastEl.parentNode.removeChild(toastEl);
             }, 300);
-        }, duration);
+        }, 2000);
     }
 
+    // ── 剪贴板 ────────────────────────────────────────────────────
     function copyToClipboard(text) {
         if (navigator.clipboard && navigator.clipboard.writeText) {
             return navigator.clipboard.writeText(text).then(
@@ -130,7 +207,6 @@
                 function () { return false; }
             );
         }
-        // Fallback: execCommand
         try {
             var ta = document.createElement("textarea");
             ta.value = text;
@@ -146,86 +222,51 @@
         }
     }
 
-    function handleMarkSelection() {
-        if (floatBtn) floatBtn.style.display = "none";
-
-        if (!lastSelection || !lastSelection.text) {
-            showToast("\u26A0\uFE0F \u8BF7\u5148\u9009\u4E2D\u6587\u672C"); // ⚠️ 请先选中文本
-            return;
-        }
-
-        var selText = lastSelection.text.substring(0, 2000);
-
-        // 获取上下文：用选中文本在 rawMd 中反向搜索（lastIndexOf 避开 HTML 转义干扰）
-        var contextBefore = "";
-        var contextAfter = "";
-        if (rawMd && selText) {
-            var offsets = findTextInRawMd(selText);
-            if (offsets) {
-                var s = Math.max(0, offsets.start - 200);
-                contextBefore = rawMd.substring(s, offsets.start);
-                var e = Math.min(rawMd.length, offsets.end + 200);
-                contextAfter = rawMd.substring(offsets.end, e);
+    // ── 选中事件 ──────────────────────────────────────────────────
+    var debounceTimer = null;
+    function onSelectionChange() {
+        if (debounceTimer) clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(function () {
+            if (!getSelectedText()) {
+                hideToolbar();
+                return;
             }
-        }
-
-        var payload = {
-            share_hash: SHARE_HASH_VAL,
-            vfs_path: VFS_PATH_VAL,
-            selected_text: selText,
-            context_before: contextBefore.substring(0, 500),
-            context_after: contextAfter.substring(0, 500),
-        };
-
-        fetch("/api/share/reference", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload),
-        })
-            .then(function (resp) {
-                if (!resp.ok) {
-                    return resp.json().then(function (data) {
-                        throw new Error(data.detail || "Request failed");
-                    });
-                }
-                return resp.json();
-            })
-            .then(function (data) {
-                var refToken = "[reference:" + data.ref_hash + "]";
-                return copyToClipboard(refToken).then(function () {
-                    showToast("\uD83D\uDCCC \u5DF2\u6807\u8BB0\uFF1A" + refToken + "\uFF08\u5DF2\u590D\u5236\uFF09");
-                    // 📌 已标记：[reference:xxx]（已复制）
-                });
-            })
-            .catch(function (err) {
-                showToast("\u274C \u6807\u8BB0\u5931\u8D25\uFF1A" + err.message);
-                // ❌ 标记失败：...
-            });
+            positionToolbar();
+        }, 150);
     }
 
-    // ── 事件绑定 ──────────────────────────────────────────────────
+    // ── 初始化 ────────────────────────────────────────────────────
     function init() {
-        createFloatButton();
+        createToolbar();
 
-        document.addEventListener("mouseup", onSelectionChange);
-        document.addEventListener("touchend", onSelectionChange);
-        document.addEventListener("mousedown", hideFloatButton);
-        // 触摸开始时不立即隐藏（touchend 先触发再触发 mousedown 补充）
-        document.addEventListener("touchstart", function (e) {
-            if (floatBtn && !floatBtn.contains(e.target)) {
-                setTimeout(function () {
-                    if (floatBtn) floatBtn.style.display = "none";
-                }, 300);
+        // 拦截系统菜单（手机长按 / 桌面右键）
+        document.addEventListener("contextmenu", function (e) {
+            if (getSelectedText()) {
+                e.preventDefault();
+                // 弹出我们的工具栏
+                positionToolbar();
             }
         });
-        // 滚动时隐藏
-        window.addEventListener("scroll", function () {
-            if (floatBtn) floatBtn.style.display = "none";
-        }, { passive: true });
 
-        // 保存 rawMd 到 window（在页面脚本中设置）
-        // 尝试从原始 safe_md 变量获取（它已通过 marked.js 渲染成 HTML）
-        // 我们只能从 DOM 重建，所以 rawMd 在 share.py 模板中设置
+        // 选中后显示工具栏
+        document.addEventListener("mouseup", onSelectionChange);
+        document.addEventListener("touchend", onSelectionChange);
+        document.addEventListener("keyup", onSelectionChange); // Ctrl+A
+
+        // 点其他地方隐藏
+        document.addEventListener("mousedown", function (e) {
+            if (toolbar && !toolbar.contains(e.target)) {
+                hideToolbar();
+            }
+        });
+        document.addEventListener("touchstart", function (e) {
+            if (toolbar && !toolbar.contains(e.target)) {
+                setTimeout(hideToolbar, 200);
+            }
+        });
+
+        // 滚动隐藏
+        window.addEventListener("scroll", hideToolbar, { passive: true });
     }
 
     if (document.readyState === "loading") {
