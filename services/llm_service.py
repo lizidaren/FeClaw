@@ -95,6 +95,8 @@ def _extract_balanced_json(text: str) -> Optional[str]:
 class LLMProvider(ABC):
     """LLM提供商抽象基类"""
 
+    last_usage: Optional[Dict] = None
+
     @abstractmethod
     async def chat(
         self,
@@ -167,9 +169,13 @@ class DeepSeekProvider(LLMProvider):
                                 break
                             try:
                                 parsed = json.loads(data)
-                                content = parsed.get("choices", [{}])[0].get("delta", {}).get("content", "")
-                                if content:
-                                    yield content
+                                if "usage" in parsed:
+                                    self.last_usage = parsed["usage"]
+                                choices = parsed.get("choices")
+                                if choices:
+                                    content = choices[0].get("delta", {}).get("content", "")
+                                    if content:
+                                        yield content
                             except json.JSONDecodeError:
                                 continue
             else:
@@ -180,6 +186,7 @@ class DeepSeekProvider(LLMProvider):
                 )
                 response.raise_for_status()
                 result = response.json()
+                self.last_usage = result.get("usage")
                 content = result.get("choices", [{}])[0].get("message", {}).get("content", "")
                 yield content
 
@@ -240,14 +247,18 @@ class DoubaoProvider(LLMProvider):
                                 break
                             try:
                                 parsed = json.loads(data)
-                                # 豆包的推理过程在 reasoning_content 字段中
-                                reasoning_content = parsed.get("choices", [{}])[0].get("delta", {}).get("reasoning_content", "")
-                                content = parsed.get("choices", [{}])[0].get("delta", {}).get("content", "")
-                                # 优先输出推理过程，然后再输出内容
-                                if reasoning_content:
-                                    yield reasoning_content
-                                if content:
-                                    yield content
+                                if "usage" in parsed:
+                                    self.last_usage = parsed["usage"]
+                                choices = parsed.get("choices")
+                                if choices:
+                                    # 豆包的推理过程在 reasoning_content 字段中
+                                    reasoning_content = choices[0].get("delta", {}).get("reasoning_content", "")
+                                    content = choices[0].get("delta", {}).get("content", "")
+                                    # 优先输出推理过程，然后再输出内容
+                                    if reasoning_content:
+                                        yield reasoning_content
+                                    if content:
+                                        yield content
                             except json.JSONDecodeError:
                                 continue
             else:
@@ -258,6 +269,7 @@ class DoubaoProvider(LLMProvider):
                 )
                 response.raise_for_status()
                 result = response.json()
+                self.last_usage = result.get("usage")
                 content = result.get("choices", [{}])[0].get("message", {}).get("content", "")
                 yield content
 
@@ -321,9 +333,13 @@ class ZhipuAIProvider(LLMProvider):
                                 break
                             try:
                                 parsed = json.loads(data)
-                                content = parsed.get("choices", [{}])[0].get("delta", {}).get("content", "")
-                                if content:
-                                    yield content
+                                if "usage" in parsed:
+                                    self.last_usage = parsed["usage"]
+                                choices = parsed.get("choices")
+                                if choices:
+                                    content = choices[0].get("delta", {}).get("content", "")
+                                    if content:
+                                        yield content
                             except json.JSONDecodeError:
                                 continue
             else:
@@ -334,6 +350,7 @@ class ZhipuAIProvider(LLMProvider):
                 )
                 response.raise_for_status()
                 result = response.json()
+                self.last_usage = result.get("usage")
                 content = result.get("choices", [{}])[0].get("message", {}).get("content", "")
                 yield content
 
@@ -390,9 +407,13 @@ class KimiProvider(LLMProvider):
                                 break
                             try:
                                 parsed = json.loads(data)
-                                content = parsed.get("choices", [{}])[0].get("delta", {}).get("content", "")
-                                if content:
-                                    yield content
+                                if "usage" in parsed:
+                                    self.last_usage = parsed["usage"]
+                                choices = parsed.get("choices")
+                                if choices:
+                                    content = choices[0].get("delta", {}).get("content", "")
+                                    if content:
+                                        yield content
                             except json.JSONDecodeError:
                                 continue
             else:
@@ -403,6 +424,7 @@ class KimiProvider(LLMProvider):
                 )
                 response.raise_for_status()
                 result = response.json()
+                self.last_usage = result.get("usage")
                 content = result.get("choices", [{}])[0].get("message", {}).get("content", "")
                 yield content
 
@@ -466,6 +488,8 @@ class QwenProvider(LLMProvider):
                                 break
                             try:
                                 parsed = json.loads(data)
+                                if "usage" in parsed:
+                                    self.last_usage = parsed["usage"]
                                 choices = parsed.get("choices", [])
                                 if not choices:
                                     continue
@@ -482,6 +506,7 @@ class QwenProvider(LLMProvider):
                 )
                 response.raise_for_status()
                 result = response.json()
+                self.last_usage = result.get("usage")
                 content = result.get("choices", [{}])[0].get("message", {}).get("content", "")
                 yield content
 
@@ -611,20 +636,22 @@ class LLMService:
 
         provider_name = provider or settings.DEFAULT_LLM_PROVIDER
         provider_instance = self.get_provider(provider_name)
+        actual_model = model or settings.DEFAULT_LLM_MODEL
 
-        # 记录统计（异步，不阻塞主流程）
-        asyncio.create_task(self._record_stat(provider_name, model or settings.DEFAULT_LLM_MODEL, request_type))
-
-        async for chunk in provider_instance.chat(
-            messages=messages,
-            stream=stream,
-            response_format=response_format,
-            model=model,
-            reasoning_effort=reasoning_effort,
-            max_tokens=max_tokens,
-            disable_thinking=disable_thinking
-        ):
-            yield chunk
+        try:
+            async for chunk in provider_instance.chat(
+                messages=messages,
+                stream=stream,
+                response_format=response_format,
+                model=model,
+                reasoning_effort=reasoning_effort,
+                max_tokens=max_tokens,
+                disable_thinking=disable_thinking
+            ):
+                yield chunk
+        finally:
+            tokens_used = provider_instance.last_usage.get("total_tokens", 0) if provider_instance.last_usage else 0
+            asyncio.create_task(self._record_stat(provider_name, actual_model, request_type, tokens_used))
     
     async def chat_json(
         self,
@@ -701,9 +728,6 @@ class LLMService:
         }
         if tools:
             payload["tools"] = tools
-
-        # 记录统计
-        asyncio.create_task(self._record_stat(provider_name, model or settings.MAIN_TEXT_MODEL, request_type))
 
         client = await self._ensure_http_client()
 
@@ -798,6 +822,11 @@ class LLMService:
                     break
         # ── 拒绝重试循环结束 ──────────────────────────────
 
+        # 记录统计（异步，不阻塞主流程）
+        actual_model = payload.get("model", model or settings.MAIN_TEXT_MODEL)
+        tokens_used = result.get("usage", {}).get("total_tokens", 0)
+        asyncio.create_task(self._record_stat(provider_name, actual_model, request_type, tokens_used))
+
         return {
             "content": content,
             "tool_calls": tool_calls
@@ -845,12 +874,10 @@ class LLMService:
             elif reasoning_effort == "off":
                 payload["thinking"] = {"type": "disabled"}
 
-        # 记录统计
-        asyncio.create_task(self._record_stat(provider_name, model or settings.MAIN_TEXT_MODEL, request_type))
-
         full_content = ""
         full_reasoning = ""
         tool_calls_data = None
+        usage_data = None
 
         client = await self._ensure_http_client()
 
@@ -899,6 +926,8 @@ class LLMService:
 
                 try:
                     parsed = json.loads(data)
+                    if "usage" in parsed:
+                        usage_data = parsed["usage"]
                     choices = parsed.get("choices", [])
                     if not choices:
                         continue  # 某些模型的中间 chunk choices 为空，跳过
@@ -1005,6 +1034,10 @@ class LLMService:
                         "arguments": json.dumps(_params, ensure_ascii=False)
                     }
                 }]
+        # 记录统计（异步，不阻塞主流程）
+        tokens_used = usage_data.get("total_tokens", 0) if usage_data else 0
+        asyncio.create_task(self._record_stat(provider_name, payload.get("model", ""), request_type, tokens_used))
+
         yield {
             "type": "done",
             "content": full_content,
@@ -1022,14 +1055,15 @@ class LLMService:
         from services.message_compactor import estimate_tokens as _est
         return _est(text)
     
-    async def _record_stat(self, provider: str, model: str, request_type: str):
+    async def _record_stat(self, provider: str, model: str, request_type: str, tokens_used: int = 0):
         """记录LLM调用统计"""
         db = SessionLocal()
         try:
             stat = LLMStat(
                 provider=provider,
                 model=model,
-                request_type=request_type
+                request_type=request_type,
+                tokens_used=tokens_used
             )
             db.add(stat)
             db.commit()
