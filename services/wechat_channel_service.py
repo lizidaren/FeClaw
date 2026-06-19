@@ -301,7 +301,8 @@ class WeChatChannelService:
             if original_count > len(messages):
                 logger.info(f"[COMPACT] {original_count} → {len(messages)} messages")
 
-            # 构建用户消息
+            # 构建用户消息（自动解析引用令牌）
+            user_input = await chat_service._resolve_references(user_input)
             if image_url:
                 if image_url.startswith('/'):
                     vfs_path = image_url
