@@ -182,7 +182,7 @@ body{{max-width:800px;margin:40px auto;padding:0 20px;}}
 <script>
 mermaid.initialize({{startOnLoad:false,theme:'default'}});
 
-marked.use({{renderer:{{code:function({{text,lang}}){{if(lang==='mermaid')return'<pre class="mermaid">'+text+'</pre>';if(lang)return'<pre><code class="language-'+lang+'">'+text+'</code></pre>';return'<pre><code>'+text+'</code></pre>';}}}}}});
+marked.use({{renderer:{{code:function(code,lang){{if(lang==='mermaid')return'<pre class="mermaid">'+code+'</pre>';if(lang)return'<pre><code class="language-'+lang+'">'+code+'</code></pre>';return'<pre><code>'+code+'</code></pre>';}}}}}});
 
 var html = marked.parse({safe_md});
 html = html.replace(/\\$\\$([\\s\\S]*?)\\$\\$/g, function(_, eq) {{
@@ -294,7 +294,7 @@ body{{max-width:800px;margin:40px auto;padding:0 20px;}}
 </head><body><article class="markdown-body" id="c"></article>
 <script>
 mermaid.initialize({{startOnLoad:false,theme:'default'}});
-marked.use({{renderer:{{code:function({{text,lang}}){{if(lang==='mermaid')return'<pre class="mermaid">'+text+'</pre>';if(lang)return'<pre><code class="language-'+lang+'">'+text+'</code></pre>';return'<pre><code>'+text+'</code></pre>';}}}}}});
+marked.use({{renderer:{{code:function(code,lang){{if(lang==='mermaid')return'<pre class="mermaid">'+code+'</pre>';if(lang)return'<pre><code class="language-'+lang+'">'+code+'</code></pre>';return'<pre><code>'+code+'</code></pre>';}}}}}});
 var html = marked.parse({safe_md});
 html = html.replace(/\\$\\$([\\s\\S]*?)\\$\\$/g, function(_, eq) {{
     try {{ return katex.renderToString(eq, {{displayMode:true,throwOnError:false}}); }} catch(e) {{ return '$$'+eq+'$$'; }}
