@@ -222,7 +222,8 @@ mermaid.run({{nodes:document.querySelectorAll('.mermaid')}});
                 _fname = os.path.basename(vfs_path)
                 return Response(content=content, media_type=ct,
                               headers={"Content-Disposition": f"inline; filename*=UTF-8''{quote(_fname)}"})
-        except Exception:
+        except Exception as e:
+            logger.error(f"[SHARE DEBUG] Exception for key {cos_key}: {type(e).__name__}: {e}")
             continue
 
     raise HTTPException(status_code=404, detail="文件不存在或已删除")
