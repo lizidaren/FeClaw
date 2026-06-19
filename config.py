@@ -97,6 +97,7 @@ class Settings(BaseSettings):
     # 文件存储后端: "auto" | "cos" | "local"
     STORAGE_MODE: str = "auto"
     LOCAL_STORAGE_ROOT: str = "./feclaw-storage"
+    PUBLIC_STORAGE_ROOT: str = "./feclaw-public"
 
     # 向量存储后端: "cos"（腾讯云）或 "sqlite"（本地 sqlite-vec）
     VECTOR_STORAGE_BACKEND: str = "cos"

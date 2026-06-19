@@ -1,9 +1,12 @@
 """
 LocalStorage — 本地文件系统存储后端
 
-所有路径映射规则:
-    COS key:    feclaw/user_1/original/abc.jpg
-    本地路径:   ./feclaw-storage/feclaw/user_1/original/abc.jpg
+路径映射规则:
+    COS key (用户数据):  feclaw/user_1/original/abc.jpg
+    本地路径:             LOCAL_STORAGE_ROOT/feclaw/user_1/original/abc.jpg
+
+    COS key (/public/ 公共数据):  feclaw/public/feclaw/index.md
+    本地路径:                      PUBLIC_STORAGE_ROOT/feclaw/public/feclaw/index.md
 """
 
 import os
@@ -17,20 +20,39 @@ logger = logging.getLogger(__name__)
 
 
 class LocalStorage(FileStorage):
-    """本地文件系统存储实现"""
+    """本地文件系统存储实现
 
-    def __init__(self, root_dir: str = "./feclaw-storage"):
+    /public/ 路径映射到独立的 public_root，便于权限控制和目录隔离。
+    """
+
+    def __init__(self, root_dir: str = "./feclaw-storage", public_root: str = "./feclaw-public"):
         self.root = os.path.abspath(root_dir)
+        self.public_root = os.path.abspath(public_root) if public_root else self.root
         os.makedirs(self.root, exist_ok=True)
+        if self.public_root != self.root:
+            os.makedirs(self.public_root, exist_ok=True)
+            logger.info(f"[LocalStorage] public_root={self.public_root}")
         logger.info(f"[LocalStorage] root={self.root}")
+
+    def _resolve_root(self, key: str) -> str:
+        """根据 key 路径决定使用哪个根目录
+
+        - /public/ 或 feclaw/public/ 开头的 key → public_root
+        - 其他 → root
+        """
+        normalized = key.lstrip("/")
+        if normalized.startswith("public/") or "/public/" in normalized:
+            return self.public_root
+        return self.root
 
     def _resolve(self, key: str) -> str:
         """安全解析 key 到本地路径（防路径穿越）"""
         safe = key.lstrip("/").replace("\\", "/")
-        path = os.path.realpath(os.path.join(self.root, safe))
-        root_real = os.path.realpath(self.root)
-        if not path.startswith(root_real + os.sep) and path != root_real:
-            raise ValueError(f"Path traversal detected: {key}")
+        base = self._resolve_root(key)
+        path = os.path.realpath(os.path.join(base, safe))
+        base_real = os.path.realpath(base)
+        if not path.startswith(base_real + os.sep) and path != base_real:
+            raise ValueError(f"Path traversal detected: {key} (base={base})")
         return path
 
     def get_file_content(self, key: str) -> Optional[bytes]:
@@ -63,6 +85,7 @@ class LocalStorage(FileStorage):
 
     def list_objects(self, prefix: str, max_keys: int = 1000) -> Optional[List[Dict]]:
         dir_path = self._resolve(prefix)
+        base = self._resolve_root(prefix)
         if not os.path.isdir(dir_path):
             return []
         results = []
@@ -70,7 +93,7 @@ class LocalStorage(FileStorage):
             for root, dirs, files in os.walk(dir_path):
                 for f in files:
                     full = os.path.join(root, f)
-                    rel = os.path.relpath(full, self.root).replace("\\", "/")
+                    rel = os.path.relpath(full, base).replace("\\", "/")
                     stat = os.stat(full)
                     results.append({
                         "Key": rel,

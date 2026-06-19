@@ -88,7 +88,8 @@ def create_file_storage(mode: str = "auto") -> FileStorage:
     if mode == "local":
         from services.local_storage import LocalStorage
         root = getattr(settings, "LOCAL_STORAGE_ROOT", "./feclaw-storage")
-        return LocalStorage(root_dir=root)
+        pub_root = getattr(settings, "PUBLIC_STORAGE_ROOT", "./feclaw-public")
+        return LocalStorage(root_dir=root, public_root=pub_root)
 
     cos_configured = all([
         settings.TENCENT_COS_SECRET_ID,
@@ -107,6 +108,7 @@ def create_file_storage(mode: str = "auto") -> FileStorage:
         logger.info("COS not configured, falling back to LocalStorage")
         from services.local_storage import LocalStorage
         root = getattr(settings, "LOCAL_STORAGE_ROOT", "./feclaw-storage")
-        return LocalStorage(root_dir=root)
+        pub_root = getattr(settings, "PUBLIC_STORAGE_ROOT", "./feclaw-public")
+        return LocalStorage(root_dir=root, public_root=pub_root)
 
     raise ValueError(f"Unknown storage mode: {mode}")
