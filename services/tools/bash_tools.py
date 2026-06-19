@@ -57,6 +57,26 @@ class BashToolsMixin(AgentToolsServiceBase):
         if check_fuse_available() and self._has_active_sandbox():
             return await asyncio.to_thread(self._exec_bash_in_sandbox, stripped)
 
+        # Desktop 模式：bwrap 不可用时走 desktop_relay 请求授权
+        from config import settings
+        if settings.DESKTOP_ENABLED:
+            # 检查 bwrap 是否可用（不可用时走 desktop_relay）
+            import shutil
+            bwrap_available = shutil.which("bwrap") is not None
+            if not bwrap_available:
+                # 走 Desktop relay 请求授权
+                cmd_parts = stripped.split()
+                command = cmd_parts[0] if cmd_parts else stripped
+                args = cmd_parts[1:] if len(cmd_parts) > 1 else []
+                cwd = getattr(self._vfs, '_cwd', '/workspace')
+                # 风险等级：危险命令高风险，其他中风险
+                risk_level = 2 if command in ("rm", "dd", "mkfs", ":(){:|:&};:", "shutdown", "reboot") else 1
+                from services.desktop_relay import relay
+                consent = await relay.request_consent(command, args, cwd, risk_level)
+                if consent.get("decision") != "allow":
+                    return f"Error: Desktop 拒绝执行命令 '{stripped}' ({consent.get('reason', 'unknown')})"
+                # 授权通过，继续执行
+
         # 有活跃 sandbox 且是文件操作时，失效 MetadataCache 确保缓存与 sandbox 一致
         if self._has_active_sandbox() and self._is_file_operation(stripped):
             from services.cache_manager import MetadataCache

@@ -174,6 +174,10 @@ class Settings(BaseSettings):
     STATIC_SITE_MAX_SIZE: int = 100 * 1024 * 1024  # 100MB
     STATIC_SITE_SUBDOMAIN_LENGTH: int = 8
 
+    # Desktop 集成配置
+    DESKTOP_ENABLED: bool = False      # 是否启用 Desktop WS 通道
+    DESKTOP_WS_URL: str = "ws://127.0.0.1:19999"  # Desktop 监听的 WS 地址
+
     # 沙箱执行环境配置
     SANDBOX_MAX_CONCURRENT: int = 5
     SANDBOX_MAX_RUNTIME_HOURS: int = 12
