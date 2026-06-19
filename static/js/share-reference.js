@@ -14,41 +14,57 @@
     var toolbar = null;
     var toastEl = null;
     var _savedSelection = "";   // 在工具栏显示时保存选中的文本，避免 iOS 点击后丢失选择
+    var _savedRange = null;     // 保存选中的 DOM Range，用于精确提取上下文
 
-    // ── rawMd 文本查找 ──────────────────────────────────────────────
-    function findTextInRawMd(selectedText) {
-        if (!rawMd || !selectedText) return null;
-        // 先用 indexOf 找第一个匹配，再用 lastIndexOf 找最后一个
-        // 选择上下文最丰富（周围的空白/换行更少）的那一个
-        var firstIdx = rawMd.indexOf(selectedText);
-        var lastIdx = rawMd.lastIndexOf(selectedText);
-
-        if (firstIdx === -1) return null;
-
-        // 如果只有一个匹配
-        if (firstIdx === lastIdx) {
-            return { start: firstIdx, end: firstIdx + selectedText.length };
+    // ── 从 DOM Range 提取上下文（精确，不依赖全文搜索）─────────────
+    function getContextFromRange(range, maxChars) {
+        maxChars = maxChars || 200;
+        // 获取选中前最多 maxChars 字符的文本
+        function getTextBefore(node, offset, limit) {
+            var parts = [];
+            // 先从当前节点取
+            if (node.nodeType === Node.TEXT_NODE) {
+                parts.unshift(node.textContent.substring(0, offset));
+            }
+            var cur = node.previousSibling || node.parentNode;
+            while (parts.join("").length < limit && cur) {
+                if (cur.nodeType === Node.TEXT_NODE) {
+                    parts.unshift(cur.textContent);
+                } else if (cur.nodeType === Node.ELEMENT_NODE && cur.id !== "c") {
+                    parts.unshift(cur.textContent || "");
+                } else if (cur.id === "c") {
+                    break;
+                }
+                cur = cur.previousSibling || cur.parentNode;
+            }
+            var result = parts.join("");
+            return result.length > limit ? result.slice(-limit) : result;
         }
 
-        // 多个匹配：选前后换行符最多的（更可能是独立段落/句子）
-        function scorePos(idx) {
-            var before = rawMd.substring(Math.max(0, idx - 5), idx);
-            var after = rawMd.substring(idx + selectedText.length, idx + selectedText.length + 5);
-            var score = 0;
-            // 前后有换行加分（段落边界）
-            if (before.includes("\n")) score += 3;
-            if (after.includes("\n")) score += 3;
-            // 前后有空格/标点也加分（单词边界）
-            if (/[\s\(\)\[\]「」【】,.]/.test(before.slice(-1))) score += 1;
-            if (/[\s\(\)\[\]「」【】,.]/.test(after[0])) score += 1;
-            return score;
+        // 获取选中后最多 maxChars 字符的文本
+        function getTextAfter(node, offset, limit) {
+            var parts = [];
+            if (node.nodeType === Node.TEXT_NODE) {
+                parts.push(node.textContent.substring(offset));
+            }
+            var cur = node.nextSibling || node.parentNode;
+            while (parts.join("").length < limit && cur) {
+                if (cur.nodeType === Node.TEXT_NODE) {
+                    parts.push(cur.textContent);
+                } else if (cur.nodeType === Node.ELEMENT_NODE && cur.id !== "c") {
+                    parts.push(cur.textContent || "");
+                } else if (cur.id === "c") {
+                    break;
+                }
+                cur = cur.nextSibling || cur.parentNode;
+            }
+            var result = parts.join("");
+            return result.length > limit ? result.slice(0, limit) : result;
         }
 
-        var firstScore = scorePos(firstIdx);
-        var lastScore = scorePos(lastIdx);
         return {
-            start: lastScore >= firstScore ? lastIdx : firstIdx,
-            end: (lastScore >= firstScore ? lastIdx : firstIdx) + selectedText.length
+            before: getTextBefore(range.startContainer, range.startOffset, maxChars),
+            after: getTextAfter(range.endContainer, range.endOffset, maxChars),
         };
     }
 
@@ -142,6 +158,7 @@
         toolbar.style.top = top + "px";
         toolbar.style.display = "block";
         _savedSelection = getSelectedText();
+        try { _savedRange = sel.getRangeAt(0); } catch(e) { _savedRange = null; }
         return true;
     }
 
@@ -154,6 +171,7 @@
         hideToolbar();
         var text = getSelectedText() || _savedSelection;
         _savedSelection = "";
+        _savedRange = null;
         if (!text) return;
 
         if (action === "copy") {
@@ -178,17 +196,10 @@
     function handleReference(selText) {
         selText = selText.substring(0, 2000);
 
-        var contextBefore = "";
-        var contextAfter = "";
-        if (rawMd && selText) {
-            var offsets = findTextInRawMd(selText);
-            if (offsets) {
-                var s = Math.max(0, offsets.start - 200);
-                contextBefore = rawMd.substring(s, offsets.start);
-                var e = Math.min(rawMd.length, offsets.end + 200);
-                contextAfter = rawMd.substring(offsets.end, e);
-            }
-        }
+        // 从保存的 DOM Range 精确提取上下文
+        var ctx = _savedRange ? getContextFromRange(_savedRange, 200) : { before: "", after: "" };
+        var contextBefore = ctx.before || "";
+        var contextAfter = ctx.after || "";
 
         fetch("/api/share/reference", {
             method: "POST",
