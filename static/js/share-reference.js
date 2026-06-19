@@ -19,53 +19,24 @@
     // ── 从 DOM Range 提取上下文（精确，不依赖全文搜索）─────────────
     function getContextFromRange(range, maxChars) {
         maxChars = maxChars || 200;
-        // 获取选中前最多 maxChars 字符的文本
-        function getTextBefore(node, offset, limit) {
-            var parts = [];
-            // 先从当前节点取
-            if (node.nodeType === Node.TEXT_NODE) {
-                parts.unshift(node.textContent.substring(0, offset));
-            }
-            var cur = node.previousSibling || node.parentNode;
-            while (parts.join("").length < limit && cur) {
-                if (cur.nodeType === Node.TEXT_NODE) {
-                    parts.unshift(cur.textContent);
-                } else if (cur.nodeType === Node.ELEMENT_NODE && cur.id !== "c") {
-                    parts.unshift(cur.textContent || "");
-                } else if (cur.id === "c") {
-                    break;
-                }
-                cur = cur.previousSibling || cur.parentNode;
-            }
-            var result = parts.join("");
-            return result.length > limit ? result.slice(-limit) : result;
-        }
+        var article = document.getElementById("c");
+        if (!article) return { before: "", after: "" };
 
-        // 获取选中后最多 maxChars 字符的文本
-        function getTextAfter(node, offset, limit) {
-            var parts = [];
-            if (node.nodeType === Node.TEXT_NODE) {
-                parts.push(node.textContent.substring(offset));
-            }
-            var cur = node.nextSibling || node.parentNode;
-            while (parts.join("").length < limit && cur) {
-                if (cur.nodeType === Node.TEXT_NODE) {
-                    parts.push(cur.textContent);
-                } else if (cur.nodeType === Node.ELEMENT_NODE && cur.id !== "c") {
-                    parts.push(cur.textContent || "");
-                } else if (cur.id === "c") {
-                    break;
-                }
-                cur = cur.nextSibling || cur.parentNode;
-            }
-            var result = parts.join("");
-            return result.length > limit ? result.slice(0, limit) : result;
-        }
+        // 从文章开头到选中位置 → 取最后 maxChars 字符
+        var beforeRange = document.createRange();
+        beforeRange.setStart(article, 0);
+        beforeRange.setEnd(range.startContainer, range.startOffset);
+        var beforeText = beforeRange.toString();
+        var before = beforeText.length > maxChars ? beforeText.slice(-maxChars) : beforeText;
 
-        return {
-            before: getTextBefore(range.startContainer, range.startOffset, maxChars),
-            after: getTextAfter(range.endContainer, range.endOffset, maxChars),
-        };
+        // 从选中结束到文章末尾 → 取前 maxChars 字符
+        var afterRange = document.createRange();
+        afterRange.setStart(range.endContainer, range.endOffset);
+        afterRange.setEnd(article, article.childNodes.length);
+        var afterText = afterRange.toString();
+        var after = afterText.length > maxChars ? afterText.slice(0, maxChars) : afterText;
+
+        return { before: before, after: after };
     }
 
     // ── 工具栏 DOM ─────────────────────────────────────────────────
