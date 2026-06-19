@@ -222,7 +222,7 @@
         if (ctxAfter) {
             displayHtml += escapeHtml(ctxAfter.slice(0, 150));
         }
-        renderedHtml = '<div class="feclaw-ref-markdown" style="color:#d4d4d4;font-size:14px;line-height:1.8;">' +
+        var renderedHtml = '<div class="feclaw-ref-markdown" style="color:#d4d4d4;font-size:14px;line-height:1.8;">' +
             displayHtml + '</div>';
 
         var modal = document.createElement("div");
