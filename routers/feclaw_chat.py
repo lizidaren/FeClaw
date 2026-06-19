@@ -183,6 +183,19 @@ async def chat_websocket(websocket: WebSocket):
     agent_hash = extract_hash_from_host(host) if host else None
     db = SessionLocal()
 
+    # 🔒 安全校验：验证 user 是否拥有该 agent（防止 subdomain 劫持）
+    if agent_hash:
+        from models.agent_profile import AgentProfile
+        agent = db.query(AgentProfile).filter(AgentProfile.hash == agent_hash).first()
+        if not agent:
+            await websocket.send_json({"type": "error", "code": "AGENT_NOT_FOUND", "message": "Agent 不存在"})
+            await websocket.close(code=4004)
+            return
+        if agent.user_id != user_id:
+            await websocket.send_json({"type": "error", "code": "FORBIDDEN", "message": "无权访问此 Agent"})
+            await websocket.close(code=4003)
+            return
+
     async def heartbeat():
         """每 30 秒 ping 一次保持连接，首次立即发送"""
         try:
