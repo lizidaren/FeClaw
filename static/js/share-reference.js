@@ -223,10 +223,11 @@
             // Selected text
             '<div style="padding:16px 20px 8px;">' +
             '<div style="font-size:12px;color:#888;margin-bottom:6px;">\u9009\u4E2D\u5185\u5BB9</div>' +
-            '<div style="background:#333;border-radius:8px;padding:12px;font-size:14px;line-height:1.7;' +
-            'max-height:180px;overflow-y:auto;word-break:break-word;">' +
+            '<pre style="background:#1e1e1e;border:1px solid #3a3a3a;border-radius:8px;padding:12px;' +
+            'font-size:14px;line-height:1.8;max-height:180px;overflow-y:auto;word-break:break-word;' +
+            'white-space:pre-wrap;font-family:\'PingFang SC\',\'Microsoft YaHei\',sans-serif;color:#d4d4d4;margin:0;">' +
             displayText +
-            '</div></div>' +
+            '</pre></div>' +
             // Reference token
             '<div style="padding:0 20px 8px;">' +
             '<div style="font-size:12px;color:#888;margin-bottom:6px;">\u5F15\u7528\u6807\u8BB0\uFF08\u5DF2\u81EA\u52A8\u590D\u5236\uFF09</div>' +
