@@ -18,9 +18,38 @@
     // ── rawMd 文本查找 ──────────────────────────────────────────────
     function findTextInRawMd(selectedText) {
         if (!rawMd || !selectedText) return null;
-        var idx = rawMd.lastIndexOf(selectedText);
-        if (idx === -1) return null;
-        return { start: idx, end: idx + selectedText.length };
+        // 先用 indexOf 找第一个匹配，再用 lastIndexOf 找最后一个
+        // 选择上下文最丰富（周围的空白/换行更少）的那一个
+        var firstIdx = rawMd.indexOf(selectedText);
+        var lastIdx = rawMd.lastIndexOf(selectedText);
+
+        if (firstIdx === -1) return null;
+
+        // 如果只有一个匹配
+        if (firstIdx === lastIdx) {
+            return { start: firstIdx, end: firstIdx + selectedText.length };
+        }
+
+        // 多个匹配：选前后换行符最多的（更可能是独立段落/句子）
+        function scorePos(idx) {
+            var before = rawMd.substring(Math.max(0, idx - 5), idx);
+            var after = rawMd.substring(idx + selectedText.length, idx + selectedText.length + 5);
+            var score = 0;
+            // 前后有换行加分（段落边界）
+            if (before.includes("\n")) score += 3;
+            if (after.includes("\n")) score += 3;
+            // 前后有空格/标点也加分（单词边界）
+            if (/[\s\(\)\[\]「」【】,.]/.test(before.slice(-1))) score += 1;
+            if (/[\s\(\)\[\]「」【】,.]/.test(after[0])) score += 1;
+            return score;
+        }
+
+        var firstScore = scorePos(firstIdx);
+        var lastScore = scorePos(lastIdx);
+        return {
+            start: lastScore >= firstScore ? lastIdx : firstIdx,
+            end: (lastScore >= firstScore ? lastIdx : firstIdx) + selectedText.length
+        };
     }
 
     // ── 工具栏 DOM ─────────────────────────────────────────────────
@@ -200,14 +229,16 @@
             "background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;" +
             "animation:fadeIn .2s;";
 
-        // Build selected text display (rendered as markdown, dark theme)
+        // Build selected text display
+        // 避免全文搜索匹配乱跑：只把选中文本加粗，上下文原样显示
         var displayMd = "";
         if (ctxBefore) {
-            displayMd += ctxBefore.slice(-120);
+            // 用 ` 代码块包裹上下文，避免 markdown 语法冲突和误匹配
+            displayMd += "```\n" + ctxBefore.slice(-150) + "\n```\n\n";
         }
-        displayMd += "**" + selText + "**";
+        displayMd += "**" + selText + "**\n\n";
         if (ctxAfter) {
-            displayMd += ctxAfter.slice(0, 120);
+            displayMd += "```\n" + ctxAfter.slice(0, 150) + "\n```";
         }
         var renderedHtml = marked.parse(displayMd);
 
