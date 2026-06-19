@@ -141,6 +141,7 @@ async def resolve_share_by_slug(slug: str, request: Request, db: Session = Depen
         raise HTTPException(status_code=404, detail="分享链接不存在或已过期")
 
     vfs_path = mapping.vfs_path
+    logger.warning(f"[SHARE DEBUG] slug={slug} agent_hash={agent_hash!r} mapping.agent_hash={mapping.agent_hash!r} vfs_path={vfs_path}")
 
     # 通过 COS 获取文件（复用现有逻辑）
     from services.storage_service import StorageService
