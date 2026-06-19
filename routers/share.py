@@ -28,6 +28,9 @@ GGB_TEMPLATE_2D = """<!DOCTYPE html>
 .markdown-body pre{{overflow-x:auto;}}
 .katex-display{{overflow-x:auto;overflow-y:hidden;max-width:100%;}}
 @keyframes fadeIn{{from{{opacity:0;}}to{{opacity:1;}}}}
+.feclaw-ref-markdown strong{{color:#f0c040;}}
+.feclaw-ref-markdown code{{background:#333;color:#7ecfff;padding:1px 5px;border-radius:3px;font-size:13px;}}
+.feclaw-ref-markdown a{{color:#5b7cfa;}}
 </style>
 </head>
 <body>
@@ -74,6 +77,9 @@ GGB_TEMPLATE_3D = """<!DOCTYPE html>
 .markdown-body pre{{overflow-x:auto;}}
 .katex-display{{overflow-x:auto;overflow-y:hidden;max-width:100%;}}
 @keyframes fadeIn{{from{{opacity:0;}}to{{opacity:1;}}}}
+.feclaw-ref-markdown strong{{color:#f0c040;}}
+.feclaw-ref-markdown code{{background:#333;color:#7ecfff;padding:1px 5px;border-radius:3px;font-size:13px;}}
+.feclaw-ref-markdown a{{color:#5b7cfa;}}
 </style>
 </head>
 <body>
@@ -189,6 +195,9 @@ body{{max-width:800px;margin:40px auto;padding:0 20px;-webkit-touch-callout:none
 .markdown-body pre{{overflow-x:auto;}}
 .katex-display{{overflow-x:auto;overflow-y:hidden;max-width:100%;}}
 @keyframes fadeIn{{from{{opacity:0;}}to{{opacity:1;}}}}
+.feclaw-ref-markdown strong{{color:#f0c040;}}
+.feclaw-ref-markdown code{{background:#333;color:#7ecfff;padding:1px 5px;border-radius:3px;font-size:13px;}}
+.feclaw-ref-markdown a{{color:#5b7cfa;}}
 </style>
 </head><body><article class="markdown-body" id="c"></article>
 <script>
@@ -306,6 +315,9 @@ body{{max-width:800px;margin:40px auto;padding:0 20px;-webkit-touch-callout:none
 .markdown-body pre{{overflow-x:auto;}}
 .katex-display{{overflow-x:auto;overflow-y:hidden;max-width:100%;}}
 @keyframes fadeIn{{from{{opacity:0;}}to{{opacity:1;}}}}
+.feclaw-ref-markdown strong{{color:#f0c040;}}
+.feclaw-ref-markdown code{{background:#333;color:#7ecfff;padding:1px 5px;border-radius:3px;font-size:13px;}}
+.feclaw-ref-markdown a{{color:#5b7cfa;}}
 </style>
 </head><body><article class="markdown-body" id="c"></article>
 <script>

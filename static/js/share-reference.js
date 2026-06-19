@@ -200,16 +200,20 @@
             "background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;" +
             "animation:fadeIn .2s;";
 
-        // Build selected text display (rendered as markdown)
+        // Build selected text display (rendered as markdown, dark theme)
         var displayMd = "";
         if (ctxBefore) {
             displayMd += ctxBefore.slice(-120);
         }
-        displayMd += "**【" + selText + "】**";
+        displayMd += "**" + selText + "**";
         if (ctxAfter) {
             displayMd += ctxAfter.slice(0, 120);
         }
         var renderedHtml = marked.parse(displayMd);
+
+        // Strip github-markdown-body white background: wrap in a div that resets it
+        renderedHtml = '<div class="feclaw-ref-markdown" style="color:#d4d4d4;font-size:14px;line-height:1.8;">' +
+            renderedHtml + '</div>';
 
         var modal = document.createElement("div");
         modal.style.cssText =
@@ -221,11 +225,11 @@
             '<div style="background:#3a3a3a;padding:16px 20px;font-size:17px;font-weight:600;' +
             'display:flex;align-items:center;gap:8px;">' +
             '\uD83D\uDCCC \u5F15\u7528\u590D\u5236\u6210\u529F\uFF01</div>' +
-            // Selected text (MD rendered)
+            // Selected text (MD rendered, dark theme)
             '<div style="padding:16px 20px 8px;">' +
             '<div style="font-size:12px;color:#888;margin-bottom:6px;">\u9009\u4E2D\u5185\u5BB9</div>' +
-            '<div style="color:#d4d4d4;font-size:14px;line-height:1.8;max-height:180px;overflow-y:auto;' +
-            'word-break:break-word;" class="markdown-body">' +
+            '<div style="max-height:180px;overflow-y:auto;word-break:break-word;' +
+            'background:#1e1e1e;border:1px solid #3a3a3a;border-radius:8px;padding:12px;">' +
             renderedHtml +
             '</div></div>' +
             // Reference token
