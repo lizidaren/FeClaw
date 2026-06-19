@@ -4,7 +4,7 @@ sys.path.insert(0, '/home/lch/Projects/FeClaw')
 
 import os
 from config import settings
-from services.vector_search_service import VectorSearchService, VECTOR_BUCKET, VECTOR_ENDPOINT, EMBEDDING_API_URL
+from services.vector_search_service import VectorSearchService, VECTOR_BUCKET, VECTOR_ENDPOINT
 from qcloud_cos import CosConfig, CosVectorsClient
 
 QWEN_API_KEY = settings.QWEN_API_KEY or os.environ.get('QWEN_API_KEY')

@@ -141,6 +141,13 @@ MODEL_REGISTRY = {
         "supports_thinking": False,
         "supports_vision": False,
     },
+    # ─── Rerank ───
+    "qwen3-rerank": {
+        "provider": "qwen",
+        "supports_thinking": False,
+        "supports_vision": False,
+        "rerank_url": "https://dashscope.aliyuncs.com/compatible-api/v1/reranks",
+    },
 }
 
 
@@ -176,6 +183,34 @@ def resolve(model_name: str) -> dict:
         "supports_vision": False,
         "api_key_attr": provider_meta.get("api_key_attr"),
         "base_url": provider_meta.get("base_url"),
+    }
+
+
+def resolve_rerank(rerank_model: str) -> dict:
+    """
+    根据 rerank 模型名返回 provider 元信息 + rerank URL。
+
+    Args:
+        rerank_model: rerank 模型名（如 "qwen3-rerank"）
+
+    Returns:
+        {"provider": str, "rerank_url": str, "api_key_attr": str}
+    """
+    info = resolve(rerank_model)
+    rerank_url = info.get("rerank_url")
+    if not rerank_url:
+        logger.warning(
+            f"Rerank model '{rerank_model}' has no rerank_url in registry"
+        )
+        return {
+            "provider": "qwen",
+            "rerank_url": "https://dashscope.aliyuncs.com/compatible-api/v1/reranks",
+            "api_key_attr": "QWEN_API_KEY",
+        }
+    return {
+        "provider": info["provider"],
+        "rerank_url": rerank_url,
+        "api_key_attr": info["api_key_attr"],
     }
 
 

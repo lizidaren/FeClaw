@@ -9,10 +9,14 @@ from typing import Dict, List, Optional
 import httpx
 
 from config import settings
+from services.model_registry import resolve_rerank
 
 # 模块级共享 HTTP 客户端（避免每次实例化创建新连接）
 _shared_rerank_client: httpx.AsyncClient = None
 _rerank_client_lock = threading.Lock()
+
+# 默认 rerank 模型（可通过 settings 覆盖）
+DEFAULT_RERANK_MODEL = "qwen3-rerank"
 
 
 def _get_rerank_client() -> httpx.AsyncClient:
@@ -24,6 +28,7 @@ def _get_rerank_client() -> httpx.AsyncClient:
                 _shared_rerank_client = httpx.AsyncClient(timeout=30.0)
     return _shared_rerank_client
 
+
 async def close_rerank_client():
     """关闭共享的 httpx.AsyncClient（应用 shutdown 时调用）"""
     global _shared_rerank_client
@@ -32,10 +37,8 @@ async def close_rerank_client():
         _shared_rerank_client = None
         logger.info("Rerank HTTP client closed")
 
-logger = logging.getLogger(__name__)
 
-RERANK_URL = "https://dashscope.aliyuncs.com/compatible-api/v1/reranks"
-RERANK_MODEL = "qwen3-rerank"
+logger = logging.getLogger(__name__)
 
 # 截断参数 (from tests/rerank/test_rerank_v3_optimized.py)
 # Qwen tokenizer: ~1.8 chars/token for Chinese-dominant text
@@ -76,10 +79,10 @@ class RerankService:
         self._client = _get_rerank_client()
 
     @staticmethod
-    def _get_api_key() -> Optional[str]:
+    def _get_api_key(api_key_attr: str) -> Optional[str]:
         import os
 
-        return settings.QWEN_API_KEY or os.getenv("QWEN_API_KEY")
+        return getattr(settings, api_key_attr, None) or os.getenv(api_key_attr)
 
     def _fallback_sort(self, documents: List[dict], top_n: int) -> List[dict]:
         """Fallback: sort by vector score without mutating input documents."""
@@ -108,10 +111,13 @@ class RerankService:
         if not documents:
             return []
 
-        api_key = self._get_api_key()
+        rerank_config = resolve_rerank(DEFAULT_RERANK_MODEL)
+        api_key = self._get_api_key(rerank_config["api_key_attr"])
         if not api_key:
-            logger.warning("QWEN_API_KEY not configured, skipping rerank")
+            logger.warning("%s not configured, skipping rerank", rerank_config["api_key_attr"])
             return self._fallback_sort(documents, top_n)
+
+        rerank_url = rerank_config["rerank_url"]
 
         # 提取文本，跳过空文档
         texts = []
@@ -135,7 +141,7 @@ class RerankService:
         )
 
         payload = {
-            "model": RERANK_MODEL,
+            "model": DEFAULT_RERANK_MODEL,
             "query": query,
             "documents": texts,
             "parameters": {
@@ -150,7 +156,7 @@ class RerankService:
         }
 
         try:
-            resp = await self._client.post(RERANK_URL, json=payload, headers=headers)
+            resp = await self._client.post(rerank_url, json=payload, headers=headers)
             resp.raise_for_status()
             data = resp.json()
         except Exception as e:
