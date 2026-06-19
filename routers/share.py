@@ -208,6 +208,7 @@ mermaid.run({{nodes:document.querySelectorAll('.mermaid')}});
 <script>var SHARE_HASH = {json.dumps(mapping.share_hash)}; var VFS_PATH = {json.dumps(vfs_path)};</script>
 <script src="/static/js/share-reference.js"></script>
 </body></html>"""
+                    logger.warning(f"[SHARE DEBUG] slug html_page len={len(html_page)} first80={html_page[:80]!r}")
                     return Response(content=html_page, media_type="text/html")
                 elif ext == ".2dggb":
                     return Response(content=_render_ggb_file(content, is_3d=False), media_type="text/html")
