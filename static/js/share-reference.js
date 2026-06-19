@@ -200,15 +200,16 @@
             "background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;" +
             "animation:fadeIn .2s;";
 
-        // Build selected text display
-        var displayText = "";
+        // Build selected text display (rendered as markdown)
+        var displayMd = "";
         if (ctxBefore) {
-            displayText += escapeHtml(ctxBefore.slice(-120));
+            displayMd += ctxBefore.slice(-120);
         }
-        displayText += "<mark style=\"background:#fff3bf;padding:2px 4px;border-radius:3px;\">" + escapeHtml(selText) + "</mark>";
+        displayMd += "**【" + selText + "】**";
         if (ctxAfter) {
-            displayText += escapeHtml(ctxAfter.slice(0, 120));
+            displayMd += ctxAfter.slice(0, 120);
         }
+        var renderedHtml = marked.parse(displayMd);
 
         var modal = document.createElement("div");
         modal.style.cssText =
@@ -220,14 +221,13 @@
             '<div style="background:#3a3a3a;padding:16px 20px;font-size:17px;font-weight:600;' +
             'display:flex;align-items:center;gap:8px;">' +
             '\uD83D\uDCCC \u5F15\u7528\u590D\u5236\u6210\u529F\uFF01</div>' +
-            // Selected text
+            // Selected text (MD rendered)
             '<div style="padding:16px 20px 8px;">' +
             '<div style="font-size:12px;color:#888;margin-bottom:6px;">\u9009\u4E2D\u5185\u5BB9</div>' +
-            '<pre style="background:#1e1e1e;border:1px solid #3a3a3a;border-radius:8px;padding:12px;' +
-            'font-size:14px;line-height:1.8;max-height:180px;overflow-y:auto;word-break:break-word;' +
-            'white-space:pre-wrap;font-family:\'PingFang SC\',\'Microsoft YaHei\',sans-serif;color:#d4d4d4;margin:0;">' +
-            displayText +
-            '</pre></div>' +
+            '<div style="color:#d4d4d4;font-size:14px;line-height:1.8;max-height:180px;overflow-y:auto;' +
+            'word-break:break-word;" class="markdown-body">' +
+            renderedHtml +
+            '</div></div>' +
             // Reference token
             '<div style="padding:0 20px 8px;">' +
             '<div style="font-size:12px;color:#888;margin-bottom:6px;">\u5F15\u7528\u6807\u8BB0\uFF08\u5DF2\u81EA\u52A8\u590D\u5236\uFF09</div>' +
