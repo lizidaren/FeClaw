@@ -11,87 +11,19 @@
     var SHARE_HASH_VAL = SHARE_HASH;
     var VFS_PATH_VAL = VFS_PATH;
 
-    // ── data-offset 映射 ──────────────────────────────────────────
-    var rawMd = "";
-    var textNodeOffsets = [];
+    // rawMd 从 window._RAW_MD 获取（share.py 模板中注入的 JSON 转义字符串）
+    var rawMd = window._RAW_MD || "";
 
-    function buildOffsetMap() {
-        var article = document.getElementById("c");
-        if (!article) return;
-
-        // 尝试从 marked parse 前的 safe_md 获取原始 MD（存在 window 上）
-        rawMd = window._RAW_MD || "";
-
-        var walker = document.createTreeWalker(article, NodeFilter.SHOW_TEXT, null, false);
-        var currentOffset = 0;
-        textNodeOffsets = [];
-
-        var node;
-        while ((node = walker.nextNode())) {
-            var text = node.textContent || "";
-            var parent = node.parentElement;
-            if (parent && !parent.hasAttribute("data-soff")) {
-                parent.setAttribute("data-soff", currentOffset);
-                parent.setAttribute("data-eoff", currentOffset + text.length);
-                textNodeOffsets.push({
-                    node: node,
-                    parent: parent,
-                    start: currentOffset,
-                    end: currentOffset + text.length,
-                });
-                currentOffset += text.length;
-            }
-        }
-    }
-
-    // 从选中 DOM 范围计算在 rawMd 中的偏移
-    function getSelectionOffsets(sel) {
-        if (!sel || sel.isCollapsed || !sel.rangeCount) return null;
-
-        var range = sel.getRangeAt(0);
-        var startNode = range.startContainer;
-        var endNode = range.endContainer;
-        var startOffset = range.startOffset;
-        var endOffset = range.endOffset;
-
-        // 查找起始偏移
-        var startTotal = null;
-        var endTotal = null;
-
-        for (var i = 0; i < textNodeOffsets.length; i++) {
-            var entry = textNodeOffsets[i];
-            if (entry.node === startNode) {
-                startTotal = entry.start + startOffset;
-            }
-            if (entry.node === endNode) {
-                endTotal = entry.start + endOffset;
-            }
-            if (startTotal !== null && endTotal !== null) break;
-        }
-
-        // 如果没找到精确匹配，用 data-offset fallback
-        if (startTotal === null) {
-            var p = startNode.nodeType === 3 ? startNode.parentElement : startNode;
-            if (p && p.getAttribute) {
-                var soff = parseInt(p.getAttribute("data-soff"));
-                if (!isNaN(soff)) startTotal = soff + startOffset;
-            }
-        }
-        if (endTotal === null) {
-            var p = endNode.nodeType === 3 ? endNode.parentElement : endNode;
-            if (p && p.getAttribute) {
-                var soff = parseInt(p.getAttribute("data-soff"));
-                if (!isNaN(soff)) endTotal = soff + endOffset;
-            }
-        }
-
-        if (startTotal === null || endTotal === null) return null;
-        if (startTotal > endTotal) {
-            var tmp = startTotal;
-            startTotal = endTotal;
-            endTotal = tmp;
-        }
-        return { start: startTotal, end: endTotal };
+    // ── rawMd 文本查找（用于上下文提取）──────────────────────────────
+    // 不再用 DOM 偏移映射到 rawMd（marked.js 渲染后 HTML 转义导致偏移错位）。
+    // 改用 getSelection().toString() 直接在 rawMd 中用 lastIndexOf 反向搜索，
+    // 取最后一次出现位置以避开 HTML 转义干扰。
+    function findTextInRawMd(selectedText) {
+        if (!rawMd || !selectedText) return null;
+        // lastIndexOf 取最后出现，避免 HTML 标签干扰
+        var idx = rawMd.lastIndexOf(selectedText);
+        if (idx === -1) return null;
+        return { start: idx, end: idx + selectedText.length };
     }
 
     // ── 浮动按钮 ──────────────────────────────────────────────────
@@ -153,7 +85,6 @@
 
         lastSelection = {
             text: sel.toString().trim(),
-            offsets: getSelectionOffsets(sel),
         };
     }
 
@@ -225,14 +156,17 @@
 
         var selText = lastSelection.text.substring(0, 2000);
 
-        // 获取上下文
+        // 获取上下文：用选中文本在 rawMd 中反向搜索（lastIndexOf 避开 HTML 转义干扰）
         var contextBefore = "";
         var contextAfter = "";
-        if (rawMd && lastSelection.offsets) {
-            var s = Math.max(0, lastSelection.offsets.start - 200);
-            contextBefore = rawMd.substring(s, lastSelection.offsets.start);
-            var e = Math.min(rawMd.length, lastSelection.offsets.end + 200);
-            contextAfter = rawMd.substring(lastSelection.offsets.end, e);
+        if (rawMd && selText) {
+            var offsets = findTextInRawMd(selText);
+            if (offsets) {
+                var s = Math.max(0, offsets.start - 200);
+                contextBefore = rawMd.substring(s, offsets.start);
+                var e = Math.min(rawMd.length, offsets.end + 200);
+                contextAfter = rawMd.substring(offsets.end, e);
+            }
         }
 
         var payload = {
@@ -271,7 +205,6 @@
 
     // ── 事件绑定 ──────────────────────────────────────────────────
     function init() {
-        buildOffsetMap();
         createFloatButton();
 
         document.addEventListener("mouseup", onSelectionChange);

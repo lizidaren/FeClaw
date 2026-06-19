@@ -195,7 +195,7 @@ document.getElementById('c').innerHTML = html;
 window._RAW_MD = safe_md;
 mermaid.run({{nodes:document.querySelectorAll('.mermaid')}});
 </script>
-<script>var SHARE_HASH = "{mapping.share_hash}"; var VFS_PATH = "{vfs_path}";</script>
+<script>var SHARE_HASH = {json.dumps(mapping.share_hash)}; var VFS_PATH = {json.dumps(vfs_path)};</script>
 <script src="/static/js/share-reference.js"></script>
 </body></html>"""
                     return Response(content=html_page, media_type="text/html")
@@ -306,7 +306,7 @@ document.getElementById('c').innerHTML = html;
 window._RAW_MD = safe_md;
 mermaid.run({{nodes:document.querySelectorAll('.mermaid')}});
 </script>
-<script>var SHARE_HASH = "{share_hash or ''}"; var VFS_PATH = "{vfs_path}";</script>
+<script>var SHARE_HASH = {json.dumps(share_hash or '')}; var VFS_PATH = {json.dumps(vfs_path)};</script>
 <script src="/static/js/share-reference.js"></script>
 </body></html>"""
                     return Response(content=html_page, media_type="text/html")

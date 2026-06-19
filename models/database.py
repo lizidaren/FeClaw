@@ -293,6 +293,7 @@ class ShareReference(Base):
     id = Column(Integer, primary_key=True)
     ref_hash = Column(String(8), unique=True, index=True, nullable=False)
     share_hash = Column(String(16), nullable=False, index=True)
+    agent_hash = Column(String(4), nullable=True)  # nullable 兼容老数据
     vfs_path = Column(String(512), nullable=False)
     selected_text = Column(Text, nullable=False)
     context_before = Column(Text, default="", server_default="")

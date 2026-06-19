@@ -225,9 +225,36 @@ async def lifespan(app: FastAPI):
             logger.error("FUSE 不可用，请检查环境（/dev/fuse, fusermount3, pyfuse3）")
             raise RuntimeError("FUSE is required but not available")
 
+    # 启动定期清理任务（每小时清理过期的 ShareReference）
+    import asyncio
+    from services.share_service import cleanup_expired_references
+    from models.database import SessionLocal
+
+    async def periodic_share_ref_cleanup():
+        while True:
+            await asyncio.sleep(3600)  # 每小时
+            try:
+                db = SessionLocal()
+                try:
+                    deleted = cleanup_expired_references(db)
+                    if deleted:
+                        logger.info(f"Cleaned up {deleted} expired share references")
+                finally:
+                    db.close()
+            except Exception as e:
+                logger.warning(f"Periodic share reference cleanup failed: {e}")
+
+    cleanup_task = asyncio.create_task(periodic_share_ref_cleanup())
+
     try:
         yield
     finally:
+        # 取消定期清理任务
+        cleanup_task.cancel()
+        try:
+            await cleanup_task
+        except asyncio.CancelledError:
+            pass
         # 关闭时（无论启动是否成功，已挂载的资源都尝试清理）
         logger.info("Shutting down FeClaw Gateway...")
 

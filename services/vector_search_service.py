@@ -965,8 +965,12 @@ class NumpyVecStorage(VectorStorage):
             tmp_npy = npy_path.replace('.npy', '.tmp.npy')
             tmp_json = entries_path + ".tmp"
             np.save(tmp_npy, all_vecs)
+            with open(tmp_npy, "rb") as f:
+                os.fsync(f.fileno())
             with open(tmp_json, 'w') as f:
                 json.dump(entries, f, ensure_ascii=False)
+                f.flush()
+                os.fsync(f.fileno())
             os.rename(tmp_npy, npy_path)
             os.rename(tmp_json, entries_path)
 

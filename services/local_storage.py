@@ -10,6 +10,7 @@ LocalStorage — 本地文件系统存储后端
 """
 
 import os
+import fcntl
 import logging
 from datetime import datetime
 from typing import Optional, List, Dict
@@ -33,6 +34,10 @@ class LocalStorage(FileStorage):
             os.makedirs(self.public_root, exist_ok=True)
             logger.info(f"[LocalStorage] public_root={self.public_root}")
         logger.info(f"[LocalStorage] root={self.root}")
+        # 全局写锁文件（跨所有 LocalStorage 实例共享）
+        self._lock_path = os.path.join(self.root, ".local_storage.write.lock")
+        if not os.path.exists(self._lock_path):
+            open(self._lock_path, "w").close()
 
     def _resolve_root(self, key: str) -> str:
         """根据 key 路径决定使用哪个根目录
@@ -69,19 +74,33 @@ class LocalStorage(FileStorage):
     def put_object(self, key: str, file_bytes: bytes) -> None:
         path = self._resolve(key)
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "wb") as f:
-            f.write(file_bytes)
+        # 使用排他锁保护并发写入
+        with open(self._lock_path, "w") as lock_f:
+            fcntl.flock(lock_f.fileno(), fcntl.LOCK_EX)
+            try:
+                tmp_path = path + ".tmp"
+                with open(tmp_path, "wb") as f:
+                    f.write(file_bytes)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.rename(tmp_path, path)
+            finally:
+                fcntl.flock(lock_f.fileno(), fcntl.LOCK_UN)
 
     def delete_file_by_key(self, key: str) -> bool:
         path = self._resolve(key)
         if not os.path.isfile(path):
             return False
-        try:
-            os.remove(path)
-            return True
-        except Exception as e:
-            logger.error(f"[LocalStorage] delete failed: {key}, {e}")
-            return False
+        with open(self._lock_path, "w") as lock_f:
+            fcntl.flock(lock_f.fileno(), fcntl.LOCK_EX)
+            try:
+                os.remove(path)
+                return True
+            except Exception as e:
+                logger.error(f"[LocalStorage] delete failed: {key}, {e}")
+                return False
+            finally:
+                fcntl.flock(lock_f.fileno(), fcntl.LOCK_UN)
 
     def list_objects(self, prefix: str, max_keys: int = 1000) -> Optional[List[Dict]]:
         dir_path = self._resolve(prefix)
