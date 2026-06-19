@@ -141,34 +141,35 @@
     function handleAction(action) {
         hideToolbar();
         var text = getSelectedText() || _savedSelection;
+        var range = _savedRange;  // 先保存引用，后面 handleReference 要用
         _savedSelection = "";
         _savedRange = null;
         if (!text) return;
 
         if (action === "copy") {
             copyToClipboard(text).then(function () {
-                showToast("\u2705 \u5DF2\u590D\u5236");
+                showErrorToast("\u2705 \u5DF2\u590D\u5236");
             });
         } else if (action === "selectall") {
             var article = document.getElementById("c");
             if (article) {
-                var range = document.createRange();
-                range.selectNodeContents(article);
+                var newRange = document.createRange();
+                newRange.selectNodeContents(article);
                 var sel = window.getSelection();
                 sel.removeAllRanges();
-                sel.addRange(range);
+                sel.addRange(newRange);
                 setTimeout(positionToolbar, 100);
             }
         } else if (action === "reference") {
-            handleReference(text);
+            handleReference(text, range);
         }
     }
 
-    function handleReference(selText) {
+    function handleReference(selText, savedRange) {
         selText = selText.substring(0, 2000);
 
         // 从保存的 DOM Range 精确提取上下文
-        var ctx = _savedRange ? getContextFromRange(_savedRange, 200) : { before: "", after: "" };
+        var ctx = savedRange ? getContextFromRange(savedRange, 200) : { before: "", after: "" };
         var contextBefore = ctx.before || "";
         var contextAfter = ctx.after || "";
 
@@ -211,16 +212,16 @@
             "background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;" +
             "animation:fadeIn .2s;";
 
-        // Build selected text display — 分前文/选中/后文三块
+        // Build selected text display — 连续段落中高亮选中部分
         var displayMd = "";
-        displayMd += "> **\u5F15\u7528\u5185\u5BB9**\n\n";
-        displayMd += "**" + selText + "**\n\n";
         if (ctxBefore) {
-            displayMd += "> **\u4E0A\u4E0B\u6587\uFF08\u4F9B\u53C2\u8003\uFF09**\n> \n> ..." + ctxBefore.slice(-150) + "\n\n";
+            displayMd += ctxBefore.slice(-150);
         }
+        displayMd += "**" + selText + "**";
         if (ctxAfter) {
-            displayMd += ctxAfter.slice(0, 150) + "...\n\n";
+            displayMd += ctxAfter.slice(0, 150);
         }
+        var renderedHtml = marked.parse(displayMd);
         var renderedHtml = marked.parse(displayMd);
 
         // Strip github-markdown-body white background: wrap in a div that resets it
