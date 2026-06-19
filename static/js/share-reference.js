@@ -13,6 +13,7 @@
     var rawMd = window._RAW_MD || "";
     var toolbar = null;
     var toastEl = null;
+    var _savedSelection = "";   // 在工具栏显示时保存选中的文本，避免 iOS 点击后丢失选择
 
     // ── rawMd 文本查找 ──────────────────────────────────────────────
     function findTextInRawMd(selectedText) {
@@ -53,13 +54,21 @@
             btn.addEventListener("mouseleave", function () {
                 this.style.background = "transparent";
             });
-            btn.addEventListener("click", function (e) {
+            // Mobile: 只监听 touchend，防止 click 重复触发
+            // touchstart 触发后设置标记阻止后续 click
+            btn._touchFired = false;
+            btn.addEventListener("touchstart", function () {
+                this._touchFired = true;
+            });
+            btn.addEventListener("touchend", function (e) {
                 e.preventDefault();
                 e.stopPropagation();
                 handleAction(this.getAttribute("data-action"));
             });
-            // Mobile
-            btn.addEventListener("touchend", function (e) {
+            // 鼠标设备：click 正常触发；如果已走过 touchend，跳过 click
+            var _origClick = btn.addEventListener;
+            btn.addEventListener("click", function (e) {
+                if (this._touchFired) { this._touchFired = false; return; }
                 e.preventDefault();
                 e.stopPropagation();
                 handleAction(this.getAttribute("data-action"));
@@ -103,6 +112,7 @@
         toolbar.style.left = left + "px";
         toolbar.style.top = top + "px";
         toolbar.style.display = "block";
+        _savedSelection = getSelectedText();
         return true;
     }
 
@@ -113,7 +123,8 @@
     // ── 操作 ──────────────────────────────────────────────────────
     function handleAction(action) {
         hideToolbar();
-        var text = getSelectedText();
+        var text = getSelectedText() || _savedSelection;
+        _savedSelection = "";
         if (!text) return;
 
         if (action === "copy") {

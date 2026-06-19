@@ -24,7 +24,10 @@ GGB_TEMPLATE_2D = """<!DOCTYPE html>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         html, body { width: 100vw; height: 100vh; overflow: hidden; background: #f0f0f0; }
         #ggb-element { width: 100vw; height: 100vh; }
-    </style>
+    #c img{max-width:100%;height:auto;}
+.markdown-body pre{overflow-x:auto;}
+.katex-display{overflow-x:auto;overflow-y:hidden;max-width:100%;}
+</style>
 </head>
 <body>
 <div id="ggb-element"></div>
@@ -66,7 +69,10 @@ GGB_TEMPLATE_3D = """<!DOCTYPE html>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         html, body { width: 100vw; height: 100vh; overflow: hidden; background: #f0f0f0; }
         #ggb-element { width: 100vw; height: 100vh; }
-    </style>
+    #c img{max-width:100%;height:auto;}
+.markdown-body pre{overflow-x:auto;}
+.katex-display{overflow-x:auto;overflow-y:hidden;max-width:100%;}
+</style>
 </head>
 <body>
 <div id="ggb-element"></div>
@@ -177,6 +183,9 @@ async def resolve_share_by_slug(slug: str, request: Request, db: Session = Depen
 body{{max-width:800px;margin:40px auto;padding:0 20px;-webkit-touch-callout:none;}}
 @media (max-width:640px){{body{{font-size:16px;line-height:1.8;padding:0 16px;margin:24px auto;}}}}
 @media (max-width:480px){{body{{font-size:17px;line-height:1.9;margin:16px auto;}}}}
+#c img{max-width:100%;height:auto;}
+.markdown-body pre{overflow-x:auto;}
+.katex-display{overflow-x:auto;overflow-y:hidden;max-width:100%;}
 </style>
 </head><body><article class="markdown-body" id="c"></article>
 <script>
@@ -290,6 +299,9 @@ async def resolve_share(token: str, db: Session = Depends(get_db)):
 body{{max-width:800px;margin:40px auto;padding:0 20px;-webkit-touch-callout:none;}}
 @media (max-width:640px){{body{{font-size:16px;line-height:1.8;padding:0 16px;margin:24px auto;}}}}
 @media (max-width:480px){{body{{font-size:17px;line-height:1.9;margin:16px auto;}}}}
+#c img{max-width:100%;height:auto;}
+.markdown-body pre{overflow-x:auto;}
+.katex-display{overflow-x:auto;overflow-y:hidden;max-width:100%;}
 </style>
 </head><body><article class="markdown-body" id="c"></article>
 <script>
