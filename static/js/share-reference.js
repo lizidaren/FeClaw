@@ -211,16 +211,15 @@
             "background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;" +
             "animation:fadeIn .2s;";
 
-        // Build selected text display
-        // 避免全文搜索匹配乱跑：只把选中文本加粗，上下文原样显示
+        // Build selected text display — 分前文/选中/后文三块
         var displayMd = "";
-        if (ctxBefore) {
-            // 用 ` 代码块包裹上下文，避免 markdown 语法冲突和误匹配
-            displayMd += "```\n" + ctxBefore.slice(-150) + "\n```\n\n";
-        }
+        displayMd += "> **\u5F15\u7528\u5185\u5BB9**\n\n";
         displayMd += "**" + selText + "**\n\n";
+        if (ctxBefore) {
+            displayMd += "> **\u4E0A\u4E0B\u6587\uFF08\u4F9B\u53C2\u8003\uFF09**\n> \n> ..." + ctxBefore.slice(-150) + "\n\n";
+        }
         if (ctxAfter) {
-            displayMd += "```\n" + ctxAfter.slice(0, 150) + "\n```";
+            displayMd += ctxAfter.slice(0, 150) + "...\n\n";
         }
         var renderedHtml = marked.parse(displayMd);
 

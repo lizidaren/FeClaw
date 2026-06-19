@@ -700,9 +700,15 @@ class ChatService:
                         ShareReference.ref_hash == ref_hash
                     ).first()
                     if ref and ref.selected_text:
-                        insert = f"\n\n> 📖 引用内容（{ref_hash}）：{ref.selected_text}"
-                        if ref.context_before:
-                            insert = f"\n\n> 【引用上下文】...{ref.context_before[-100:]}{ref.selected_text}{ref.context_after[:100]}..."
+                        insert = f"\n\n> 📖 引用内容：{ref.selected_text}"
+                        if ref.context_before or ref.context_after:
+                            ctx = ""
+                            if ref.context_before:
+                                ctx += f"...{ref.context_before[-150:]}"
+                            ctx += ref.selected_text
+                            if ref.context_after:
+                                ctx += f"{ref.context_after[:150]}..."
+                            insert += f"\n> 📖 上下文（供参考）：{ctx}"
                         text = text + insert
         except Exception as e:
             logger.warning(f"[ChatService] Reference resolution failed: {e}")
