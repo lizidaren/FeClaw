@@ -296,8 +296,8 @@ class ShareReference(Base):
     agent_hash = Column(String(4), nullable=True)  # nullable 兼容老数据
     vfs_path = Column(String(512), nullable=False)
     selected_text = Column(Text, nullable=False)
-    context_before = Column(Text, default="", server_default="")
-    context_after = Column(Text, default="", server_default="")
+    context_before = Column(Text, default="")
+    context_after = Column(Text, default="")
     creator_ip = Column(String(45), nullable=True)
     expires_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
