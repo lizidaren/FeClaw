@@ -656,7 +656,7 @@ class AgentExecutor:
         if tool_name == "list_subagent_roles":
             result = self.tools.list_subagent_roles()
             result_str = result if isinstance(result, str) else json.dumps(result)
-            return self.tools._truncate_tool_result(
+            return await self.tools._truncate_tool_result(
                 result=result_str,
                 tool_name=tool_name,
                 tool_args={}
@@ -698,7 +698,7 @@ class AgentExecutor:
             result_str = result if isinstance(result, str) else json.dumps(result)
 
             # P0-Tool-Result-Budget: 截断超大工具结果
-            result_str = self.tools._truncate_tool_result(
+            result_str = await self.tools._truncate_tool_result(
                 result=result_str,
                 tool_name=tool_name,
                 tool_args=valid_args

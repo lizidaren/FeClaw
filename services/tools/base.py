@@ -166,7 +166,7 @@ class AgentToolsServiceBase:
     TOOL_RESULT_MAX_SIZE = 50000      # 50KB - 超过此大小保存到 VFS
     TOOL_RESULT_PREVIEW_SIZE = 2000   # 2KB - 保留在上下文中的预览大小
 
-    def _truncate_tool_result(
+    async def _truncate_tool_result(
         self,
         result: str,
         tool_name: str = "",
@@ -227,7 +227,7 @@ class AgentToolsServiceBase:
 {result}
 """
 
-        write_result = self.file_write(path=vfs_path, content=full_content)
+        write_result = await self.file_write(path=vfs_path, content=full_content)
 
         preview_bytes = result[:self.TOOL_RESULT_PREVIEW_SIZE]
         while len(preview_bytes.encode('utf-8')) > self.TOOL_RESULT_PREVIEW_SIZE:
