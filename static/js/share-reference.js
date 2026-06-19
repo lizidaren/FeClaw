@@ -266,6 +266,24 @@
             'onclick="this.closest(\'.feclaw-ref-overlay\').remove()">\u77E5\u9053\u4E86</button>' +
             '</div>';
 
+        // 自动滚动到选中文本（strong 标签）居中显示
+        setTimeout(function () {
+            var contentDiv = modal.querySelector('[class*="feclaw-ref-markdown"]');
+            if (contentDiv) {
+                var strong = contentDiv.querySelector("strong");
+                if (strong) {
+                    var parent = contentDiv.parentElement;
+                    if (parent) {
+                        var parentRect = parent.getBoundingClientRect();
+                        var strongRect = strong.getBoundingClientRect();
+                        var scrollTarget = parent.scrollTop + (strongRect.top + strongRect.height / 2) - (parentRect.top + parentRect.height / 2);
+                        if (scrollTarget < 0) scrollTarget = 0;
+                        parent.scrollTop = scrollTarget;
+                    }
+                }
+            }
+        }, 50);
+
         overlay.appendChild(modal);
         document.body.appendChild(overlay);
 
