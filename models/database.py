@@ -47,6 +47,7 @@ class User(Base):
     password_hash = Column(String(128), nullable=False)
     salt = Column(String(64), nullable=False)
     is_admin = Column(Boolean, default=False)
+    tier = Column(String(20), default="pro")  # "pro" | "enterprise"
     created_at = Column(DateTime, default=datetime.utcnow)
 
     # 关系

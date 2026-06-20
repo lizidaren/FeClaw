@@ -23,6 +23,8 @@ class AgentProfile(Base):
     status = Column(String(20), default="pending")  # pending | initialized | suspended
     is_default = Column(Boolean, default=False)  # 是否为用户的默认 Agent
     permissions = Column(String(255), default="chat,upload,session")  # 权限列表（逗号分隔）
+    agent_type = Column(String(20), default="classic")  # "classic" | "im"
+    avatar_url = Column(String(512), nullable=True)  # Agent 头像 URL
     system_prompt = Column(Text, nullable=True)  # 自定义系统提示词模板
     parallel_sandbox = Column(Boolean, default=False)  # 是否允许多个并行 sandbox
     lock_behavior = Column(String(16), default="wait_3s")  # 文件锁行为: "eagain" | "wait_3s"

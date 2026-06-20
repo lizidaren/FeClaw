@@ -6,14 +6,15 @@
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
-from datetime import datetime
+from datetime import datetime, date
 from pydantic import BaseModel
 import logging
 import re
 
 from config import settings
-from models.database import get_db, User
-from utils.auth import generate_salt, hash_password, verify_password, create_jwt_token, get_current_user
+from models.database import get_db, User, AgentProfile, ChatHistory
+from utils.auth import generate_salt, hash_password, verify_password, create_jwt_token, get_current_user, get_current_user_id
+from services.agent_init_service import agent_init_service
 
 logger = logging.getLogger(__name__)
 
@@ -223,3 +224,130 @@ async def change_password(
     db.commit()
 
     return {"status": "success", "message": "密码已修改"}
+
+# ==========================================
+# Desktop API (Phase 4a)
+# ==========================================
+
+class CreateAgentRequest(BaseModel):
+    name: str = ""
+    agent_type: str = "classic"
+
+
+@router.get("/api/user/permissions")
+async def get_user_permissions(
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """
+    获取用户权限和配额信息
+
+    返回用户的 tier、特性配额和使用统计。
+    """
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=401, detail={"status": "unauthorized"})
+
+    # 统计
+    agent_count = db.query(AgentProfile).filter(AgentProfile.user_id == user_id).count()
+    group_count = 0  # 暂不支持 group
+
+    # 今日消息数
+    today = date.today()
+    today_messages = db.query(ChatHistory).filter(
+        ChatHistory.user_id == user_id,
+        ChatHistory.created_at >= datetime.combine(today, datetime.min.time())
+    ).count()
+
+    return JSONResponse(content={
+        "tier": user.tier or "pro",
+        "user_id": user.id,
+        "username": user.username,
+        "features": {
+            "max_agents": -1,
+            "max_groups": -1,
+            "storage_bytes": -1,
+            "daily_message_limit": -1,
+            "available_models": [],
+            "permission_modes": ["disabled", "strict", "balanced", "relaxed", "full"],
+            "channels": ["web", "desktop", "wechat"],
+            "features_enabled": {
+                "group_chat": True,
+                "moments": True,
+                "mini_programs": True,
+                "mcp_tools": True,
+                "local_file_index": False,
+                "wechat_channel": True,
+                "mobile_app": False
+            }
+        },
+        "usage": {
+            "agent_count": agent_count,
+            "group_count": group_count,
+            "today_messages": today_messages
+        }
+    })
+
+
+@router.post("/api/user/agents")
+async def create_agent(
+    request: Request,
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """
+    为当前用户创建一个新 Agent
+
+    请求体:
+        name: Agent 名称（可选）
+        agent_type: "classic" | "im"（默认 "classic"）
+    """
+    body = await request.json()
+    name = body.get("name", "")
+    agent_type = body.get("agent_type", "classic")
+
+    if agent_type not in ("classic", "im"):
+        raise HTTPException(status_code=400, detail={"message": "agent_type must be 'classic' or 'im'"})
+
+    try:
+        agent = agent_init_service.create_agent(db, user_id, name=name)
+        agent.agent_type = agent_type
+        db.commit()
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    return JSONResponse(content={
+        "hash": agent.hash,
+        "name": agent.name,
+        "description": agent.description
+    })
+
+
+@router.get("/api/user/agents/{agent_hash}")
+async def get_agent_by_hash(
+    agent_hash: str,
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """
+    通过 hash 获取用户的 Agent 详情
+
+    验证 agent 属于当前用户。
+    """
+    agent = db.query(AgentProfile).filter(
+        AgentProfile.hash == agent_hash,
+        AgentProfile.user_id == user_id
+    ).first()
+
+    if agent is None:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    from utils.auth import format_timestamp
+    return JSONResponse(content={
+        "hash": agent.hash,
+        "name": agent.name,
+        "description": agent.description,
+        "agent_type": agent.agent_type or "classic",
+        "created_at": format_timestamp(agent.created_at) if agent.created_at else None,
+        "avatar_url": agent.avatar_url
+    })

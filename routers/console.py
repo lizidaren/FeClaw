@@ -103,6 +103,12 @@ async def create_agent(
 ):
     """
     创建新的 Agent
+
+    ⚠️ DUPLICATED: 与新 /api/user/agents 功能重复。
+       区别：本端点按 agent_id（int）返回，新端点按 agent_hash（str）返回。
+       新端点支持 agent_type 参数。
+       计划迁移方向 → /api/user/agents
+       新端点在 routers/user.py。
     """
     body = await request.json()
     name = body.get("name", "")
