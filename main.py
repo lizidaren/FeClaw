@@ -62,6 +62,7 @@ from routers.agent_config import router as agent_config_router
 from routers.agent_config_chat import router as agent_config_chat_router
 from routers.user import router as user_router
 from routers.admin import router as admin_router
+from routers.group import router as group_router
 from routers.wechat import ensure_message_handler
 from services.agent_init_service import ensure_default_agent_5178
 from routers.desktop_ws import router as desktop_ws_router
@@ -81,7 +82,8 @@ async def lifespan(app: FastAPI):
         logger.critical("JWT_SECRET 未配置！请在 .env 中设置 JWT_SECRET")
         raise RuntimeError("JWT_SECRET is required but not set")
 
-    # 初始化数据库
+    # 初始化数据库（导入 Group 模型以确保 create_all 覆盖新表）
+    from models.group import Group, GroupMember, GroupMessage  # noqa: F401
     init_db()
     logger.info("Database initialized")
 
@@ -343,6 +345,7 @@ app.include_router(workspace.router)  # 工作区管理
 app.include_router(wechat.router)  # 微信接入
 app.include_router(console.router)  # 控制台 API (必须在 static_site_public 之前)
 app.include_router(user_router)  # 用户 API (注册、登录)
+app.include_router(group_router)  # Group Chat API
 app.include_router(admin_router)  # 管理后台 API
 app.include_router(agent_config_ui_router)  # Agent 配置界面
 app.include_router(agent_config_router)  # Agent 配置 API
