@@ -83,7 +83,7 @@ async def lifespan(app: FastAPI):
         raise RuntimeError("JWT_SECRET is required but not set")
 
     # 初始化数据库（导入 Group 模型以确保 create_all 覆盖新表）
-    from models.group import Group, GroupMember, GroupMessage  # noqa: F401
+    from models.group import Group, GroupMember, GroupMessage, GroupMoments  # noqa: F401
     init_db()
     logger.info("Database initialized")
 

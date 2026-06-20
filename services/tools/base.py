@@ -60,16 +60,18 @@ DEFAULT_CONFIG = {
 class AgentToolsServiceBase:
     """Agent 工具服务基类 — 通用属性和方法"""
 
-    def __init__(self, agent_hash: str):
+    def __init__(self, agent_hash: str, group_id: str = None):
         """
         初始化 Agent 工具服务
 
         Args:
             agent_hash: Agent 的 4 位 hash
+            group_id: 当前群组 ID（可选，用于 moments 发布上下文）
         """
         self.agent_hash = agent_hash
         self._user_id = None
         self._agent_profile = None
+        self._group_id = group_id  # 当前群组上下文（ moments auto-publish 用）
         self.base_path = f"feclaw/agents/{self.agent_hash}/"
         self._vfs = VirtualFileSystem(agent_hash=agent_hash)
         self._storage = None

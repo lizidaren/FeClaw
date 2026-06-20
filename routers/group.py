@@ -362,3 +362,66 @@ async def send_message(
     )
 
     return JSONResponse(content={"status": "ok", "msg_id": msg_id})
+
+
+# ==========================================
+# Moments
+# ==========================================
+
+class MomentResponse(BaseModel):
+    id: str
+    group_id: str
+    agent_hash: Optional[str]
+    kind: str
+    title: Optional[str]
+    content: Optional[str]
+    attachments: List[dict]
+    created_at: int
+
+
+def _format_moment(moment) -> MomentResponse:
+    return MomentResponse(
+        id=moment.id,
+        group_id=moment.group_id,
+        agent_hash=moment.agent_hash,
+        kind=moment.kind,
+        title=moment.title,
+        content=moment.content,
+        attachments=moment.attachments or [],
+        created_at=int(moment.created_at.timestamp()),
+    )
+
+
+@router.get("/{group_id}/moments", response_model=List[MomentResponse])
+async def list_group_moments(
+    group_id: str,
+    before: Optional[int] = Query(None, description="Unix timestamp — return moments before this time"),
+    limit: int = Query(50, ge=1, le=200),
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+):
+    """List moments for a specific group (newest first)."""
+    _get_group_or_404(db, group_id, user_id)
+
+    before_dt = datetime.fromtimestamp(before) if before else None
+    from services.moments_service import moments_service
+    moments = moments_service.get_moments(db, group_id, before=before_dt, limit=limit)
+    return [_format_moment(m) for m in moments]
+
+
+@router.delete("/{group_id}/moments/{moment_id}")
+async def delete_group_moment(
+    group_id: str,
+    moment_id: str,
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+):
+    """Delete a moment (owner of the group only)."""
+    _get_group_or_404(db, group_id, user_id)
+
+    from services.moments_service import moments_service
+    ok = moments_service.delete_moment(db, moment_id, group_id, user_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Moment not found or not authorized")
+
+    return JSONResponse(content={"status": "ok"})

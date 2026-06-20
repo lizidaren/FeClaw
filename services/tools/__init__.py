@@ -16,9 +16,11 @@ from services.tools.cron_tools import CronToolsMixin
 from services.tools.share_tools import ShareToolsMixin
 from services.tools.knowledge_tools import KnowledgeToolsMixin
 from services.tools.route_tools import RouteToolsMixin
+from services.tools.moments_tools import MomentsToolsMixin
 
 
 class AgentToolsService(
+    MomentsToolsMixin,
     FileOpsMixin,
     AIToolsMixin,
     WebToolsMixin,

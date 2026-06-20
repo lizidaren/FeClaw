@@ -62,3 +62,21 @@ class GroupMessage(Base):
         Index("idx_group_messages_group_id", "group_id"),
         Index("idx_group_messages_created_at", "created_at"),
     )
+
+
+class GroupMoments(Base):
+    __tablename__ = "group_moments"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    group_id = Column(String(36), nullable=False, index=True)
+    agent_hash = Column(String(4), nullable=True)
+    kind = Column(String(32), nullable=False)
+    title = Column(String(200))
+    content = Column(Text)
+    attachments = Column(JSON, default=list)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        Index("idx_group_moments_group_id", "group_id"),
+        Index("idx_group_moments_created_at", "created_at"),
+    )

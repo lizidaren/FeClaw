@@ -836,3 +836,98 @@ async def get_agent_by_hash(
         "created_at": format_timestamp(agent.created_at) if agent.created_at else None,
         "avatar_url": agent.avatar_url
     })
+
+
+# ==========================================
+# User-level Moments API (Phase 5)
+# ==========================================
+
+class CreateMomentRequest(BaseModel):
+    group_id: str
+    kind: str = "manual"
+    title: Optional[str] = None
+    content: Optional[str] = None
+    attachments: Optional[List[dict]] = None
+
+
+@router.get("/moments", response_model=List[dict])
+async def list_user_moments(
+    group_id: Optional[str] = Query(None, description="Filter to a specific group"),
+    before: Optional[int] = Query(None, description="Unix timestamp — return moments before this time"),
+    limit: int = Query(50, ge=1, le=200),
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+):
+    """
+    List moments across all groups the user owns or is a member of.
+    Optionally filter to a specific group.
+    """
+    from services.moments_service import moments_service
+    from models.group import Group
+
+    before_dt = datetime.fromtimestamp(before) if before else None
+
+    if group_id:
+        # Validate user has access to this group
+        group = db.query(Group).filter(Group.id == group_id, Group.deleted_at.is_(None)).first()
+        if not group or group.owner_user_id != user_id:
+            raise HTTPException(status_code=403, detail="Not authorized to view this group's moments")
+        moments = moments_service.get_moments(db, group_id, before=before_dt, limit=limit)
+    else:
+        moments = moments_service.get_user_moments(db, user_id, before=before_dt, limit=limit)
+
+    return [
+        {
+            "id": m.id,
+            "group_id": m.group_id,
+            "agent_hash": m.agent_hash,
+            "kind": m.kind,
+            "title": m.title,
+            "content": m.content,
+            "attachments": m.attachments or [],
+            "created_at": int(m.created_at.timestamp()),
+        }
+        for m in moments
+    ]
+
+
+@router.post("/moments", response_model=dict)
+async def create_user_moment(
+    body: CreateMomentRequest,
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+):
+    """
+    Manually create a moment for a specific group.
+    The user must own the group.
+    """
+    from services.moments_service import moments_service
+    from models.group import Group
+
+    # Verify user owns the group
+    group = db.query(Group).filter(
+        Group.id == body.group_id,
+        Group.owner_user_id == user_id,
+        Group.deleted_at.is_(None)
+    ).first()
+    if not group:
+        raise HTTPException(status_code=403, detail="Not authorized to post to this group")
+
+    moment = moments_service.create_moment(
+        db=db,
+        group_id=body.group_id,
+        agent_hash=None,  # manual post from user, no agent
+        kind=body.kind,
+        title=body.title,
+        content=body.content,
+        attachments=body.attachments,
+    )
+
+    # WS push (fire-and-forget)
+    import asyncio
+    try:
+        asyncio.create_task(moments_service.push_moments_event(body.group_id, moment))
+    except Exception:
+        pass
+
+    return JSONResponse(content={"status": "ok", "moment_id": moment.id})
