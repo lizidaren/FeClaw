@@ -17,9 +17,11 @@ from services.tools.share_tools import ShareToolsMixin
 from services.tools.knowledge_tools import KnowledgeToolsMixin
 from services.tools.route_tools import RouteToolsMixin
 from services.tools.moments_tools import MomentsToolsMixin
+from services.tools.fehub_tools import FeHubToolsMixin
 
 
 class AgentToolsService(
+    FeHubToolsMixin,
     MomentsToolsMixin,
     FileOpsMixin,
     AIToolsMixin,

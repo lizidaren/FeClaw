@@ -54,7 +54,7 @@ import uvicorn
 from config import settings
 from models.database import init_db, SessionLocal, User, engine
 from utils.auth import generate_salt, hash_password
-from routers import static_site, static_site_public, workspace, wechat, oauth, console, health, vfs_image_dedup, sandbox, share, share_reference, vfs_view, apps_gateway
+from routers import static_site, static_site_public, workspace, wechat, oauth, console, health, vfs_image_dedup, sandbox, share, share_reference, vfs_view, apps_gateway, fehub
 from routers.feclaw_domain import router as feclaw_domain_router
 from routers.feclaw_chat import router as feclaw_chat_router
 from routers.agent_config_ui import router as agent_config_ui_router
@@ -84,6 +84,7 @@ async def lifespan(app: FastAPI):
 
     # 初始化数据库（导入 Group 模型以确保 create_all 覆盖新表）
     from models.group import Group, GroupMember, GroupMessage, GroupMoments  # noqa: F401
+    from models.fehub import FePublish, AppData  # noqa: F401
     init_db()
     logger.info("Database initialized")
 
@@ -339,6 +340,7 @@ app.mount("/static", StaticFiles(directory=os.path.join(os.path.dirname(__file__
 
 # 注册路由
 app.include_router(apps_gateway.router)  # App 路由网关（必须在 feclaw_domain 之前）
+app.include_router(fehub.router)  # FeHub VCS + Publish API
 app.include_router(feclaw_domain_router)  # FeClaw 域名专用路由
 app.include_router(feclaw_chat_router)  # FeClaw 聊天 API
 app.include_router(workspace.router)  # 工作区管理
