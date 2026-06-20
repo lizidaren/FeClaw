@@ -15,6 +15,7 @@ import time
 
 from config import settings
 from models.database import get_db, User, AgentProfile, ChatHistory, FilePermission
+from models.group import GroupMoments
 from utils.auth import generate_salt, hash_password, verify_password, create_jwt_token, get_current_user, get_current_user_id
 from services.agent_init_service import agent_init_service
 from services.storage_service import get_storage_service
@@ -931,3 +932,310 @@ async def create_user_moment(
         pass
 
     return JSONResponse(content={"status": "ok", "moment_id": moment.id})
+
+
+# ==========================================
+# Search Aggregation API (Phase 7)
+# ==========================================
+
+@router.get("/api/user/search")
+async def search_all(
+    q: str,
+    sources: str = "chat,vfs,moments,textbook",
+    limit: int = 10,
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+):
+    """
+    全平台搜索聚合端点。
+
+    q: 搜索词（自然语言或关键词）
+    sources: 逗号分隔的数据源，支持 chat|vfs|moments|textbook|miniapps|local
+    limit: 每源返回结果数
+
+    并行搜索多数据源，3s 超时，合并返回。
+    """
+    import asyncio
+    import time as time_module
+
+    from services.vector_search_service import VectorSearchService
+    from services.moments_service import moments_service
+    from models.group import Group, GroupMember
+
+    t0 = time_module.time()
+    source_list = [s.strip() for s in sources.split(",") if s.strip()]
+    if not source_list:
+        source_list = ["chat", "vfs", "moments", "textbook"]
+
+    TIMEOUT = 3.0
+
+    async def _search_chat() -> dict:
+        """Search ChatHistory by user_id + content LIKE."""
+        try:
+            results = await asyncio.wait_for(
+                _sync_search_chat(db, user_id, q, limit),
+                timeout=TIMEOUT,
+            )
+            return {"status": "ok", "items": results}
+        except asyncio.TimeoutError:
+            return {"status": "timeout", "items": []}
+        except Exception as e:
+            return {"status": "error", "message": str(e), "items": []}
+
+    async def _search_vfs() -> dict:
+        """Search user's agents' VFS KB indexes via VectorSearchService."""
+        try:
+            agents = db.query(AgentProfile).filter(
+                AgentProfile.user_id == user_id
+            ).all()
+            if not agents:
+                return {"status": "ok", "items": []}
+
+            svc = VectorSearchService()
+            tasks = []
+            for agent in agents:
+                tasks.append(
+                    svc.search_public_with_quality(
+                        query=q,
+                        top_k=limit,
+                        agent_hash=agent.hash,
+                        min_score=0.05,
+                    )
+                )
+            results_list = await asyncio.wait_for(
+                asyncio.gather(*tasks, return_exceptions=True),
+                timeout=TIMEOUT,
+            )
+            items = []
+            seen = set()
+            for agent, results in zip(agents, results_list):
+                if isinstance(results, Exception):
+                    continue
+                for r in results:
+                    key = r.get("key", "")
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    meta = r.get("metadata", {})
+                    items.append({
+                        "id": key,
+                        "agent_hash": agent.hash,
+                        "agent_name": agent.name or agent.hash,
+                        "snippet": meta.get("text", "")[:200],
+                        "score": r.get("score", 0),
+                        "timestamp": 0,
+                        "source": "vfs",
+                    })
+            return {"status": "ok", "items": items[:limit]}
+        except asyncio.TimeoutError:
+            return {"status": "timeout", "items": []}
+        except Exception as e:
+            return {"status": "error", "message": str(e), "items": []}
+
+    async def _search_moments() -> dict:
+        """Search GroupMoments by user's groups, text match on title + content."""
+        try:
+            results = await asyncio.wait_for(
+                _sync_search_moments(db, user_id, q, limit),
+                timeout=TIMEOUT,
+            )
+            return {"status": "ok", "items": results}
+        except asyncio.TimeoutError:
+            return {"status": "timeout", "items": []}
+        except Exception as e:
+            return {"status": "error", "message": str(e), "items": []}
+
+    async def _search_textbook() -> dict:
+        """Search textbook indexes via VectorSearchService.search_quality_textbook."""
+        try:
+            svc = VectorSearchService()
+            results = await asyncio.wait_for(
+                svc.search_quality_textbook(query=q, top_k=limit),
+                timeout=TIMEOUT,
+            )
+            items = []
+            for r in results:
+                meta = r.get("metadata", {})
+                items.append({
+                    "id": r.get("key", ""),
+                    "agent_hash": "",
+                    "agent_name": "",
+                    "snippet": meta.get("text", "")[:200],
+                    "score": r.get("score", 0),
+                    "timestamp": 0,
+                    "source": "textbook",
+                })
+            return {"status": "ok", "items": items}
+        except asyncio.TimeoutError:
+            return {"status": "timeout", "items": []}
+        except Exception as e:
+            return {"status": "error", "message": str(e), "items": []}
+
+    async def _search_miniapps() -> dict:
+        """Search AgentProfile apps list by name + description (simple text match)."""
+        try:
+            results = await asyncio.wait_for(
+                _sync_search_miniapps(db, user_id, q, limit),
+                timeout=TIMEOUT,
+            )
+            return {"status": "ok", "items": results}
+        except asyncio.TimeoutError:
+            return {"status": "timeout", "items": []}
+        except Exception as e:
+            return {"status": "error", "message": str(e), "items": []}
+
+    async def _search_local() -> dict:
+        """Placeholder for local file search — Desktop will add later."""
+        return {"status": "ok", "items": []}
+
+    # Build task map
+    task_map = {
+        "chat": _search_chat,
+        "vfs": _search_vfs,
+        "moments": _search_moments,
+        "textbook": _search_textbook,
+        "miniapps": _search_miniapps,
+        "local": _search_local,
+    }
+
+    # Launch enabled sources in parallel
+    tasks = {}
+    for src in source_list:
+        if src in task_map:
+            tasks[src] = asyncio.create_task(task_map[src]())
+
+    # Collect results (wait up to TIMEOUT total)
+    results_out = {}
+    if tasks:
+        done, pending = await asyncio.wait(
+            tasks.values(),
+            timeout=TIMEOUT,
+        )
+        for src, task in tasks.items():
+            if task in done:
+                try:
+                    results_out[src] = task.result()
+                except Exception as e:
+                    results_out[src] = {"status": "error", "message": str(e), "items": []}
+            else:
+                task.cancel()
+                results_out[src] = {"status": "timeout", "items": []}
+
+    # Fill missing sources with error
+    for src in source_list:
+        if src not in results_out:
+            results_out[src] = {"status": "error", "message": "not run", "items": []}
+
+    elapsed_ms = int((time_module.time() - t0) * 1000)
+    return JSONResponse(content={
+        "query": q,
+        "results": results_out,
+        "elapsed_ms": elapsed_ms,
+    })
+
+
+# ---- Sync helpers (called from async context) ----
+
+def _sync_search_chat(db: Session, user_id: int, q: str, limit: int) -> list:
+    """Search ChatHistory rows by content LIKE. Runs in thread pool."""
+    import asyncio
+    from sqlalchemy import orm
+
+    pattern = f"%{q}%"
+    query = db.query(
+        ChatHistory.id,
+        ChatHistory.agent_hash,
+        ChatHistory.content,
+        ChatHistory.created_at,
+    ).filter(
+        ChatHistory.user_id == user_id,
+        ChatHistory.content.ilike(pattern),
+    ).order_by(
+        ChatHistory.created_at.desc()
+    ).limit(limit)
+
+    items = []
+    # Resolve agent names
+    agent_hashes = set()
+    rows = query.all()
+    for row in rows:
+        agent_hashes.add(row.agent_hash)
+
+    agent_names = {}
+    if agent_hashes:
+        profiles = db.query(AgentProfile.hash, AgentProfile.name).filter(
+            AgentProfile.hash.in_(agent_hashes)
+        ).all()
+        agent_names = {p.hash: p.name or p.hash for p in profiles}
+
+    for row in rows:
+        content = row.content or ""
+        snippet = content[:200] if len(content) > 200 else content
+        items.append({
+            "id": f"msg-{row.id}",
+            "agent_hash": row.agent_hash,
+            "agent_name": agent_names.get(row.agent_hash, row.agent_hash),
+            "snippet": snippet,
+            "score": 0.5,  # Simple text match, no vector score
+            "timestamp": int(row.created_at.timestamp()) if row.created_at else 0,
+            "source": "chat",
+        })
+    return items
+
+
+def _sync_search_moments(db: Session, user_id: int, q: str, limit: int) -> list:
+    """Search GroupMoments rows visible to user by title + content LIKE."""
+    from models.group import Group
+
+    # Get group IDs the user has access to
+    owned = db.query(Group.id).filter(
+        Group.owner_user_id == user_id,
+        Group.deleted_at.is_(None)
+    ).all()
+    group_ids = [g.id for g in owned]
+
+    if not group_ids:
+        return []
+
+    # Fetch all moments for these groups, filter in Python
+    rows = db.query(GroupMoments).filter(
+        GroupMoments.group_id.in_(group_ids),
+    ).order_by(
+        GroupMoments.created_at.desc()
+    ).limit(200).all()
+
+    q_lower = q.lower()
+    items = []
+    for row in rows:
+        title = row.title or ""
+        content = row.content or ""
+        if q_lower not in title.lower() and q_lower not in content.lower():
+            continue
+        snippet = (title + " " + content)[:200]
+        items.append({
+            "id": row.id,
+            "agent_hash": row.agent_hash or "",
+            "agent_name": "",
+            "snippet": snippet,
+            "score": 0.5,
+            "timestamp": int(row.created_at.timestamp()) if row.created_at else 0,
+            "source": "moments",
+        })
+        if len(items) >= limit:
+            break
+
+    return items
+
+
+def _sync_search_miniapps(db: Session, user_id: int, q: str, limit: int) -> list:
+    """Search AgentProfile apps list (name + description) by text match."""
+    agents = db.query(AgentProfile).filter(
+        AgentProfile.user_id == user_id
+    ).all()
+
+    items = []
+    q_lower = q.lower()
+    for agent in agents:
+        # apps field not yet implemented — placeholder always empty
+        pass
+    return items
