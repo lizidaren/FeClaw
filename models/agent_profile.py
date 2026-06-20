@@ -29,6 +29,9 @@ class AgentProfile(Base):
     parallel_sandbox = Column(Boolean, default=False)  # 是否允许多个并行 sandbox
     lock_behavior = Column(String(16), default="wait_3s")  # 文件锁行为: "eagain" | "wait_3s"
     sr_enabled = Column(Boolean, default=False)  # 是否启用 Smart Router
+    is_pinned = Column(Boolean, default=False)  # Desktop 同步：是否置顶
+    is_dnd = Column(Boolean, default=False)  # Desktop 同步：是否免打扰
+    permission_mode = Column(String(32), nullable=True)  # Desktop 同步：权限模式
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, nullable=True, onupdate=datetime.utcnow)
     initialized_at = Column(DateTime, nullable=True)

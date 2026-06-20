@@ -3,22 +3,507 @@
 用户注册、登录等功能
 """
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Query
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from datetime import datetime, date
 from pydantic import BaseModel
+from typing import Optional, List
 import logging
 import re
+import time
 
 from config import settings
-from models.database import get_db, User, AgentProfile, ChatHistory
+from models.database import get_db, User, AgentProfile, ChatHistory, FilePermission
 from utils.auth import generate_salt, hash_password, verify_password, create_jwt_token, get_current_user, get_current_user_id
 from services.agent_init_service import agent_init_service
+from services.storage_service import get_storage_service
+from services.permission_service import PermissionService
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/user", tags=["User"])
+
+
+# ==========================================
+# VFS File Manager API (Phase 2A)
+# ==========================================
+
+def _get_agent_or_404(db: Session, agent_hash: str, user_id: int) -> AgentProfile:
+    """Verify agent ownership, raise 404 if not found."""
+    agent = db.query(AgentProfile).filter(
+        AgentProfile.hash == agent_hash,
+        AgentProfile.user_id == user_id
+    ).first()
+    if agent is None:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    return agent
+
+
+def _vfs_path_to_cos_key(agent_hash: str, vfs_path: str) -> str:
+    """
+    Convert VFS path to COS key.
+
+    VFS /workspace/... → COS agents/{hash}/workspace/...
+    VFS /               → COS agents/{hash}/
+    """
+    normalized = vfs_path.lstrip("/")
+    if normalized:
+        return f"{settings.TENCENT_COS_PREFIX}agents/{agent_hash}/{normalized}"
+    return f"{settings.TENCENT_COS_PREFIX}agents/{agent_hash}/"
+
+
+class VFSEntry(BaseModel):
+    name: str
+    type: str  # "dir" | "file"
+    size: int
+    mtime: float
+    content_type: Optional[str] = None
+
+
+def _parse_cos_date(date_str: str) -> float:
+    """Parse COS LastModified string to Unix epoch float."""
+    if not date_str:
+        return 0.0
+    try:
+        from email.utils import parsedate_to_datetime
+        dt = parsedate_to_datetime(date_str)
+        return dt.timestamp()
+    except Exception:
+        return 0.0
+
+
+@router.get("/agents/{hash}/vfs")
+async def list_vfs_dir(
+    hash: str,
+    path: str = "/",
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """
+    List VFS directory contents.
+
+    Returns files and subdirectories under the given VFS path.
+    """
+    _get_agent_or_404(db, hash, user_id)
+
+    cos_prefix = _vfs_path_to_cos_key(hash, path)
+    if not cos_prefix.endswith("/"):
+        cos_prefix += "/"
+
+    storage = get_storage_service()
+    objects = storage.list_objects(cos_prefix, max_keys=1000)
+    if objects is None:
+        return JSONResponse(content={"entries": [], "path": path})
+
+    # Parse direct children
+    entries: List[VFSEntry] = []
+    base_len = len(cos_prefix)
+
+    seen: set = set()
+    for obj in objects:
+        key = obj["Key"]
+        rel_path = key[base_len:].lstrip("/")
+
+        # Only direct children (no nested)
+        if "/" in rel_path:
+            dir_name = rel_path.split("/")[0]
+            if dir_name and dir_name not in seen:
+                seen.add(dir_name)
+                entries.append(VFSEntry(
+                    name=dir_name,
+                    type="dir",
+                    size=4096,
+                    mtime=0,
+                    content_type=None
+                ))
+        else:
+            name = rel_path
+            if name and name not in seen:
+                seen.add(name)
+                entries.append(VFSEntry(
+                    name=name,
+                    type="file",
+                    size=int(obj.get("Size", 0) or 0),
+                    mtime=_parse_cos_date(obj.get("LastModified", "")),
+                    content_type=obj.get("ContentType", "application/octet-stream")
+                ))
+
+    # Sort: dirs first, then by name
+    entries.sort(key=lambda e: (e.type != "dir", e.name))
+    return JSONResponse(content={"entries": [e.model_dump() for e in entries], "path": path})
+
+
+@router.get("/agents/{hash}/vfs/url")
+async def get_vfs_presigned_url(
+    hash: str,
+    path: str = Query(..., description="VFS file path, e.g. /workspace/images/photo.png"),
+    mode: str = Query("download", description="view|download"),
+    expires: int = Query(86400, ge=1, le=604800, description="URL expiry in seconds"),
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """
+    Get a presigned download URL for a VFS file.
+
+    mode=view: attempts inline display (response-content-disposition=inline)
+    mode=download: forces download (response-content-disposition=attachment)
+    """
+    _get_agent_or_404(db, hash, user_id)
+
+    cos_key = _vfs_path_to_cos_key(hash, path)
+    storage = get_storage_service()
+
+    # Build public URL
+    public_url = storage.get_object_public_url(cos_key)
+
+    # Generate presigned GET URL
+    presigned_url = storage.generate_presigned_get_url(public_url, expired=expires)
+
+    # Note: Tencent COS presigned GET URLs don't natively support
+    # response-content-disposition as a query param. For inline viewing,
+    # the client should open the URL directly (browser handles based on Content-Type).
+    # The mode hint is returned for client-side awareness.
+    return JSONResponse(content={
+        "url": presigned_url,
+        "method": "GET",
+        "expires_at": int(time.time()) + expires,
+        "mode": mode,
+        "key": cos_key
+    })
+
+
+class UploadUrlRequest(BaseModel):
+    path: str  # VFS path e.g. /workspace/images/photo.png
+    content_type: str = "application/octet-stream"
+
+
+@router.post("/agents/{hash}/vfs/url-upload")
+async def get_vfs_upload_url(
+    hash: str,
+    body: UploadUrlRequest,
+    expires: int = Query(3600, ge=60, le=86400, description="URL expiry in seconds"),
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """
+    Get a presigned PUT URL for uploading a file to VFS.
+
+    The client should PUT the file directly to the returned URL.
+    """
+    _get_agent_or_404(db, hash, user_id)
+
+    cos_key = _vfs_path_to_cos_key(hash, body.path)
+    storage = get_storage_service()
+
+    presigned_url = storage.generate_presigned_put_url(cos_key, expired=expires)
+
+    return JSONResponse(content={
+        "url": presigned_url,
+        "method": "PUT",
+        "expires_at": int(time.time()) + expires,
+        "key": cos_key,
+        "content_type": body.content_type
+    })
+
+
+class MkdirRequest(BaseModel):
+    path: str  # VFS directory path e.g. /workspace/images
+
+
+@router.post("/agents/{hash}/vfs/mkdir")
+async def create_vfs_dir(
+    hash: str,
+    body: MkdirRequest,
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """
+    Create a VFS directory.
+
+    COS doesn't have real directories. Creates a zero-byte object with
+    a trailing "/" in the key to represent the directory.
+    """
+    _get_agent_or_404(db, hash, user_id)
+
+    cos_key = _vfs_path_to_cos_key(hash, body.path)
+    if not cos_key.endswith("/"):
+        cos_key += "/"
+
+    storage = get_storage_service()
+    storage.put_object(cos_key, b"")
+
+    logger.info(f"[VFS] Created directory: {cos_key}")
+    return JSONResponse(content={"status": "ok", "path": body.path})
+
+
+@router.delete("/agents/{hash}/vfs/rm")
+async def delete_vfs_path(
+    hash: str,
+    path: str = Query(..., description="VFS path to delete"),
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """
+    Delete a VFS file or empty directory.
+
+    For directories, only succeeds if the directory is empty.
+    """
+    _get_agent_or_404(db, hash, user_id)
+
+    cos_key = _vfs_path_to_cos_key(hash, path)
+    if cos_key.endswith("/"):
+        # Verify it's empty
+        storage = get_storage_service()
+        objects = storage.list_objects(cos_key, max_keys=2)
+        if objects and len(objects) > 0:
+            raise HTTPException(status_code=400, detail="Directory not empty, cannot delete")
+
+    storage = get_storage_service()
+    success = storage.delete_file_by_key(cos_key)
+    if not success:
+        raise HTTPException(status_code=500, detail="Delete failed")
+
+    logger.info(f"[VFS] Deleted: {cos_key}")
+    return JSONResponse(content={"status": "ok", "path": path})
+
+
+class MoveRequest(BaseModel):
+    from_path: str
+    to_path: str
+
+
+@router.post("/agents/{hash}/vfs/mv")
+async def move_vfs_path(
+    hash: str,
+    body: MoveRequest,
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """
+    Rename or move a VFS file/directory.
+
+    Implementation: copy to new key + delete old key.
+    """
+    _get_agent_or_404(db, hash, user_id)
+
+    from_key = _vfs_path_to_cos_key(hash, body.from_path)
+    to_key = _vfs_path_to_cos_key(hash, body.to_path)
+
+    storage = get_storage_service()
+
+    # Read content from source
+    content = storage.get_file_content(from_key)
+    if content is None:
+        raise HTTPException(status_code=404, detail="Source not found")
+
+    # Write to destination
+    storage.put_object(to_key, content)
+
+    # Delete source
+    storage.delete_file_by_key(from_key)
+
+    logger.info(f"[VFS] Moved: {from_key} → {to_key}")
+    return JSONResponse(content={"status": "ok", "from_path": body.from_path, "to_path": body.to_path})
+
+
+class PermissionRequest(BaseModel):
+    path: str
+    permission: str  # "read" | "readwrite" | "none"
+
+
+@router.patch("/agents/{hash}/vfs/permissions")
+async def set_vfs_permission(
+    hash: str,
+    body: PermissionRequest,
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """
+    Set file permission for an Agent on a VFS path.
+
+    permission: "read" | "readwrite" | "none"
+    """
+    _get_agent_or_404(db, hash, user_id)
+
+    valid_perms = {"read", "readwrite", "none"}
+    if body.permission not in valid_perms:
+        raise HTTPException(status_code=400, detail=f"Invalid permission. Must be one of: {valid_perms}")
+
+    svc = PermissionService(agent_hash=hash, db=db)
+    ok = svc.grant_permission(body.path, body.permission)
+    if not ok:
+        raise HTTPException(status_code=400, detail="Failed to set permission")
+
+    return JSONResponse(content={"status": "ok", "path": body.path, "permission": body.permission})
+
+
+class FileEvent(BaseModel):
+    type: str  # e.g. "create", "modify", "delete"
+    path: str
+    timestamp: int  # Unix epoch ms
+
+
+class FileEventsRequest(BaseModel):
+    events: List[FileEvent]
+
+
+@router.post("/agents/{hash}/vfs/events")
+async def receive_vfs_events(
+    hash: str,
+    body: FileEventsRequest,
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """
+    Receive file operation event notifications from Desktop.
+
+    Currently a no-op: logs events and returns 200.
+    Future use: index events for change feeds / webhooks.
+    """
+    _get_agent_or_404(db, hash, user_id)
+
+    for event in body.events:
+        logger.info(f"[VFS Events] agent={hash} type={event.type} path={event.path} ts={event.timestamp}")
+
+    return JSONResponse(content={"status": "ok", "received": len(body.events)})
+
+
+class AgentSettingsRequest(BaseModel):
+    alias: Optional[str] = None
+    is_pinned: Optional[bool] = None
+    is_dnd: Optional[bool] = None
+    permission_mode: Optional[str] = None
+
+
+@router.patch("/agents/{hash}/settings")
+async def update_agent_settings(
+    hash: str,
+    body: AgentSettingsRequest,
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """
+    Update agent display settings (sync from Desktop).
+
+    - alias: maps to AgentProfile.name
+    - is_pinned: Desktop pin state
+    - is_dnd: Desktop do-not-disturb state
+    - permission_mode: permission mode string
+    """
+    agent = _get_agent_or_404(db, hash, user_id)
+
+    if body.alias is not None:
+        agent.name = body.alias
+    if body.is_pinned is not None:
+        agent.is_pinned = body.is_pinned
+    if body.is_dnd is not None:
+        agent.is_dnd = body.is_dnd
+    if body.permission_mode is not None:
+        agent.permission_mode = body.permission_mode
+
+    agent.updated_at = datetime.utcnow()
+    db.commit()
+
+    return JSONResponse(content={
+        "status": "ok",
+        "hash": hash,
+        "name": agent.name,
+        "is_pinned": agent.is_pinned,
+        "is_dnd": agent.is_dnd,
+        "permission_mode": agent.permission_mode
+    })
+
+
+@router.get("/agents/{hash}/apps")
+async def list_agent_apps(
+    hash: str,
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """
+    List miniapps available for the agent.
+
+    Currently returns empty list. Future: query apps_service.
+    """
+    _get_agent_or_404(db, hash, user_id)
+    return JSONResponse(content={"apps": []})
+
+
+@router.get("/agents/{hash}/config")
+async def get_agent_config(
+    hash: str,
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """
+    Get agent configuration: persona, tools, and config files.
+    """
+    _get_agent_or_404(db, hash, user_id)
+
+    persona = agent_init_service.load_agent_persona(hash)
+    tools = agent_init_service.load_agent_tools(hash)
+    config = agent_init_service.load_agent_config(hash)
+
+    return JSONResponse(content={
+        "status": "ok",
+        "hash": hash,
+        "persona": persona or "",
+        "tools": tools or {"enabled": [], "disabled": []},
+        "config": config or {}
+    })
+
+
+class UpdateAgentConfigRequest(BaseModel):
+    persona: Optional[str] = None
+    tools: Optional[dict] = None
+    config: Optional[dict] = None
+
+
+@router.put("/agents/{hash}/config")
+async def update_agent_config(
+    hash: str,
+    body: UpdateAgentConfigRequest,
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """
+    Update agent configuration: persona, tools, and/or config files.
+    """
+    agent = _get_agent_or_404(db, hash, user_id)
+
+    results = {}
+    errors = []
+
+    if body.persona is not None:
+        ok = agent_init_service.save_agent_persona(hash, body.persona)
+        results["persona"] = "updated" if ok else "unchanged"
+
+    if body.tools is not None:
+        ok, err = agent_init_service.save_agent_tools(hash, body.tools)
+        if ok:
+            results["tools"] = "updated"
+        else:
+            errors.append(f"tools: {err}")
+
+    if body.config is not None:
+        ok, err = agent_init_service.save_agent_config(hash, body.config)
+        if ok:
+            results["config"] = "updated"
+        else:
+            errors.append(f"config: {err}")
+
+    agent.updated_at = datetime.utcnow()
+    db.commit()
+
+    if errors:
+        return JSONResponse(status_code=400, content={
+            "status": "partial_success",
+            "results": results,
+            "errors": errors
+        })
+
+    return JSONResponse(content={"status": "ok", "hash": hash, "results": results})
 
 
 @router.post("/register")

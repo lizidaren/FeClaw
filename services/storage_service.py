@@ -202,7 +202,7 @@ class CosStorage(FileStorage):
         """Build the public COS URL for an object key."""
         return f"https://{settings.TENCENT_COS_BUCKET}.cos.{settings.TENCENT_COS_REGION}.myqcloud.com/{key}"
 
-    def generate_presigned_get_url(self, url: str, expired: int = 3600*7*24) -> str:
+    def generate_presigned_get_url(self, url: str, expired: int = 86400) -> str:
         """
         生成预签名下载URL（用于显示图片）
 
