@@ -67,6 +67,7 @@ from routers.wechat import ensure_message_handler
 from services.agent_init_service import ensure_default_agent_5178
 from routers.desktop_ws import router as desktop_ws_router
 from routers.well_known import router as well_known_router
+from routers.upload import router as upload_router
 
 
 @asynccontextmanager
@@ -368,6 +369,10 @@ app.include_router(well_known_router)  # .well-known/feclaw-desktop 发现端点
 if settings.DESKTOP_ENABLED:
     app.include_router(desktop_ws_router)
     logger.info("Desktop WS relay enabled")
+
+# Upload session router（桌面端直传 COS）
+app.include_router(upload_router)
+logger.info("Upload session router registered")
 
 
 # 注释掉：/ 路由由 feclaw_domain.py 处理，根据域名返回不同页面

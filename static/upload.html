@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>上传文件</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      background: #1a1a2e;
+      color: #eee;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+    .card {
+      background: #16213e;
+      border-radius: 12px;
+      padding: 32px 24px;
+      width: 100%;
+      max-width: 400px;
+      text-align: center;
+    }
+    h1 { font-size: 1.4rem; margin-bottom: 8px; color: #e94560; }
+    p { font-size: 0.9rem; color: #999; margin-bottom: 24px; line-height: 1.5; }
+    .camera-btn {
+      display: inline-block;
+      background: #e94560;
+      color: #fff;
+      padding: 14px 28px;
+      border-radius: 8px;
+      font-size: 1rem;
+      cursor: pointer;
+      border: none;
+      transition: background 0.2s;
+    }
+    .camera-btn:hover { background: #c73652; }
+    .camera-btn:disabled { background: #555; cursor: not-allowed; }
+    input[type="file"] { display: none; }
+    #status {
+      margin-top: 20px;
+      font-size: 0.85rem;
+      color: #aaa;
+      min-height: 20px;
+    }
+    #result {
+      margin-top: 16px;
+      padding: 12px;
+      border-radius: 8px;
+      font-size: 0.9rem;
+      display: none;
+    }
+    #result.success { background: #1b4332; color: #74c69d; display: block; }
+    #result.error { background: #4a1c1c; color: #f08080; display: block; }
+    #filename { font-weight: bold; color: #e94560; word-break: break-all; }
+  </style>
+</head>
+<body>
+<div class="card">
+  <h1>📤 文件上传</h1>
+  <p id="desc">点击下方按钮选择文件<br>文件将直接上传到云端</p>
+
+  <label class="camera-btn" id="btn">
+    选择文件
+    <input type="file" id="fileInput" accept="*/*" capture="environment">
+  </label>
+
+  <div id="status"></div>
+  <div id="result"></div>
+</div>
+
+<script>
+(function () {
+  var params = new URLSearchParams(window.location.search);
+  var presignedUrl = params.get("presigned_url");
+  var sessionId = params.get("session_id");
+
+  if (!presignedUrl || !sessionId) {
+    document.getElementById("status").textContent = "缺少 presigned_url 或 session_id 参数";
+    document.getElementById("btn").style.display = "none";
+    return;
+  }
+
+  var fileInput = document.getElementById("fileInput");
+  var status = document.getElementById("status");
+  var result = document.getElementById("result");
+  var btn = document.getElementById("btn");
+
+  fileInput.addEventListener("change", function (e) {
+    var file = e.target.files[0];
+    if (!file) return;
+
+    btn.disabled = true;
+    status.textContent = "正在上传: " + file.name + " ...";
+    result.className = "";
+    result.style.display = "none";
+
+    fetch(presignedUrl, {
+      method: "PUT",
+      body: file,
+      headers: { "Content-Type": file.type || "application/octet-stream" }
+    })
+      .then(function (res) {
+        if (!res.ok) throw new Error("上传失败 HTTP " + res.status);
+        return fetch("/api/desktop/upload_done", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ session_id: sessionId, filename: file.name })
+        });
+      })
+      .then(function (res) {
+        if (!res.ok) throw new Error("回调失败 HTTP " + res.status);
+        return res.json();
+      })
+      .then(function () {
+        status.textContent = "";
+        result.className = "success";
+        result.innerHTML = "✅ 上传完成！<br>文件名: <span id=\"filename\">" + escapeHtml(file.name) + "</span><br>请返回 Desktop 继续操作";
+      })
+      .catch(function (err) {
+        status.textContent = "";
+        result.className = "error";
+        result.textContent = "上传失败: " + err.message;
+        btn.disabled = false;
+      });
+  });
+
+  function escapeHtml(str) {
+    return String(str)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  }
+})();
+</script>
+</body>
+</html>
