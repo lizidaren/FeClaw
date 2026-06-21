@@ -12,8 +12,8 @@ from typing import Optional, List, Dict, Any
 
 from sqlalchemy.orm import Session
 
-from models.database import SessionLocal
-from models.group import GroupMoments, AgentProfile
+from models.database import SessionLocal, AgentProfile
+from models.group import GroupMoments
 
 logger = logging.getLogger(__name__)
 

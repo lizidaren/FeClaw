@@ -22,6 +22,7 @@ import logging
 import os
 import time
 from datetime import datetime
+from pathlib import PurePosixPath
 from typing import Any, Dict, List, Optional, Tuple
 
 from models.database import SessionLocal
@@ -53,6 +54,12 @@ class FeHubService:
         self.agent_hash = agent_hash
         self.base_path = f"feclaw/agents/{agent_hash}/"
         self.vfs = VirtualFileSystem(agent_hash=agent_hash)
+
+    @staticmethod
+    def _validate_path(vfs_path: str) -> bool:
+        """Reject paths with .. traversal or absolute paths."""
+        p = PurePosixPath(vfs_path)
+        return not p.is_absolute() and ".." not in p.parts
 
     # ── Init ────────────────────────────────────────────────
 
@@ -124,6 +131,8 @@ class FeHubService:
 
     async def _copy_template(self, target: str, template_path: str) -> str:
         """Recursively copy template directory to target."""
+        if not self._validate_path(target):
+            return "Error: Invalid target path"
         # List all files in template path
         cos_prefix = self._vpath_to_cos(template_path)
         storage = _get_storage()
@@ -136,6 +145,8 @@ class FeHubService:
             key = obj["Key"]
             rel_path = key[len(cos_prefix):].lstrip("/")
             if not rel_path:
+                continue
+            if not self._validate_path(rel_path):
                 continue
             # Read source file
             content = storage.get_file_content(key)
@@ -495,6 +506,8 @@ class FeHubService:
 
         copied = 0
         for vfs_file_path in files:
+            if not self._validate_path(vfs_file_path):
+                continue
             # Read file content from workspace
             full_vfs_path = f"{workspace_vfs}/{vfs_file_path}" if vfs_file_path else workspace_vfs
             content = await self.vfs.async_read_file(full_vfs_path)
