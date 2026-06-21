@@ -112,9 +112,19 @@ async def desktop_websocket_global(
     try:
         while True:
             data = await ws.receive_json()
-            # 不注入 agent_hash（此端点无 agent 上下文）
+            # 防御性编程：校验消息中的 agent_hash 所有权
             if isinstance(data, dict):
                 data.setdefault("user_id", user_id)
+                msg_agent = data.get("agent_hash") or data.get("agent")
+                if msg_agent:
+                    owns, exists = _user_owns_agent(user_id, msg_agent)
+                    if not owns:
+                        logger.warning(
+                            f"Desktop WS (global) rejected agent access: "
+                            f"user_id={user_id} agent_hash={msg_agent} (exists={exists})"
+                        )
+                        # 跳过该消息处理，但不断开连接（用户可能拥有其他 agent）
+                        continue
             await handle_desktop_message(data)
     except WebSocketDisconnect:
         await manager.disconnect(ws)
