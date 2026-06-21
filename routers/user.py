@@ -720,7 +720,7 @@ class CreateAgentRequest(BaseModel):
     agent_type: str = "classic"
 
 
-@router.get("/api/user/permissions")
+@router.get("/permissions")
 async def get_user_permissions(
     user_id: int = Depends(get_current_user_id),
     db: Session = Depends(get_db)
@@ -775,7 +775,7 @@ async def get_user_permissions(
     })
 
 
-@router.post("/api/user/agents")
+@router.post("/agents")
 async def create_agent(
     request: Request,
     user_id: int = Depends(get_current_user_id),
@@ -809,7 +809,7 @@ async def create_agent(
     })
 
 
-@router.get("/api/user/agents/{agent_hash}")
+@router.get("/agents/{agent_hash}")
 async def get_agent_by_hash(
     agent_hash: str,
     user_id: int = Depends(get_current_user_id),
@@ -938,7 +938,7 @@ async def create_user_moment(
 # Search Aggregation API (Phase 7)
 # ==========================================
 
-@router.get("/api/user/search")
+@router.get("/search")
 async def search_all(
     q: str,
     sources: str = "chat,vfs,moments,textbook",

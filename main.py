@@ -68,6 +68,7 @@ from services.agent_init_service import ensure_default_agent_5178
 from routers.desktop_ws import router as desktop_ws_router
 from routers.well_known import router as well_known_router
 from routers.upload import router as upload_router
+from routers.desktop_api import router as desktop_api_router
 
 
 @asynccontextmanager
@@ -343,6 +344,7 @@ app.mount("/static", StaticFiles(directory=os.path.join(os.path.dirname(__file__
 app.include_router(apps_gateway.router)  # App 路由网关（必须在 feclaw_domain 之前）
 app.include_router(fehub.router)  # FeHub VCS + Publish API
 app.include_router(feclaw_domain_router)  # FeClaw 域名专用路由
+app.include_router(desktop_api_router)  # Desktop 客户端 API
 app.include_router(feclaw_chat_router)  # FeClaw 聊天 API
 app.include_router(workspace.router)  # 工作区管理
 app.include_router(wechat.router)  # 微信接入
@@ -361,17 +363,12 @@ app.include_router(share.router)  # 分享链接解析
 app.include_router(share_reference.router)  # 分享页引用令牌
 app.include_router(vfs_view.router)  # VFS 文件查看（历史图片/文件展示）
 app.include_router(oauth.router)  # OAuth 认证 (必须在 static_site_public 之前)
-
-app.include_router(static_site_public.router)  # 静态网站公开访问
-app.include_router(well_known_router)  # .well-known/feclaw-desktop 发现端点
-
 # Desktop WS 通道（条件启用）
+
 if settings.DESKTOP_ENABLED:
     app.include_router(desktop_ws_router)
     logger.info("Desktop WS relay enabled")
-
-# Upload session router（桌面端直传 COS）
-app.include_router(upload_router)
+app.include_router(static_site_public.router)  # 静态网站公开访问
 logger.info("Upload session router registered")
 
 
