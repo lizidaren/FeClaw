@@ -81,6 +81,48 @@ def _user_owns_agent(user_id: int, agent_hash: str) -> tuple[bool, bool]:
         db.close()
 
 
+@router.websocket("/ws/desktop")
+async def desktop_websocket_global(
+    ws: WebSocket,
+    token: Optional[str] = Query(None),
+):
+    """
+    Desktop WS 全局连接端点（无 agent_hash）。
+
+    与 /ws/desktop/{agent_hash} 不同，此端点不要求 agent_hash，
+    适用于 Desktop 客户端建立单一 WS 连接的情况。
+
+    Close codes:
+      * 4001 — invalid / expired JWT
+    """
+    # 1. JWT 校验
+    if not token:
+        await ws.close(code=4001, reason=b"missing token")
+        logger.warning("Desktop WS (global) rejected: missing token")
+        return
+    payload = decode_jwt_token(token)
+    if not payload or not payload.get("user_id"):
+        await ws.close(code=4001, reason=b"invalid token")
+        logger.warning("Desktop WS (global) rejected: invalid token")
+        return
+    user_id: int = int(payload["user_id"])
+
+    # 鉴权通过，正式 accept
+    await manager.connect(ws)
+    try:
+        while True:
+            data = await ws.receive_json()
+            # 不注入 agent_hash（此端点无 agent 上下文）
+            if isinstance(data, dict):
+                data.setdefault("user_id", user_id)
+            await handle_desktop_message(data)
+    except WebSocketDisconnect:
+        await manager.disconnect(ws)
+    except Exception as e:
+        logger.error(f"Desktop WS (global) error: {e}")
+        await manager.disconnect(ws)
+
+
 @router.websocket("/ws/desktop/{agent_hash}")
 async def desktop_websocket(
     ws: WebSocket,
