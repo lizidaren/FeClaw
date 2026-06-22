@@ -209,8 +209,89 @@ async def handle_desktop_message(msg: dict):
             from services.desktop_relay import relay
             payload = msg.get("payload", {})
             await relay.resolve_response(request_id, payload)
+    elif msg_type == "chat_message":
+        # Desktop 聊天消息 → 通过 WebChannelService 处理并回复
+        text = msg.get("text", "")
+        agent_hash = msg.get("agent_hash") or msg.get("agent", "")
+        msg_id = msg.get("id", "")
+        user_id = msg.get("user_id")
+        if not text or not agent_hash or not user_id:
+            logger.warning(f"Desktop WS: incomplete chat_message (agent={agent_hash}, text_len={len(text)})")
+            return
+        # 异步处理：不要让 WS 消息循环等待 LLM 响应
+        asyncio.ensure_future(_handle_chat_message(user_id, agent_hash, text, msg_id))
     else:
         logger.warning(f"Unknown desktop message type: {msg_type}")
+
+
+async def _handle_chat_message(user_id: int, agent_hash: str, text: str, msg_id: str):
+    """后台处理 Desktop 聊天消息并回复"""
+    try:
+        from services.web_channel_service import WebChannelService
+        from models.database import SessionLocal
+
+        db = SessionLocal()
+        try:
+            chat_service = WebChannelService(db, user_id=user_id, agent_hash=agent_hash)
+            full_response = ""
+            async for sse_str in chat_service.chat_stream(text):
+                # SSE 格式: "event: token\ndata: {...}\n\n"
+                if not sse_str.startswith("event: "):
+                    continue
+                lines = sse_str.strip().split("\n")
+                event_type = None
+                data_str = None
+                for line in lines:
+                    if line.startswith("event: "):
+                        event_type = line[7:]
+                    elif line.startswith("data: "):
+                        data_str = line[6:]
+                if event_type == "token" and data_str:
+                    try:
+                        payload = json.loads(data_str)
+                        token = payload.get("content", "")
+                        full_response += token
+                        chat_event = {
+                            "type": "chat_event",
+                            "id": msg_id,
+                            "kind": "token",
+                            "data": {"delta": token},
+                            "timestamp": __import__("datetime").datetime.utcnow().isoformat() + "Z",
+                        }
+                        await send_to_desktop(chat_event)
+                    except json.JSONDecodeError:
+                        pass
+                elif event_type == "done":
+                    # 发送最终响应
+                    chat_reply = {
+                        "type": "chat_reply",
+                        "id": msg_id,
+                        "text": full_response,
+                        "agent": agent_hash,
+                        "timestamp": __import__("datetime").datetime.utcnow().isoformat() + "Z",
+                    }
+                    await send_to_desktop(chat_reply)
+                    # 发送完成事件
+                    done_event = {
+                        "type": "chat_event",
+                        "id": msg_id,
+                        "kind": "done",
+                        "data": {"session_id": data_str} if data_str else {},
+                        "timestamp": __import__("datetime").datetime.utcnow().isoformat() + "Z",
+                    }
+                    await send_to_desktop(done_event)
+        finally:
+            db.close()
+    except Exception as e:
+        logger.error(f"Desktop chat error: {e}", exc_info=True)
+        error_reply = {
+            "type": "chat_reply",
+            "id": msg_id,
+            "text": f"抱歉，处理消息时出错了：{str(e)}",
+            "agent": agent_hash,
+            "timestamp": __import__("datetime").datetime.utcnow().isoformat() + "Z",
+        }
+        await send_to_desktop(error_reply)
 
 
 # 提供给其他模块调用的发送接口
