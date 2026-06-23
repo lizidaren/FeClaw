@@ -15,24 +15,22 @@ from config import settings
 
 logger = logging.getLogger(__name__)
 
-# DashScope TTS API
-TTS_API_URL = "https://dashscope.aliyuncs.com/api/v1/services/tts/text-to-speech"
+# DashScope TTS API (OpenAI-compatible)
+TTS_API_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1/audio/speech"
 
-# 可用声音列表
+# 可用声音列表（CosyVoice 预置声音）
 COSYVOICE_VOICES = {
     # 中文女声
-    "longxiaoxia": "longxiaoxia",      # 龙小夏 — 知性女声，适合播报/教育
+    "longxiaoxia": "longxiaoxia",      # 龙小夏 — 知性女声
     "longxiaowan": "longxiaowan",      # 龙小婉 — 温暖女声
     "longxiaomeng": "longxiaomeng",    # 龙小梦 — 甜美少女声
     "longxiaolu": "longxiaolu",        # 龙小路 — 活泼女声
+    "zhitian_emo": "zhitian_emo",      # 知甜 — 中文女声(情感)
     # 中文男声
     "longxiang": "longxiang",          # 龙翔 — 沉稳男声
     "longchen": "longchen",            # 龙辰 — 磁性男声
     "longhao": "longhao",              # 龙浩 — 温柔男声
-    # 双语女声
-    "longxiaoxia_en": "longxiaoxia_en", # 龙小夏 双语
-    # 双语男声
-    "longxiang_en": "longxiang_en",    # 龙翔 双语
+    "zhiyan_emo": "zhiyan_emo",        # 知彦 — 中文男声(情感)
 }
 
 
@@ -73,13 +71,10 @@ async def synthesize(
 
     payload = {
         "model": "cosyvoice-v1",
-        "input": {"text": text},
-        "parameters": {
-            "voice": voice,
-            "format": format,
-            "rate": rate,
-            "pitch": pitch,
-        },
+        "input": text,
+        "voice": voice,
+        "response_format": format,
+        "speed": rate,
     }
 
     try:
@@ -96,7 +91,7 @@ async def synthesize(
                 logger.info(f"TTS OK: {len(resp.content)} bytes, voice={voice}")
                 return resp.content
             else:
-                logger.error(f"TTS failed: {resp.status_code} {resp.text[:200]}")
+                logger.error(f"TTS failed: {resp.status_code} {resp.text[:300]}")
                 return None
     except Exception as e:
         logger.error(f"TTS request error: {e}")
