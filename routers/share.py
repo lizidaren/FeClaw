@@ -219,7 +219,8 @@ mermaid.run({{nodes:document.querySelectorAll('.mermaid')}});
 
                 mime_map = {".html": "text/html; charset=utf-8", ".txt": "text/plain; charset=utf-8",
                            ".png": "image/png", ".jpg": "image/jpeg",
-                           ".json": "application/json", ".py": "text/plain; charset=utf-8"}
+                           ".json": "application/json", ".py": "text/plain; charset=utf-8",
+                           ".mp3": "audio/mpeg", ".wav": "audio/wav"}
                 ct = mime_map.get(ext, "application/octet-stream")
                 _fname = os.path.basename(vfs_path)
                 return Response(content=content, media_type=ct,
@@ -339,7 +340,8 @@ mermaid.run({{nodes:document.querySelectorAll('.mermaid')}});
 
                 mime_map = {".html": "text/html; charset=utf-8", ".txt": "text/plain; charset=utf-8",
                            ".png": "image/png", ".jpg": "image/jpeg",
-                           ".json": "application/json", ".py": "text/plain; charset=utf-8"}
+                           ".json": "application/json", ".py": "text/plain; charset=utf-8",
+                           ".mp3": "audio/mpeg", ".wav": "audio/wav"}
                 content_type = mime_map.get(ext, "application/octet-stream")
                 _fname = os.path.basename(vfs_path)
                 return Response(content=content, media_type=content_type,

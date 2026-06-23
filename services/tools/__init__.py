@@ -18,9 +18,11 @@ from services.tools.knowledge_tools import KnowledgeToolsMixin
 from services.tools.route_tools import RouteToolsMixin
 from services.tools.moments_tools import MomentsToolsMixin
 from services.tools.fehub_tools import FeHubToolsMixin
+from services.tools.tts_tools import TtsToolsMixin
 
 
 class AgentToolsService(
+    TtsToolsMixin,
     FeHubToolsMixin,
     MomentsToolsMixin,
     FileOpsMixin,
