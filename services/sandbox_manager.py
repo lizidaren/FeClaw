@@ -693,6 +693,12 @@ class SandboxManager:
                 "--ro-bind", self.BWRAP_BPF_PATH, "/seccomp.bpf",
             ]
 
+        # 确保 python3 指向 python3.12（系统默认 python3 通常是 3.8）
+        p12 = shutil.which("python3.12") or "/usr/local/bin/python3.12"
+        p3 = os.path.join(os.path.dirname(p12), "python3")
+        if os.path.exists(p12) and not os.path.exists(p3):
+            opts += ["--ro-bind", p12, p3]
+
         # 环境变量设置
         opts += [
             "--setenv", "PATH", host_path,
