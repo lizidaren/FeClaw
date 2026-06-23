@@ -1,61 +1,56 @@
 """
 TTS Client — 语音合成服务
 
-封装阿里云 DashScope CosyVoice API，生成 MP3 音频。
+封装 MiniMax TTS API，生成 MP3 音频。
 Agent 通过 tts 工具调用，结果存 VFS / COS。
 """
 
 import os
 import uuid
-import hashlib
 import logging
 import httpx
 from typing import Optional
-from config import settings
 
 logger = logging.getLogger(__name__)
 
-# DashScope TTS API (OpenAI-compatible)
-TTS_API_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1/audio/speech"
+# MiniMax TTS API
+TTS_API_URL = "https://api.minimaxi.com/v1/text_to_speech"
 
-# 可用声音列表（CosyVoice 预置声音）
-COSYVOICE_VOICES = {
+# MiniMax 声音列表（speech-01 模型）
+AVAILABLE_VOICES = {
     # 中文女声
-    "longxiaoxia": "longxiaoxia",      # 龙小夏 — 知性女声
-    "longxiaowan": "longxiaowan",      # 龙小婉 — 温暖女声
-    "longxiaomeng": "longxiaomeng",    # 龙小梦 — 甜美少女声
-    "longxiaolu": "longxiaolu",        # 龙小路 — 活泼女声
-    "zhitian_emo": "zhitian_emo",      # 知甜 — 中文女声(情感)
+    "female-shaonv": "female-shaonv",        # 少女 — 甜美少女声
+    "female-yujie": "female-yujie",          # 御姐 — 成熟知性女声
+    "female-tianmei": "female-tianmei",       # 甜美 — 甜美可爱声
+    "female-chengshu": "female-chengshu",    # 成熟 — 沉稳女声
     # 中文男声
-    "longxiang": "longxiang",          # 龙翔 — 沉稳男声
-    "longchen": "longchen",            # 龙辰 — 磁性男声
-    "longhao": "longhao",              # 龙浩 — 温柔男声
-    "zhiyan_emo": "zhiyan_emo",        # 知彦 — 中文男声(情感)
+    "male-qn-qingse": "male-qn-qingse",      # 青涩 — 温柔青年男声
+    "male-qn-jingying": "male-qn-jingying",  # 精英 — 沉稳男声
+    "male-qn-badao": "male-qn-badao",        # 霸道 — 霸气男声
+    "male-qn-daxuesheng": "male-qn-daxuesheng",  # 大学生 — 阳光男声
 }
 
 
 def get_api_key() -> str:
-    """获取 DashScope API Key"""
-    key = os.environ.get("DASHSCOPE_API_KEY") or os.environ.get("QWEN_API_KEY") or ""
+    """获取 MiniMax API Key"""
+    key = os.environ.get("MINIMAX_API_KEY") or ""
     if not key:
-        logger.error("DASHSCOPE_API_KEY 未设置")
+        logger.error("MINIMAX_API_KEY 未设置")
     return key
 
 
 async def synthesize(
     text: str,
-    voice: str = "longxiaoxia",
+    voice: str = "female-zh-yue",
     rate: float = 1.0,
-    pitch: float = 1.0,
     format: str = "mp3",
 ) -> Optional[bytes]:
-    """调用 CosyVoice TTS API 合成语音
+    """调用 MiniMax TTS API 合成语音
 
     Args:
         text: 要合成的文本
-        voice: 声音名称（见 COSYVOICE_VOICES）
+        voice: 声音名称
         rate: 语速 (0.5-2.0)
-        pitch: 音调 (0.5-2.0)
         format: 输出格式 (mp3/wav/pcm)
 
     Returns:
@@ -65,16 +60,16 @@ async def synthesize(
     if not api_key:
         return None
 
-    if voice not in COSYVOICE_VOICES:
-        logger.warning(f"未知声音 '{voice}'，使用默认 'longxiaoxia'")
-        voice = "longxiaoxia"
+    if voice not in AVAILABLE_VOICES:
+        logger.warning(f"未知声音 '{voice}'，使用默认")
+        voice = "female-zh-yue"
 
     payload = {
-        "model": "cosyvoice-v1",
-        "input": text,
-        "voice": voice,
-        "response_format": format,
+        "model": "speech-01",
+        "text": text,
+        "voice_id": voice,
         "speed": rate,
+        "output_format": format,
     }
 
     try:

@@ -10,7 +10,7 @@ import uuid
 import logging
 from typing import Optional
 from services.tools.base import AgentToolsServiceBase, tool
-from services.tts_client import synthesize, COSYVOICE_VOICES
+from services.tts_client import synthesize, AVAILABLE_VOICES
 
 logger = logging.getLogger(__name__)
 
@@ -19,12 +19,18 @@ class TtsToolsMixin(AgentToolsServiceBase):
 
     @tool(
         description="""将给定文本合成为语音音频（MP3），保存到 agent 工作区。
-用法: tts text=<文本> voice=longxiaoxia rate=1.0
+用法: tts text=<文本> voice=female-shaonv rate=1.0
 前置条件：无。文本尽量简短（500字以内效果好），长文本会自动分段处理。
 
 可用声音：
-- longxiaoxia（默认）— 知性女声，适合播报/朗读
-- longxiang — 沉稳男声，适合讲解
+- female-shaonv（默认）— 少女，甜美可爱，适合教学/朗读
+- female-yujie — 御姐，成熟知性，适合播报
+- female-tianmei — 甜美声
+- female-chengshu — 沉稳女声
+- male-qn-qingse — 青涩，温柔青年男声，适合讲解
+- male-qn-jingying — 精英，沉稳男声
+- male-qn-badao — 霸气男声
+- male-qn-daxuesheng — 阳光大学生男声
 - longxiaowan — 温暖女声
 - longxiaomeng — 甜美少女声
 - longhao — 温柔男声
@@ -33,7 +39,7 @@ class TtsToolsMixin(AgentToolsServiceBase):
 返回: 音频文件的 VFS 路径，可用 create_share_link 分享""",
         category="code"
     )
-    async def tts(self, text: str, voice: str = "longxiaoxia", rate: float = 1.0) -> str:
+    async def tts(self, text: str, voice: str = "female-shaonv", rate: float = 1.0) -> str:
         """将文字合成为语音
 
         Args:
@@ -48,12 +54,9 @@ class TtsToolsMixin(AgentToolsServiceBase):
             return "错误：text 参数不能为空"
 
         # 检查 API Key
-        api_key = (
-            os.environ.get("DASHSCOPE_API_KEY") or
-            os.environ.get("QWEN_API_KEY") or ""
-        )
+        api_key = os.environ.get("MINIMAX_API_KEY") or ""
         if not api_key:
-            return "错误：DASHSCOPE_API_KEY 未配置，请先设置环境变量"
+            return "错误：MINIMAX_API_KEY 未配置，请先设置环境变量"
 
         # 截断过长文本（API 限制~10000字）
         text = text.strip()[:8000]
