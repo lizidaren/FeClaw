@@ -239,3 +239,43 @@ async def upload_agent_avatar(
     db.commit()
 
     return {"avatar_url": avatar_url}
+
+
+@router.get("/api/desktop/messages")
+async def get_desktop_messages(
+    agent_hash: str,
+    after_id: int = 0,
+    limit: int = 50,
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+):
+    """增量获取聊天消息。after_id=0 返回最新 limit 条。"""
+    from models.database import ChatHistory
+
+    query = db.query(ChatHistory).filter(
+        ChatHistory.agent_hash == agent_hash,
+        ChatHistory.user_id == user_id,
+    )
+
+    if after_id:
+        query = query.filter(ChatHistory.id > after_id)
+        query = query.order_by(ChatHistory.id.asc())
+    else:
+        query = query.order_by(ChatHistory.id.desc()).limit(limit)
+
+    messages = query.all()
+    if not after_id:
+        messages = list(reversed(messages))
+
+    return [
+        {
+            "id": m.id,
+            "agent_hash": m.agent_hash,
+            "role": m.role,
+            "content": m.content,
+            "channel": m.channel,
+            "session_id": m.session_id,
+            "create_at": m.created_at.isoformat() if m.created_at else None,
+        }
+        for m in messages
+    ]
