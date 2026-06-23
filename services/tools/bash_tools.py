@@ -16,7 +16,7 @@ from services.tools.base import AgentToolsServiceBase
 logger = logging.getLogger(__name__)
 
 # 白名单命令
-ALLOWED_BASH_COMMANDS = {"mkdir", "ls", "cat", "grep", "find", "head", "tail", "wc", "echo", "pwd", "cd", "cp", "mv", "rm", "fe"}
+ALLOWED_BASH_COMMANDS = {"mkdir", "ls", "cat", "grep", "find", "head", "tail", "wc", "echo", "pwd", "cd", "cp", "mv", "rm", "fe", "python3.12"}
 # Shell 元字符黑名单（防止通过 echo/cat 等配合重定向/管道绕过文件操作限制）
 _SHELL_METACHARS = re.compile(r'[><|;&`$]')
 
@@ -35,17 +35,17 @@ class BashToolsMixin(AgentToolsServiceBase):
         cmd_parts = stripped.split()
         if cmd_parts:
             cmd_name = cmd_parts[0]
-            if cmd_name in ("python3", "python") or stripped.startswith("python3 ") or stripped.startswith("python "):
+            if cmd_name in ("python3", "python", "python3.12") or stripped.startswith("python3 ") or stripped.startswith("python ") or stripped.startswith("python3.12 "):
                 pass  # Python 命令单独处理
             elif cmd_name not in ALLOWED_BASH_COMMANDS:
                 return f"Error: 命令 '{cmd_name}' 不在允许的白名单中。允许的命令: {', '.join(sorted(ALLOWED_BASH_COMMANDS))} | python3"
 
         # Shell 元字符检查（防止通过重定向/管道绕过文件操作限制）
-        if _SHELL_METACHARS.search(stripped) and not (stripped.startswith("python3 ") or stripped.startswith("python ")):
+        if _SHELL_METACHARS.search(stripped) and not (stripped.startswith("python3 ") or stripped.startswith("python ") or stripped.startswith("python3.12 ")):
             return f"Error: 命令包含不允许的 shell 元字符（><|;&`$），请使用 file_read/file_write 工具操作文件"
 
         # 检测 Python 命令（直接开头）
-        if stripped.startswith("python3 ") or stripped.startswith("python ") or stripped == "python3" or stripped == "python":
+        if stripped.startswith("python3 ") or stripped.startswith("python ") or stripped.startswith("python3.12 ") or stripped == "python3" or stripped == "python" or stripped == "python3.12":
             return await self._exec_python(stripped)
 
         # FeHub 命令（fe init / fe vcs / fe publish）
@@ -53,7 +53,7 @@ class BashToolsMixin(AgentToolsServiceBase):
             return await self._handle_fe_command(stripped)
 
         # 检测包含 python3/python 的复合命令
-        if " python3 " in stripped or " python " in stripped or stripped.endswith(" python3") or stripped.endswith(" python"):
+        if " python3 " in stripped or " python " in stripped or " python3.12 " in stripped or stripped.endswith(" python3") or stripped.endswith(" python") or stripped.endswith(" python3.12"):
             return await self._exec_python_compound(stripped)
 
         # FUSE 模式：用 sandbox 的真实 bash 执行
@@ -113,7 +113,7 @@ class BashToolsMixin(AgentToolsServiceBase):
         for part in parts:
             if not part:
                 continue
-            if (part.startswith("python3 ") or part.startswith("python ")) and ".py" in part:
+            if (part.startswith("python3 ") or part.startswith("python ") or part.startswith("python3.12 ")) and ".py" in part:
                 python_cmd = part
             else:
                 vfs_commands.append(part)
@@ -166,12 +166,12 @@ class BashToolsMixin(AgentToolsServiceBase):
             from services.sandbox_manager import SandboxManager
             self._sandbox = SandboxManager(self._vfs, self.user_id)
 
-        m = re.match(r'^python3?\s+-c\s+["\'](.+?)["\']', command, re.DOTALL)
+        m = re.match(r'^python3(?:\.\d+)?\s+-c\s+["\'](.+?)["\']', command, re.DOTALL)
         if m:
             code = m.group(1)
             result = self._sandbox.exec_code(code)
         else:
-            m2 = re.match(r'^python3?\s+(.+\.py)\s*$', command.strip())
+            m2 = re.match(r'^python3(?:\.\d+)?\s+(.+\.py)\s*$', command.strip())
             if m2:
                 script_path = m2.group(1).strip()
                 if not script_path.startswith('/'):
