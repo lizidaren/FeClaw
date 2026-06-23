@@ -26,34 +26,22 @@ class BashToolsMixin(AgentToolsServiceBase):
 
     # ========== Bash 工具 ==========
 
-    @tool(description='执行 bash 命令。支持：mkdir, ls, cat, grep, find, head, tail, wc, echo, pwd, cd, cp, mv, rm, python3（在沙箱中执行Python代码，支持 python3 -c "code" 单行执行和 python3 script.py 脚本执行，可访问 /workspace/ 目录下的文件）', category="code")
+    @tool(description='执行 bash 命令。在 bwrap 沙箱中执行，支持任意 shell 命令，包括 python3 / python3.12 / pip 等。可访问 /workspace/（Agent 工作区）和 /uploads/ 等目录。Python 代码推荐用 -c "code" 或 script.py 方式执行。', category="code")
     async def bash(self, command: str) -> str:
         """执行 bash 命令（委托给 VirtualFileSystem 或 Python 沙箱）"""
         stripped = command.strip()
 
-        # 强制白名单检查：提取命令名并验证
-        cmd_parts = stripped.split()
-        if cmd_parts:
-            cmd_name = cmd_parts[0]
-            if cmd_name in ("python3", "python", "python3.12") or stripped.startswith("python3 ") or stripped.startswith("python ") or stripped.startswith("python3.12 "):
-                pass  # Python 命令单独处理
-            elif cmd_name not in ALLOWED_BASH_COMMANDS:
-                return f"Error: 命令 '{cmd_name}' 不在允许的白名单中。允许的命令: {', '.join(sorted(ALLOWED_BASH_COMMANDS))} | python3"
-
         # Shell 元字符检查（防止通过重定向/管道绕过文件操作限制）
-        if _SHELL_METACHARS.search(stripped) and not (stripped.startswith("python3 ") or stripped.startswith("python ") or stripped.startswith("python3.12 ")):
+        if _SHELL_METACHARS.search(stripped):
             return f"Error: 命令包含不允许的 shell 元字符（><|;&`$），请使用 file_read/file_write 工具操作文件"
 
-        # 检测 Python 命令（直接开头）
-        if stripped.startswith("python3 ") or stripped.startswith("python ") or stripped.startswith("python3.12 ") or stripped == "python3" or stripped == "python" or stripped == "python3.12":
+        # Python 命令路由到沙箱执行
+        py_prefixes = ("python3 ", "python ", "python3.12 ")
+        if any(stripped.startswith(p) for p in py_prefixes) or stripped in ("python3", "python", "python3.12"):
             return await self._exec_python(stripped)
 
-        # FeHub 命令（fe init / fe vcs / fe publish）
-        if stripped.startswith("fe "):
-            return await self._handle_fe_command(stripped)
-
         # 检测包含 python3/python 的复合命令
-        if " python3 " in stripped or " python " in stripped or " python3.12 " in stripped or stripped.endswith(" python3") or stripped.endswith(" python") or stripped.endswith(" python3.12"):
+        if any(c in stripped for c in (" python3 ", " python ", " python3.12 ")):
             return await self._exec_python_compound(stripped)
 
         # FUSE 模式：用 sandbox 的真实 bash 执行
