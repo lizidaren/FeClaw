@@ -44,6 +44,10 @@ class BashToolsMixin(AgentToolsServiceBase):
         if any(c in stripped for c in (" python3 ", " python ", " python3.12 ")):
             return await self._exec_python_compound(stripped)
 
+        # FeHub 命令（fe init / fe vcs / fe publish）
+        if stripped.startswith("fe "):
+            return await self._handle_fe_command(stripped)
+
         # FUSE 模式：用 sandbox 的真实 bash 执行
         from services.vfs_fuse_daemon import check_fuse_available
         if check_fuse_available() and self._has_active_sandbox():
