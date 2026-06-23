@@ -658,12 +658,17 @@ class SandboxManager:
             if os.path.exists(etc_path):
                 opts += ["--ro-bind", etc_path, etc_path]
 
-        # 条件路径绑定
+        # 条件路径绑定：自动发现当前 Python 的 site-packages 路径
+        _site_pkgs = next(
+            (p for p in __import__("sys").path if "site-packages" in p),
+            os.path.join(python_lib, "site-packages"),
+        )
         for extra_path in [
-            "/home/lch/.local/lib/python3.12/site-packages",
-            "/home/lch/.local/bin",
+            _site_pkgs,
+            os.path.dirname(_site_pkgs),
+            real_python_dir,
         ]:
-            if os.path.exists(extra_path):
+            if extra_path and os.path.exists(extra_path):
                 opts += ["--ro-bind-try", extra_path, extra_path]
 
         # 检查全局 FUSE 是否可用（独立于 per-agent workspace）
@@ -693,7 +698,7 @@ class SandboxManager:
             "--setenv", "PATH", host_path,
             "--setenv", "HOME", "/tmp",
             "--setenv", "PYTHONDONTWRITEBYTECODE", "1",
-            "--setenv", "PYTHONPATH", "/home/lch/.local/lib/python3.12/site-packages",
+            "--setenv", "PYTHONPATH", _site_pkgs,
             "--bind", script_path, script_path,  # 覆写 --tmpfs /tmp
         ]
 
