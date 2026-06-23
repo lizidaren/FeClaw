@@ -43,6 +43,7 @@ class Settings(BaseSettings):
     DEEPSEEK_API_KEY: str = ""
     DOUBAO_API_KEY: str = ""
     QWEN_API_KEY: str = ""
+    MINIMAX_API_KEY: str = ""
     DEFAULT_LLM_PROVIDER: str = "zhipuai"
     DEFAULT_LLM_MODEL: str = "glm-4.7"
     DEFAULT_FORMATTING_PROVIDER: str = "deepseek"
