@@ -3,7 +3,8 @@
 import httpx
 import secrets
 import logging
-from fastapi import APIRouter, Depends, HTTPException
+import certifi
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 
@@ -37,7 +38,7 @@ async def _verify_platform_token(access_token: str) -> dict:
         platform_base = settings.OAUTH_PROVIDER_URL.rstrip("/")
     me_url = f"{platform_base}/api/auth/me"
 
-    async with httpx.AsyncClient(timeout=10.0, verify=False) as client:
+    async with httpx.AsyncClient(timeout=10.0, verify=certifi.where()) as client:
         resp = await client.get(
             me_url,
             headers={"Authorization": f"Bearer {access_token}"},
@@ -162,3 +163,79 @@ async def list_agents(
         }
         for a in agents
     ]
+
+
+class CreateDesktopAgentRequest(BaseModel):
+    name: str = ""
+    agent_type: str = "classic"
+
+
+@router.post("/api/desktop/agents")
+async def create_desktop_agent(
+    body: CreateDesktopAgentRequest,
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+):
+    """Create a new agent for the current user (Desktop client)."""
+    from services.agent_init_service import agent_init_service
+
+    if body.agent_type not in ("classic", "im"):
+        raise HTTPException(status_code=400, detail={"message": "agent_type must be 'classic' or 'im'"})
+
+    try:
+        agent = agent_init_service.create_agent(db, user_id, name=body.name)
+        agent.agent_type = body.agent_type
+        db.commit()
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    return {
+        "hash": agent.hash,
+        "name": agent.name,
+        "description": agent.description,
+        "agent_type": agent.agent_type,
+        "status": agent.status or "pending",
+    }
+
+
+@router.post("/api/desktop/agents/{hash}/avatar")
+async def upload_agent_avatar(
+    hash: str,
+    file: UploadFile = File(...),
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+):
+    """Upload avatar image for an agent (Desktop client). Saves to COS at agents/{hash}/avatar.png."""
+    # 1. Verify agent ownership
+    agent = db.query(AgentProfile).filter(
+        AgentProfile.hash == hash,
+        AgentProfile.user_id == user_id,
+    ).first()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    # 2. Validate and read file
+    contents = await file.read()
+    if len(contents) > 2 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="Image too large (max 2MB)")
+    ext = "png"
+    if file.content_type == "image/jpeg":
+        ext = "jpg"
+    elif file.content_type == "image/gif":
+        ext = "gif"
+    elif file.content_type == "image/webp":
+        ext = "webp"
+
+    # 3. Save to COS
+    cos_key = f"agents/{hash}/avatar.{ext}"
+    from services.storage_service import storage
+    storage.put_object(cos_key, contents)
+
+    # 4. Return VFS view URL
+    avatar_url = f"https://feclaw.lizidaren.cn/api/vfs/view?path={cos_key}"
+
+    # 5. Update agent profile
+    agent.avatar_url = avatar_url
+    db.commit()
+
+    return {"avatar_url": avatar_url}

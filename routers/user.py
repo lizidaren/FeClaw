@@ -416,6 +416,45 @@ async def update_agent_settings(
     })
 
 
+class AgentAvatarRequest(BaseModel):
+    avatar_url: Optional[str] = None
+
+
+@router.patch("/agents/{hash}/avatar")
+async def update_agent_avatar(
+    hash: str,
+    body: AgentAvatarRequest,
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """Set or clear agent avatar URL."""
+    agent = _get_agent_or_404(db, hash, user_id)
+    agent.avatar_url = body.avatar_url
+    agent.updated_at = datetime.utcnow()
+    db.commit()
+    return JSONResponse(content={
+        "status": "ok",
+        "hash": hash,
+        "avatar_url": agent.avatar_url,
+    })
+
+
+@router.delete("/agents/{hash}")
+async def delete_agent(
+    hash: str,
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """Delete an agent by hash."""
+    agent = _get_agent_or_404(db, hash, user_id)
+    db.delete(agent)
+    db.commit()
+    return JSONResponse(content={
+        "status": "ok",
+        "message": f"Agent {hash} deleted"
+    })
+
+
 @router.get("/agents/{hash}/apps")
 async def list_agent_apps(
     hash: str,
