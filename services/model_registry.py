@@ -244,3 +244,171 @@ def find_by_capability(*, supports_vision: Optional[bool] = None,
             continue
         return name
     return None
+
+
+# ─── TTS Provider 元信息（api_type + api_key 属性 + base_url） ───
+# api_type: "dashscope_sdk" → 用 dashscope SDK (WebSocket 流式)
+#           "httpx_rest"    → 用 httpx 调 REST API
+
+TTS_PROVIDER_META = {
+    "cosyvoice": {
+        "api_type": "dashscope_sdk",
+        "api_key_attr": "QWEN_API_KEY",
+        "voicename_cn": "阿里云 CosyVoice",
+    },
+    "minimax": {
+        "api_type": "httpx_rest",
+        "api_key_attr": "MINIMAX_API_KEY",
+        "base_url": "https://api.minimaxi.com/v1/text_to_speech",
+        "voicename_cn": "MiniMax 语音合成",
+    },
+}
+
+# ─── TTS 模型注册表 ───
+# model_id: 提供商实际使用的模型名（API 调用时传）
+# voices: 音色 ID → 中文描述
+# max_chars_per_segment: 单次请求最大字符数（长文本按此分段）
+
+TTS_MODEL_REGISTRY = {
+    "cosyvoice-v1": {
+        "provider": "cosyvoice",
+        "model_id": "cosyvoice-v1",
+        "voices": {
+            "longxiang": "沉稳男声",
+            "longxiaoxia": "知性女声",
+            "longxiaomeng": "甜美少女声",
+            "longxiaowan": "温暖女声",
+            "longxiaolu": "活泼女声",
+            "longchen": "磁性男声",
+            "longhao": "温柔男声",
+            "zhitian_emo": "情感女声",
+            "zhiyan_emo": "情感男声",
+        },
+        "max_chars_per_segment": 500,
+        "supports_rate": True,
+        "supports_emotion": False,
+    },
+    "cosyvoice-v3.5-plus": {
+        "provider": "cosyvoice",
+        "model_id": "cosyvoice-v3.5-plus",
+        "voices": {
+            "longyingxun": "年轻青涩男声",
+            "longyingmu": "优雅知性女声",
+            "longhuhu": "天真烂漫女童",
+            "longanpei": "青少年教师女",
+            "longpaopao": "飞天泡泡音",
+            "longshanshan": "戏剧化童声",
+            "longniuniu": "阳光男童声",
+            "longwangwang": "台湾少年音",
+        },
+        "max_chars_per_segment": 500,
+        "supports_rate": True,
+        "supports_emotion": True,
+    },
+    "minimax-speech-02": {
+        "provider": "minimax",
+        "model_id": "speech-02",
+        "voices": {
+            "female-shaonv": "甜美少女声",
+            "female-yujie": "成熟御姐声",
+            "female-tianmei": "甜美可爱声",
+            "female-chengshu": "沉稳女声",
+            "male-qn-qingse": "温柔青年男声",
+            "male-qn-jingying": "沉稳男声",
+            "male-qn-badao": "霸气男声",
+            "male-qn-daxuesheng": "阳光大学生男声",
+        },
+        "max_chars_per_segment": 2000,
+        "supports_rate": True,
+    },
+}
+
+
+def get_active_tts_model() -> str:
+    """
+    从 settings 读取当前激活的 TTS 模型名。
+
+    Returns:
+        settings.TTS_MODEL 的值；若未配置或不存在则返回 "cosyvoice-v1"
+    """
+    try:
+        from config import settings
+        model = getattr(settings, "TTS_MODEL", None) or "cosyvoice-v1"
+    except Exception:
+        model = "cosyvoice-v1"
+    return model
+
+
+def resolve_tts(model_name: Optional[str] = None) -> dict:
+    """
+    根据 TTS 模型名返回 provider 配置 + 模型元信息 + provider 元信息。
+
+    Args:
+        model_name: TTS 模型名（默认从 settings.TTS_MODEL 读取）
+
+    Returns:
+        {
+            "model_name": str,           # 注册表中的 key
+            "provider": str,            # provider 名
+            "api_type": str,            # "dashscope_sdk" | "httpx_rest"
+            "api_key_attr": str,        # settings 上的属性名
+            "base_url": str|None,       # REST 调用的 base URL
+            "model_id": str,            # 调用 API 时用的 model 名
+            "voices": dict,             # {voice_id: 描述}
+            "max_chars_per_segment": int,
+            "supports_rate": bool,
+            "supports_emotion": bool,
+        }
+
+    未注册的模型回退到 cosyvoice-v1。
+    """
+    if not model_name:
+        model_name = get_active_tts_model()
+
+    info = TTS_MODEL_REGISTRY.get(model_name)
+    if not info:
+        logger.warning(
+            f"TTS model '{model_name}' not in registry, falling back to 'cosyvoice-v1'"
+        )
+        model_name = "cosyvoice-v1"
+        info = TTS_MODEL_REGISTRY[model_name]
+
+    provider = info["provider"]
+    provider_meta = TTS_PROVIDER_META.get(provider, {})
+
+    result = {
+        "model_name": model_name,
+        "provider": provider,
+        "api_type": provider_meta.get("api_type"),
+        "api_key_attr": provider_meta.get("api_key_attr"),
+        "base_url": provider_meta.get("base_url"),
+        "model_id": info.get("model_id"),
+        "voices": info.get("voices", {}),
+        "max_chars_per_segment": info.get("max_chars_per_segment", 500),
+        "supports_rate": info.get("supports_rate", False),
+        "supports_emotion": info.get("supports_emotion", False),
+    }
+    return result
+
+
+def list_tts_voices(model_name: Optional[str] = None) -> dict:
+    """
+    返回指定 TTS 模型可用的音色列表。
+
+    Args:
+        model_name: TTS 模型名（默认从 settings.TTS_MODEL 读取）
+
+    Returns:
+        {voice_id: 中文描述} 的 dict
+    """
+    return resolve_tts(model_name).get("voices", {})
+
+
+def list_tts_models() -> list:
+    """
+    列出所有已注册的 TTS 模型名。
+
+    Returns:
+        [model_name, ...]
+    """
+    return list(TTS_MODEL_REGISTRY.keys())

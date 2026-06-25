@@ -59,6 +59,7 @@ claude-audit/
 claude_audit/
 claude_audit_session_memory_service/
 agent_profiles/
+claude-logs/
 # app/public/filemanager/ is tracked (used by main.py)
 tests/
 

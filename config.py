@@ -53,6 +53,9 @@ class Settings(BaseSettings):
     MAIN_VISION_MODEL: str = "qwen3.6-35b-a3b"       # 主视觉模型
     MAIN_EMBEDDING_MODEL: str = "text-embedding-v4"   # 主嵌入模型
 
+    # TTS 模型（model_registry.TTS_MODEL_REGISTRY 中的 key）
+    TTS_MODEL: str = "cosyvoice-v1"
+
     # Agent 模型配置（向后兼容，已弃用，请使用 MAIN_TEXT_MODEL）
     AGENT_LLM_MODEL: str = "deepseek-v4-flash"
     # AGENT_LLM_PROVIDER 已移除 — provider 现在从 model_registry 根据模型名自动解析
