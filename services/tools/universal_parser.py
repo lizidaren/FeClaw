@@ -673,14 +673,42 @@ class ParseFileMixin(AgentToolsServiceBase):
             if not file_bytes:
                 return "（找不到文件或无法读取）"
             tmp_path = os.path.join(tempfile.gettempdir(), f"parse_doc_{os.urandom(4).hex()}.{ext}")
+            _page_images: List[str] = []
             try:
                 with open(tmp_path, "wb") as f:
                     f.write(file_bytes)
                 text = _extract_text(tmp_path)
+                # Scanned PDF fallback: render pages to images and OCR via VLM
+                if (not text or not text.strip()) and ext == "pdf":
+                    import fitz
+                    doc = fitz.open(tmp_path)
+                    for i in range(len(doc)):
+                        pix = doc[i].get_pixmap(dpi=200)
+                        img_path = os.path.join(
+                            tempfile.gettempdir(),
+                            f"parse_pdf_page_{os.urandom(4).hex()}_{i}.png",
+                        )
+                        pix.save(img_path)
+                        _page_images.append(img_path)
+                    doc.close()
+                    if _page_images:
+                        from dashscope import MultiModalConversation
+                        from config import settings
+                        content = (
+                            [{"image": p} for p in _page_images]
+                            + [{"text": f"请识别这份文档的全部内容。用户的问题：{prompt}"}]
+                        )
+                        resp = MultiModalConversation.call(
+                            model="qwen3-vl-flash",
+                            api_key=settings.QWEN_API_KEY,
+                            messages=[{"role": "user", "content": content}],
+                            result_format="message",
+                        )
+                        text = _extract_mm_text(resp, "")
             except Exception as e:
                 return f"（读取文件失败：{e}）"
             finally:
-                _cleanup_paths(tmp_path)
+                _cleanup_paths(tmp_path, *_page_images)
 
         if not text or not text.strip():
             return "（文件内容为空或无法提取文字）"
