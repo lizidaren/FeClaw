@@ -24,6 +24,7 @@ import asyncio
 import shutil
 import tempfile
 import subprocess
+import httpx
 from collections import OrderedDict
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Tuple
@@ -32,6 +33,39 @@ from services.tools.base import AgentToolsServiceBase
 from services.tool_registry import tool
 
 logger = logging.getLogger(__name__)
+
+# ── Qwen 文本对话（OpenAI-compatible 端点） ─────────────────
+# dashscope.Generation.call() 对 qwen3.6-flash 路由到错误端点（"url error"），
+# 所以走 httpx 直接打 compatible-mode 端点。
+
+QWEN_CHAT_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
+
+
+async def _qwen_chat(
+    model: str,
+    messages: list,
+    api_key: str,
+    temperature: float = 0.3,
+    max_tokens: int = 2000,
+) -> Optional[str]:
+    """Call DashScope via OpenAI-compatible endpoint (httpx, not SDK).
+
+    Returns the content string, or None on error.
+    """
+    try:
+        r = httpx.post(
+            QWEN_CHAT_URL,
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={"model": model, "messages": messages, "temperature": temperature, "max_tokens": max_tokens},
+            timeout=120,
+        )
+        data = r.json()
+        choices = data.get("choices", [])
+        if choices:
+            return choices[0].get("message", {}).get("content")
+        return None
+    except Exception:
+        return None
 
 # ── 文件类型检测 ──────────────────────────────────────────────
 
@@ -160,25 +194,19 @@ async def _route_decision(
 
     result: Dict[str, Any]
     try:
-        from dashscope import Generation
         from config import settings
 
-        resp = Generation.call(
-            model="qwen-turbo-latest",
+        text = await _qwen_chat(
+            model="qwen3.6-flash",
             api_key=settings.QWEN_API_KEY,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": prompt or "总结这个文件"},
             ],
-            result_format="message",
             temperature=0.1,
             max_tokens=300,
         )
-
-        output = resp.get("output", {})
-        choices = output.get("choices", [])
-        if choices:
-            text = choices[0].get("message", {}).get("content", "")
+        if text:
             # 提取 JSON（处理 ```json 包裹的情况）
             text = re.sub(r"```json\s*|\s*```", "", text).strip()
             # 容错：找最外层 { ... }
@@ -214,24 +242,20 @@ def _sr_fallback(content_type: str, reason: str) -> Dict[str, Any]:
 async def _llm_answer(prompt: str, context: str, max_tokens: int = 2000) -> str:
     """用 Qwen-turbo 基于上下文回答"""
     try:
-        from dashscope import Generation
         from config import settings
 
-        resp = Generation.call(
-            model="qwen-turbo-latest",
+        text = await _qwen_chat(
+            model="qwen3.6-flash",
             api_key=settings.QWEN_API_KEY,
             messages=[
                 {"role": "system", "content": "你是一个专业的文件分析助手。基于提供的文件内容回答用户的问题。"},
                 {"role": "user", "content": f"文件内容：\n\n{context[:TEXT_TRUNCATE_CHARS]}\n\n用户问题：{prompt}"},
             ],
-            result_format="message",
             temperature=0.3,
             max_tokens=max_tokens,
         )
-        output = resp.get("output", {})
-        choices = output.get("choices", [])
-        if choices:
-            return choices[0].get("message", {}).get("content", "") or "（模型未返回结果）"
+        if text:
+            return text
         return "（模型未返回结果）"
     except Exception as e:
         return f"（回答时出错：{e}）"
@@ -670,7 +694,59 @@ class ParseFileMixin(AgentToolsServiceBase):
         # 大文件：小模型决策要不要切块
         decision = await _route_decision("doc", prompt, file_size)
         logger.info(f"Doc SR decision: {decision}")
-        # 无论决策如何，目前都先截断（SemanticChunker TBD）
+
+        # 智能切块检索：SemanticChunker 切分 → embedding 相似度 → top-K
+        if decision.get("needs_chunking") and file_size > 50000:
+            try:
+                from services.semantic_chunker import chunk as sem_chunk
+                from services.embedding_service import EmbeddingService
+
+                chunks = await sem_chunk(text)
+                l1_chunks = [c for c in chunks if c.level == 1]
+
+                if l1_chunks:
+                    embedder = EmbeddingService()
+                    prompt_emb = await embedder.embed(prompt)
+                    chunk_embs = await embedder.embed_batch([c.text for c in l1_chunks])
+
+                    import math
+                    def _cosim(a, b):
+                        if not a or not b or len(a) != len(b):
+                            return 0.0
+                        dot = sum(x * y for x, y in zip(a, b))
+                        na = math.sqrt(sum(x * x for x in a))
+                        nb = math.sqrt(sum(x * x for x in b))
+                        return dot / (na * nb) if na and nb else 0.0
+
+                    scored = [(_cosim(prompt_emb, ce), c) for ce, c in zip(chunk_embs, l1_chunks)]
+                    scored.sort(key=lambda x: x[0], reverse=True)
+
+                    TOP_K = 5
+                    MIN_SCORE = 0.3
+                    top_chunks = [c for score, c in scored[:TOP_K] if score > MIN_SCORE]
+
+                    if top_chunks:
+                        context = "\n\n".join(c.text for c in top_chunks)
+                        # 附加 L2 超块：包含 top chunk 起始 50 字符的更大上下文（最多 2 个）
+                        l2_chunks = [c for c in chunks if c.level == 2]
+                        relevant_l2 = [
+                            c for c in l2_chunks
+                            if any(c.text.find(tc.text[:50]) >= 0 for tc in top_chunks)
+                        ]
+                        if relevant_l2:
+                            context += "\n\n【扩展上下文】\n\n" + "\n\n".join(
+                                c.text for c in relevant_l2[:2]
+                            )
+                    else:
+                        # 没有任何 chunk 越过阈值 → 取前 5 个 L1 做兜底
+                        context = "\n\n".join(c.text for c in l1_chunks[:5])
+
+                    context = context[:TEXT_TRUNCATE_CHARS]  # 安全截断
+                    return await _llm_answer(prompt, context)
+            except Exception as e:
+                logger.warning(f"SemanticChunker 路径失败，回退到截断：{e}")
+
+        # 默认：直接截断
         truncated = text[:TEXT_TRUNCATE_CHARS]
         return await _llm_answer(prompt, truncated)
 
