@@ -66,7 +66,7 @@ TEXT_EXTS = {
 # 大文件阈值（字节）—— 超过则走小模型决策
 DOC_LARGE_THRESHOLD = 20 * 1024  # 20KB
 # 文本截断长度（避免 LLM context 爆炸）
-TEXT_TRUNCATE_CHARS = 30000
+TEXT_TRUNCATE_CHARS = 100_000
 
 # 支持的扩展名（用于错误提示）
 SUPPORTED_EXTS = sorted(EXT_CATEGORY.keys())
