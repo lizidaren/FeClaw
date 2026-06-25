@@ -19,10 +19,12 @@ from services.tools.route_tools import RouteToolsMixin
 from services.tools.moments_tools import MomentsToolsMixin
 from services.tools.fehub_tools import FeHubToolsMixin
 from services.tools.tts_tools import TtsToolsMixin
+from services.tools.universal_parser import ParseFileMixin
 
 
 class AgentToolsService(
     TtsToolsMixin,
+    ParseFileMixin,
     FeHubToolsMixin,
     MomentsToolsMixin,
     FileOpsMixin,
