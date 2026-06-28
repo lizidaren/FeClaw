@@ -402,13 +402,13 @@ async def _extract_units(
         return []
 
     prompt = SYSTEM_PROMPTS.get(mode, SYSTEM_PROMPTS["solve"])
-    
+
     # Retry with progressively shorter text if first attempt fails
     text_lengths = [80000, 50000, 20000, 8000]
     for attempt, max_chars in enumerate(text_lengths):
         if attempt > 0:
             logger.info(f"_extract_units retry {attempt+1}, truncating to {max_chars} chars")
-        
+
         text_resp = await _qwen_chat(
             model="qwen3.6-flash",
             api_key=settings.QWEN_API_KEY,
@@ -454,7 +454,12 @@ async def _extract_units(
     return units
 
 
-async def _parallel_process(units: List[Dict[str, Any]], mode: str, prompt_hint: str) -> List[Dict[str, Any]]:
+async def _parallel_process(
+    units: List[Dict[str, Any]],
+    mode: str,
+    prompt_hint: str,
+    page_images: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
     """并发处理所有单元，返回结果列表。"""
 
     if len(units) > MAX_UNITS:
@@ -497,6 +502,7 @@ async def _parallel_process(units: List[Dict[str, Any]], mode: str, prompt_hint:
 ## 正确答案
 ..."""
 
+
         elif mode == "extract_terms":
             return f"""请解释以下内容：
 
@@ -518,19 +524,45 @@ async def _parallel_process(units: List[Dict[str, Any]], mode: str, prompt_hint:
         async with sem:
             task_prompt = _build_task_prompt(unit, mode)
             try:
-                text = await asyncio.wait_for(
-                    _qwen_chat(
-                        model="qwen3.6-flash",
-                        api_key=settings.QWEN_API_KEY,
-                        messages=[
-                            {"role": "system", "content": "你是一个专业的解题和分析助手。"},
-                            {"role": "user", "content": task_prompt},
-                        ],
-                        temperature=0.3,
-                        max_tokens=2048,
-                    ),
-                    timeout=240,  # 每单元最大240s
-                )
+                # If we have page images and are in solve mode, use multimodal
+                if page_images and mode == "solve":
+                    content = []
+                    for img_path in page_images:
+                        with open(img_path, "rb") as f:
+                            b64 = base64.b64encode(f.read()).decode("utf-8")
+                        content.append({
+                            "type": "image_url",
+                            "image_url": {"url": f"data:image/png;base64,{b64}"}
+                        })
+                    content.append({"type": "text", "text": task_prompt})
+                    messages = [
+                        {"role": "system", "content": "你是一个专业的解题和分析助手。"},
+                        {"role": "user", "content": content},
+                    ]
+                    text = await asyncio.wait_for(
+                        _qwen_chat(
+                            model="qwen3.6-flash",
+                            api_key=settings.QWEN_API_KEY,
+                            messages=messages,
+                            temperature=0.3,
+                            max_tokens=2048,
+                        ),
+                        timeout=240,
+                    )
+                else:
+                    text = await asyncio.wait_for(
+                        _qwen_chat(
+                            model="qwen3.6-flash",
+                            api_key=settings.QWEN_API_KEY,
+                            messages=[
+                                {"role": "system", "content": "你是一个专业的解题和分析助手。"},
+                                {"role": "user", "content": task_prompt},
+                            ],
+                            temperature=0.3,
+                            max_tokens=2048,
+                        ),
+                        timeout=240,  # 每单元最大240s
+                    )
                 return {"id": unit["id"], "result": text or "（无结果）"}
             except asyncio.TimeoutError:
                 return {"id": unit["id"], "result": "（处理超时，已跳过）"}
@@ -585,10 +617,27 @@ async def _aggregate(results: List[Dict[str, Any]], mode: str) -> str:
 
 # ── LLM 文本回答 ──────────────────────────────────────────────
 
-async def _llm_answer(prompt: str, context: str, max_tokens: int = 2000) -> str:
+async def _llm_answer(
+    prompt: str,
+    context: str,
+    max_tokens: int = 2000,
+    page_images: Optional[List[str]] = None,
+) -> str:
     """用 Qwen-turbo 基于上下文回答"""
     try:
         from config import settings
+
+        # If we have page images, use VLM instead
+        if page_images:
+            text = await _vlm_chat(
+                page_images,
+                f"文件内容：\n\n{context[:TEXT_TRUNCATE_CHARS]}\n\n用户问题：{prompt}",
+                settings.QWEN_API_KEY,
+                max_tokens=max_tokens,
+            )
+            if text:
+                return text
+            return "（模型未返回结果）"
 
         text = await _qwen_chat(
             model="qwen3.6-flash",
@@ -923,7 +972,7 @@ async def _vlm_analyze_content(content: List[dict]) -> str:
         return f"（VLM 帧分析失败：{e}）"
 
 
-# ── 核心 Mixin ───────────────────────────────────────────────
+# ── 核心 Mixin ─────────────────────────────────────────────
 
 class ParseFileMixin(AgentToolsServiceBase):
     """parse_file 工具——万能文件解析器"""
@@ -938,7 +987,7 @@ class ParseFileMixin(AgentToolsServiceBase):
             "- 音频: mp3, wav, m4a, ogg, flac, aac, wma（→ Qwen3.5-Omni-Plus）\n"
             "- 视频: mp4, mov, avi, mkv, webm, flv（→ 关键帧 VLM + 音频 Omni）\n"
             "- 网址: http://, https://（→ 抓取 + Qwen-Turbo）\n\n"
-            "提示：对于大文件，具体的问题（\"第二章讲什么\"）比笼统的问题（\"总结一下\"）结果更精确。"
+            "提示：对于大文件，具体的问题（\u201c第二章讲什么\u201d）比笼统的问题（\u201c总结一下\u201d）结果更精确。"
         ),
         category="file",
     )
@@ -1015,6 +1064,7 @@ class ParseFileMixin(AgentToolsServiceBase):
         """文档 → 文本提取 → 小模型决策（要不要切块） → LLM 回答"""
         ext = Path(path).suffix.lower().lstrip(".")
         is_text = ext in TEXT_EXTS
+        _page_images: List[str] = []  # hoisted for use after else block
 
         # 文本文件走 VFS；二进制格式（pdf/docx/pptx/xlsx）下载到本地
         if is_text:
@@ -1029,22 +1079,41 @@ class ParseFileMixin(AgentToolsServiceBase):
             if not file_bytes:
                 return "（找不到文件或无法读取）"
             tmp_path = os.path.join(tempfile.gettempdir(), f"parse_doc_{os.urandom(4).hex()}.{ext}")
-            _page_images: List[str] = []
             try:
                 with open(tmp_path, "wb") as f:
                     f.write(file_bytes)
                 text = _extract_text(tmp_path)
 
-                # VLM fallback for PDFs: garbled text > 10% OR embedded images
+                # VLM fallback for PDFs: garbled text > 10% OR embedded meaningful images
                 needs_vlm = False
                 if ext == "pdf":
                     doc = fitz.open(tmp_path)
-                    has_images = any(page.get_images() for page in doc)
+
+                    # Smarter image detection: skip full-page backgrounds (>90%) and tiny icons (<5%)
+                    has_meaningful = False
+                    page_rects = [page.rect for page in doc]
+                    for i, page in enumerate(doc):
+                        pw, ph = page_rects[i].width, page_rects[i].height
+                        for img in page.get_images(full=True):
+                            bbox = page.get_image_bbox(img)
+                            if bbox is None or bbox.is_empty:
+                                continue
+                            rw = bbox.width / pw
+                            rh = bbox.height / ph
+                            # Skip full-page background (>90%) and tiny icons (<5%)
+                            if rw > 0.9 and rh > 0.9:
+                                continue
+                            if rw < 0.05 and rh < 0.05:
+                                continue
+                            has_meaningful = True
+                            break
+                        if has_meaningful:
+                            break
                     doc.close()
 
-                    if has_images:
+                    if has_meaningful:
                         needs_vlm = True
-                        logger.info("PDF has embedded images, using VLM OCR")
+                        logger.info("PDF has meaningful embedded images, using VLM OCR")
                     elif text and text.count("\ufffd") / max(len(text), 1) > 0.10:
                         needs_vlm = True
                         garbled_count = text.count("\ufffd")
@@ -1077,16 +1146,19 @@ class ParseFileMixin(AgentToolsServiceBase):
             except Exception as e:
                 return f"（读取文件失败：{e}）"
             finally:
-                _cleanup_paths(tmp_path, *_page_images)
+                _cleanup_paths(tmp_path)
 
         if not text or not text.strip():
+            _cleanup_paths(*_page_images)
             return "（文件内容为空或无法提取文字）"
 
         file_size = len(text.encode("utf-8"))
 
         # 小文件直接全文
         if file_size <= DOC_LARGE_THRESHOLD:
-            return await _llm_answer(prompt, text[:TEXT_TRUNCATE_CHARS])
+            result = await _llm_answer(prompt, text[:TEXT_TRUNCATE_CHARS], page_images=_page_images)
+            _cleanup_paths(*_page_images)
+            return result
 
         # 大文件：小模型决策要不要切块
         decision = await _route_decision("doc", prompt, file_size)
@@ -1105,7 +1177,8 @@ class ParseFileMixin(AgentToolsServiceBase):
                 )
                 if units:
                     logger.info(f"Extracted {len(units)} units for parallel processing")
-                    results = await _parallel_process(units, mode, prompt)
+                    results = await _parallel_process(units, mode, prompt, page_images=_page_images)
+                    _cleanup_paths(*_page_images)
                     return await _aggregate(results, mode)
                 logger.warning("extract_units returned empty, falling back")
             except Exception as e:
@@ -1158,13 +1231,17 @@ class ParseFileMixin(AgentToolsServiceBase):
                         context = "\n\n".join(c.text for c in l1_chunks[:5])
 
                     context = context[:TEXT_TRUNCATE_CHARS]  # 安全截断
-                    return await _llm_answer(prompt, context)
+                    result = await _llm_answer(prompt, context, page_images=_page_images)
+                    _cleanup_paths(*_page_images)
+                    return result
             except Exception as e:
                 logger.warning(f"SemanticChunker 路径失败，回退到截断：{e}")
 
         # 默认：直接截断
         truncated = text[:TEXT_TRUNCATE_CHARS]
-        return await _llm_answer(prompt, truncated)
+        result = await _llm_answer(prompt, truncated, page_images=_page_images)
+        _cleanup_paths(*_page_images)
+        return result
 
     # ── Audio Handler ──────────────────────────────────────
 
