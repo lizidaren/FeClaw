@@ -42,6 +42,8 @@ class ChatRequest(BaseModel):
     content: str
     session_id: Optional[str] = None
     image_url: Optional[str] = None  # 图片 URL（支持 base64 data URL）
+    file_path: Optional[str] = None  # 文件 VFS 路径（前端上传后）
+    file_name: Optional[str] = None  # 原始文件名
 
 
 class SessionResponse(BaseModel):
@@ -103,7 +105,7 @@ async def chat_stream(
     chat_service = WebChannelService(db, user_id=user_id)
 
     return StreamingResponse(
-        chat_service.chat_stream(request.content, request.session_id, request.image_url),
+        chat_service.chat_stream(request.content, request.session_id, request.image_url, request.file_path, request.file_name),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -232,12 +234,14 @@ async def chat_websocket(websocket: WebSocket):
             content = data.get("content", "")
             session_id = data.get("session_id")
             image_url = data.get("image_url")
+            file_path = data.get("file_path")
+            file_name = data.get("file_name")
 
-            if not content and not image_url:
+            if not content and not image_url and not file_path:
                 await websocket.send_json({"type": "error", "code": "EMPTY_INPUT", "message": "消息内容为空"})
                 continue
 
-            logger.info(f"[WS] user_id={user_id}, content={content[:50] if content else ''}..., image_url={'yes' if image_url else 'no'}")
+            logger.info(f"[WS] user_id={user_id}, content={content[:50] if content else ''}..., image_url={'yes' if image_url else 'no'}, file={'yes' if file_path else 'no'}")
 
             # 路由层拦截：开启新会话（在已有对话中插入分割线 + 招呼）
             _new_session_cmds = {"开启新会话", "新对话", "新会话", "重新开始", "结束对话", "结束会话", "开启新对话"}
@@ -318,7 +322,7 @@ async def chat_websocket(websocket: WebSocket):
                 continue
 
             try:
-                async for sse_str in chat_service.chat_stream(content, session_id, image_url):
+                async for sse_str in chat_service.chat_stream(content, session_id, image_url, file_path, file_name):
                     event_type, event_data = _parse_sse(sse_str)
                     if event_type:
                         payload = {"type": event_type}

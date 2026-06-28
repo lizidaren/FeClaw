@@ -879,6 +879,7 @@
             <div class="image-preview-area" id="imagePreviewArea" style="display: none;">
                 <div class="image-preview-wrapper">
                     <img id="imagePreview" src="" alt="预览图片">
+                    <div id="filePreviewName" style="padding: 10px; font-size: 14px; display: none;"></div>
                     <button class="remove-image-btn" onclick="clearSelectedImage()">✕</button>
                 </div>
             </div>
@@ -896,7 +897,7 @@
             </div>
             
             <!-- 隐藏的图片输入 -->
-            <input type="file" id="imageInput" accept="image/*" style="display: none;" onchange="handleImageSelect(event)">
+            <input type="file" id="imageInput" style="display: none;" onchange="handleImageSelect(event)">
         </div>
     </div>
 
@@ -910,6 +911,8 @@
         let currentSessionId = null;
         let isStreaming = false;
         let selectedImageBase64 = null;  // 选中的图片 base64 数据
+let selectedFileName = null;     // 选中的文件名（非图片文件）
+let selectedFilePath = null;     // 上传后的 VFS 路径
 
         // ======== WebSocket 连接管理器（持久连接 + 自动重连） ========
         const ConnectionManager = {
@@ -1103,39 +1106,71 @@
         function handleImageSelect(event) {
             const file = event.target.files[0];
             if (!file) return;
-            
-            // 检查文件类型
-            if (!file.type.startsWith('image/')) {
-                alert('请选择图片文件');
-                return;
+
+            // 清理旧状态
+            clearSelectedImage();
+
+            if (file.type.startsWith('image/')) {
+                // 图片：原有流程（base64 预览 + 发送）
+                if (file.size > 5 * 1024 * 1024) {
+                    alert('图片大小不能超过 5MB');
+                    return;
+                }
+                const reader = new FileReader();
+                reader.onload = function(e) {
+                    selectedImageBase64 = e.target.result;
+                    document.getElementById('imagePreview').src = selectedImageBase64;
+                    document.getElementById('imagePreviewArea').style.display = 'block';
+                };
+                reader.readAsDataURL(file);
+            } else {
+                // 非图片文件：上传到 VFS
+                if (file.size > 50 * 1024 * 1024) {
+                    alert('文件大小不能超过 50MB');
+                    return;
+                }
+                uploadFileToVFS(file);
             }
-            
-            // 检查文件大小（限制 5MB）
-            if (file.size > 5 * 1024 * 1024) {
-                alert('图片大小不能超过 5MB');
-                return;
-            }
-            
-            // 读取文件并转换为 base64
-            const reader = new FileReader();
-            reader.onload = function(e) {
-                selectedImageBase64 = e.target.result;
-                
-                // 显示预览
-                document.getElementById('imagePreview').src = selectedImageBase64;
-                document.getElementById('imagePreviewArea').style.display = 'block';
-            };
-            reader.readAsDataURL(file);
-            
-            // 清空 file input，允许重复选择同一文件
             event.target.value = '';
         }
 
-        // 清除选中的图片
+        // 上传文件到 Agent VFS
+        async function uploadFileToVFS(file) {
+            const formData = new FormData();
+            formData.append('file', file);
+            const path = 'uploads/' + file.name;
+
+            try {
+                const resp = await fetch('/api/file/upload?path=' + encodeURIComponent(path), {
+                    method: 'POST',
+                    headers: { 'Authorization': `Bearer ${jwt}` },
+                    body: formData
+                });
+                if (!resp.ok) {
+                    const err = await resp.text();
+                    alert('上传失败: ' + err);
+                    return;
+                }
+                selectedFileName = file.name;
+                selectedFilePath = path;
+                // 显示文件名称在预览区
+                document.getElementById('imagePreview').style.display = 'none';
+                document.getElementById('filePreviewName').textContent = '📄 ' + file.name;
+                document.getElementById('imagePreviewArea').style.display = 'block';
+            } catch (e) {
+                alert('上传失败: ' + e.message);
+            }
+        }
+
+        // 清除选中的图片/文件
         function clearSelectedImage() {
             selectedImageBase64 = null;
+            selectedFileName = null;
+            selectedFilePath = null;
             document.getElementById('imagePreviewArea').style.display = 'none';
             document.getElementById('imagePreview').src = '';
+            document.getElementById('imagePreview').style.display = 'block';
+            document.getElementById('filePreviewName').textContent = '';
         }
 
         // 加载会话列表
@@ -1277,16 +1312,21 @@
             const input = document.getElementById('inputField');
             const content = input.value.trim();
 
-            if ((!content && !selectedImageBase64) || isStreaming) return;
+            if ((!content && !selectedImageBase64 && !selectedFilePath) || isStreaming) return;
+
+            // 如果有文件但没有文字，自动添加提示
+            const msgContent = (!content && selectedFilePath) ? '请查看并处理这个文件：' + selectedFileName : content;
 
             // 清空输入
             input.value = '';
             input.style.height = 'auto';
 
             // 显示用户消息
-            appendMessage('user', content, false, selectedImageBase64);
+            appendMessage('user', msgContent, false, selectedImageBase64, selectedFileName);
 
             const imageData = selectedImageBase64;
+            const fileDataPath = selectedFilePath;
+            const fileDataName = selectedFileName;
             clearSelectedImage();
 
             // 显示 AI 消息占位
@@ -1561,9 +1601,11 @@
             }
 
             const sent = ConnectionManager.send({
-                content: content || '',
+                content: msgContent,
                 session_id: currentSessionId,
-                image_url: imageData
+                image_url: imageData,
+                file_path: fileDataPath,
+                file_name: fileDataName
             });
 
             if (!sent) {
@@ -1580,22 +1622,27 @@
             const input = document.getElementById('inputField');
             const content = input.value.trim();
             
-            console.log('[sendMessage] content:', content, 'image:', selectedImageBase64 ? 'yes' : 'no', 'isStreaming:', isStreaming);
+            console.log('[sendMessage] content:', content, 'image:', selectedImageBase64 ? 'yes' : 'no', 'file:', selectedFileName, 'isStreaming:', isStreaming);
             
-            // 如果没有内容且没有图片，不发送
-            if ((!content && !selectedImageBase64) || isStreaming) return;
+            // 如果没有内容且没有图片也没有文件，不发送
+            if ((!content && !selectedImageBase64 && !selectedFilePath) || isStreaming) return;
+
+            // 如果有文件但没有文字，自动添加提示
+            const msgContent = (!content && selectedFilePath) ? '请查看并处理这个文件：' + selectedFileName : content;
             
             // 清空输入
             input.value = '';
             input.style.height = 'auto';
             
             // 显示用户消息（如果有图片，显示图片预览）
-            const userMessageEl = appendMessage('user', content, false, selectedImageBase64);
+            const userMessageEl = appendMessage('user', msgContent, false, selectedImageBase64, selectedFileName);
             
-            // 保存图片数据用于发送
+            // 保存数据用于发送
             const imageData = selectedImageBase64;
+            const fileDataPath = selectedFilePath;
+            const fileDataName = selectedFileName;
             
-            // 清除选中的图片
+            // 清除选中的图片/文件
             clearSelectedImage();
             
             // 显示 AI 消息占位
@@ -1605,7 +1652,7 @@
             setStreaming(true);
             
             try {
-                console.log('[sendMessage] Sending request...', 'content:', content, 'hasImage:', !!imageData);
+                console.log('[sendMessage] Sending request...', 'content:', msgContent, 'hasImage:', !!imageData, 'hasFile:', !!fileDataPath);
                 const response = await fetch('/api/chat/stream', {
                     method: 'POST',
                     headers: {
@@ -1614,9 +1661,11 @@
                         'Accept': 'text/event-stream'
                     },
                     body: JSON.stringify({
-                        content: content || '',
+                        content: msgContent || '',
                         session_id: currentSessionId,
-                        image_url: imageData  // 包含图片数据
+                        image_url: imageData,  // 包含图片数据
+                        file_path: fileDataPath,
+                        file_name: fileDataName
                     })
                 });
                 
@@ -1780,7 +1829,7 @@
         }
 
         // 追加消息
-        function appendMessage(role, content, withCursor = false, imageUrl = null) {
+        function appendMessage(role, content, withCursor = false, imageUrl = null, fileName = null) {
             const container = document.getElementById('messagesContainer');
             
             // 移除空状态
@@ -1795,6 +1844,10 @@
             // 如果是用户消息且有图片，显示图片预览
             if (role === 'user' && imageUrl) {
                 messageContent += `<div class="message-image"><img src="${imageUrl}" alt="发送的图片"></div>`;
+            }
+            // 如果是用户消息且有文件名（非图片文件）
+            if (role === 'user' && fileName) {
+                messageContent += `<div class="message-file">📄 ${escapeHtml(fileName)}</div>`;
             }
             
             // 添加文本内容

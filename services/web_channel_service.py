@@ -122,7 +122,9 @@ class WebChannelService:
         self,
         user_input: str,
         session_id: Optional[str] = None,
-        image_url: Optional[str] = None
+        image_url: Optional[str] = None,
+        file_path: Optional[str] = None,
+        file_name: Optional[str] = None,
     ) -> AsyncGenerator[str, None]:
         """
         流式聊天 - 调用统一的 ChatService
@@ -131,6 +133,8 @@ class WebChannelService:
             user_input: 用户输入
             session_id: 会话 ID（可选）
             image_url: 图片 URL（可选，支持 base64 data URL）
+            file_path: 文件 VFS 路径（可选，前端上传后）
+            file_name: 原始文件名（可选）
         
         Yields:
             SSE 格式的字符串: "event: token\ndata: {...}\n\n"
@@ -198,6 +202,17 @@ class WebChannelService:
                 # 保存失败，提示用户
                 actual_user_input = f"【图片上传失败】\n\n{user_input}" if user_input else "【图片上传失败】"
                 logger.warning(f"[FeClaw] Failed to save image to VFS")
+        
+        # 文件处理：前端已上传到 VFS，只需注入路径信息
+        if file_path:
+            # 文件路径 = uploads/filename.pdf，Agent 可以直接用 parse_file 读取
+            file_suffix = f"（{file_name}）" if file_name else ""
+            file_prefix = f"\n【用户上传文件{file_suffix}】\n文件路径: {file_path}\n提示：如需分析此文件，可以使用「parse_file」工具。\n"
+            if actual_user_input:
+                actual_user_input = file_prefix + "\n" + actual_user_input
+            else:
+                actual_user_input = file_prefix
+            logger.info(f"[FeClaw] File attached: {file_path}")
         
         # 保存用户消息（如果有图片，记录图片信息）
         if image_url:
