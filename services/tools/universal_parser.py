@@ -67,6 +67,57 @@ async def _qwen_chat(
     except Exception:
         return None
 
+
+# ── VLM 多模态（图片/视频帧）通过 chat completions + base64 走 qwen3.6-flash ──
+# 统一走 httpx chat completions（与 _qwen_chat 同一端点），避免
+# MultiModalConversation SDK 的额外依赖和路径问题。
+
+VLM_MODEL = "qwen3.6-flash"
+
+
+async def _vlm_chat(
+    image_paths: list,
+    prompt: str,
+    api_key: str,
+    max_tokens: int = 4096,
+) -> Optional[str]:
+    """Call qwen3.6-flash with images via httpx (base64 inline).
+
+    image_paths: list of paths to PNG/JPEG files.
+    Returns the content string, or None on error.
+    """
+    try:
+        content = []
+        for path in image_paths:
+            with open(path, "rb") as f:
+                b64 = base64.b64encode(f.read()).decode("utf-8")
+            ext = path.rsplit(".", 1)[-1].lower()
+            mime = f"image/{'png' if ext == 'png' else 'jpeg'}"
+            content.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:{mime};base64,{b64}"}
+            })
+        content.append({"type": "text", "text": prompt})
+
+        r = httpx.post(
+            QWEN_CHAT_URL,
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={
+                "model": VLM_MODEL,
+                "messages": [{"role": "user", "content": content}],
+                "temperature": 0.3,
+                "max_tokens": max_tokens,
+            },
+            timeout=120,
+        )
+        data = r.json()
+        choices = data.get("choices", [])
+        if choices:
+            return choices[0].get("message", {}).get("content")
+        return None
+    except Exception:
+        return None
+
 # ── 文件类型检测 ──────────────────────────────────────────────
 
 # 扩展名 → 类别
@@ -525,44 +576,54 @@ def _extract_mm_text(response: dict, fallback: str = "（模型未返回内容�
 
 
 async def _vlm_analyze_image(image_path: str, prompt: str) -> str:
-    """Qwen VLM 分析图片"""
+    """Qwen VLM 分析图片（qwen3.6-flash via httpx）"""
     try:
-        from dashscope import MultiModalConversation
         from config import settings
 
-        with open(image_path, "rb") as f:
-            b64 = base64.b64encode(f.read()).decode("ascii")
-
-        response = MultiModalConversation.call(
-            model="qwen-vl-max-latest",
-            api_key=settings.QWEN_API_KEY,
-            messages=[{
-                "role": "user",
-                "content": [
-                    {"image": f"data:image/jpeg;base64,{b64}"},
-                    {"text": prompt},
-                ],
-            }],
-            result_format="message",
-        )
-        return _extract_mm_text(response, fallback="（VLM 未返回内容）")
+        text = await _vlm_chat([image_path], prompt, settings.QWEN_API_KEY)
+        return text or "（VLM 未返回内容）"
     except Exception as e:
         return f"（VLM 分析时出错：{e}）"
 
 
 async def _vlm_analyze_content(content: List[dict]) -> str:
-    """Qwen VLM 分析多模态 content（用于视频关键帧）"""
-    try:
-        from dashscope import MultiModalConversation
-        from config import settings
+    """Qwen VLM 分析多模态 content（用于视频关键帧，qwen3.6-flash via httpx）。
 
-        response = MultiModalConversation.call(
-            model="qwen-vl-max-latest",
-            api_key=settings.QWEN_API_KEY,
-            messages=[{"role": "user", "content": content}],
-            result_format="message",
-        )
-        return _extract_mm_text(response, fallback="（VLM 未返回内容）")
+    content: list of {"image": "data:image/...;base64,..."} or {"text": str}
+    """
+    try:
+        from config import settings
+        import base64 as _b64
+
+        image_paths: List[str] = []
+        text_parts: List[str] = []
+        for c in content:
+            if "image" in c:
+                # data URI → 写临时文件给 _vlm_chat
+                img = c["image"]
+                if isinstance(img, str) and img.startswith("data:image"):
+                    # 解析 "data:image/jpeg;base64,XXX"
+                    try:
+                        header, b64data = img.split(",", 1)
+                        mime = header.split(";")[0].split(":", 1)[1]  # "image/jpeg"
+                        ext = "png" if "png" in mime else "jpg"
+                        tmp = os.path.join(
+                            tempfile.gettempdir(),
+                            f"parse_vlm_{os.urandom(4).hex()}.{ext}",
+                        )
+                        with open(tmp, "wb") as f:
+                            f.write(_b64.b64decode(b64data))
+                        image_paths.append(tmp)
+                    except Exception:
+                        continue
+                elif isinstance(img, str):
+                    image_paths.append(img)
+            if "text" in c:
+                text_parts.append(c["text"])
+
+        prompt = "\n".join(text_parts) if text_parts else "请描述这些图片的内容。"
+        text = await _vlm_chat(image_paths, prompt, settings.QWEN_API_KEY)
+        return text or "（VLM 未返回内容）"
     except Exception as e:
         return f"（VLM 帧分析失败：{e}）"
 
@@ -692,19 +753,9 @@ class ParseFileMixin(AgentToolsServiceBase):
                         _page_images.append(img_path)
                     doc.close()
                     if _page_images:
-                        from dashscope import MultiModalConversation
                         from config import settings
-                        content = (
-                            [{"image": p} for p in _page_images]
-                            + [{"text": f"请识别这份文档的全部内容。用户的问题：{prompt}"}]
-                        )
-                        resp = MultiModalConversation.call(
-                            model="qwen3-vl-flash",
-                            api_key=settings.QWEN_API_KEY,
-                            messages=[{"role": "user", "content": content}],
-                            result_format="message",
-                        )
-                        text = _extract_mm_text(resp, "")
+                        prompt_text = f"请识别这份文档的全部内容。用户的问题：{prompt}"
+                        text = await _vlm_chat(_page_images, prompt_text, settings.QWEN_API_KEY) or ""
             except Exception as e:
                 return f"（读取文件失败：{e}）"
             finally:
