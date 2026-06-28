@@ -203,16 +203,92 @@ class WebChannelService:
                 actual_user_input = f"【图片上传失败】\n\n{user_input}" if user_input else "【图片上传失败】"
                 logger.warning(f"[FeClaw] Failed to save image to VFS")
         
-        # 文件处理：前端已上传到 VFS，只需注入路径信息
+        # 文件/压缩包处理：前端已上传到 VFS，注入路径信息
         if file_path:
-            # 文件路径 = uploads/filename.pdf，Agent 可以直接用 parse_file 读取
-            file_suffix = f"（{file_name}）" if file_name else ""
-            file_prefix = f"\n【用户上传文件{file_suffix}】\n文件路径: {file_path}\n提示：如需分析此文件，可以使用「parse_file」工具。\n"
-            if actual_user_input:
-                actual_user_input = file_prefix + "\n" + actual_user_input
+            import os as _os
+            if file_path.lower().endswith('.zip'):
+                # ── Zip 解包 ──
+                zip_prefix = f"\n【用户上传压缩包{('（' + file_name + '）') if file_name else ''}】\n"
+                try:
+                    import zipfile, tempfile, os as zip_os
+                    from services.storage_service import StorageService
+                    
+                    # 从 VFS 下载 zip
+                    agent_hash = self.agent_hash
+                    abs_key = f"feclaw/agents/{agent_hash}/{file_path}"
+                    storage = StorageService()
+                    zip_bytes = storage.get_file_content(abs_key)
+                    
+                    if zip_bytes:
+                        # 解压到临时目录
+                        zip_tmp = tempfile.mktemp(suffix='.zip')
+                        with open(zip_tmp, 'wb') as f:
+                            f.write(zip_bytes)
+                        
+                        extract_dir = tempfile.mkdtemp()
+                        zip_name_no_ext = _os.path.splitext(_os.path.basename(file_path))[0]
+                        extracted_files = []
+                        
+                        with zipfile.ZipFile(zip_tmp, 'r') as zf:
+                            for info in zf.infolist():
+                                # 安全校验：防 zip bomb / 路径穿越
+                                if info.file_size > 50 * 1024 * 1024:
+                                    continue  # 单文件 > 50MB 跳过
+                                if info.is_dir():
+                                    continue
+                                # 防止路径穿越
+                                safe_path = _os.path.normpath(info.filename)
+                                if safe_path.startswith('..') or _os.path.isabs(safe_path):
+                                    continue
+                                
+                                # 读取到临时文件
+                                data = zf.read(info.filename)
+                                # 上传到 VFS: uploads/{zipname}/{original_path}
+                                vfs_target = f"uploads/{zip_name_no_ext}/{safe_path}"
+                                vfs_key = f"feclaw/agents/{agent_hash}/{vfs_target}"
+                                storage.upload_file(data, vfs_key)
+                                extracted_files.append({
+                                    "name": safe_path,
+                                    "size": info.file_size,
+                                    "vfs_path": vfs_target
+                                })
+                        
+                        # 清理临时文件
+                        zip_os.unlink(zip_tmp)
+                        zip_os.rmdir(extract_dir)
+                        
+                        # 构建文件列表上下文
+                        file_lines = [f"解压到目录: uploads/{zip_name_no_ext}/", "包含以下文件:"]
+                        for ef in sorted(extracted_files, key=lambda x: x['name']):
+                            sz = ef['size']
+                            sz_str = f"{sz/1024:.0f} KB" if sz < 1024*1024 else f"{sz/1024/1024:.1f} MB"
+                            file_lines.append(f"  📄 {ef['name']}  ({sz_str})")
+                        file_lines.append("提示：Agent 可使用 VFS 或 parse_file 工具处理各文件。")
+                        
+                        zip_prefix = "\n".join([zip_prefix] + file_lines) + "\n"
+                        
+                        if actual_user_input:
+                            actual_user_input = zip_prefix + "\n" + actual_user_input
+                        else:
+                            actual_user_input = zip_prefix
+                        logger.info(f"[FeClaw] Zip extracted: {file_name or file_path} -> {len(extracted_files)} files")
+                    else:
+                        # 下载失败
+                        fallback = f"\n【注意】压缩包{file_name or file_path}下载失败，请尝试重新上传。\n"
+                        actual_user_input = (fallback + "\n" + actual_user_input) if actual_user_input else fallback
+                except Exception as e:
+                    logger.warning(f"[FeClaw] Zip extraction failed: {e}")
+                    err_msg = f"\n【注意】压缩包{file_name or file_path}解压失败，可直接使用原始文件路径。\n"
+                    actual_user_input = (err_msg + "\n" + actual_user_input) if actual_user_input else err_msg
             else:
-                actual_user_input = file_prefix
-            logger.info(f"[FeClaw] File attached: {file_path}")
+                # 非 zip 文件：直接注入路径
+                file_suffix = f"（{file_name}）" if file_name else ""
+                file_prefix = f"\n【用户上传文件{file_suffix}】\n文件路径: {file_path}\n提示：如需分析此文件，可以使用「parse_file」工具。\n"
+                if actual_user_input:
+                    actual_user_input = file_prefix + "\n" + actual_user_input
+                else:
+                    actual_user_input = file_prefix
+                logger.info(f"[FeClaw] File attached: {file_path}")
         
         # 保存用户消息（如果有图片，记录图片信息）
         if image_url:
