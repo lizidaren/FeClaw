@@ -152,7 +152,7 @@ class Settings(BaseSettings):
 
     # 缓存配置
     CACHE_TTL: int = 300  # 搜索结果缓存 TTL（秒）
-    TOOL_TIMEOUT: int = 120  # 工具调用超时（秒）
+    TOOL_TIMEOUT: int = 300  # 工具调用超时（秒）
     SESSION_CLEANUP_DAYS: int = 7  # 会话历史保留天数
 
     # 日志配置

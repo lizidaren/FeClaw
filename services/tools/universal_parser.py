@@ -21,6 +21,7 @@ import base64
 import hashlib
 import logging
 import asyncio
+import aiohttp
 import shutil
 import tempfile
 import subprocess
@@ -41,6 +42,7 @@ logger = logging.getLogger(__name__)
 QWEN_CHAT_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
 
 
+
 async def _qwen_chat(
     model: str,
     messages: list,
@@ -48,24 +50,51 @@ async def _qwen_chat(
     temperature: float = 0.3,
     max_tokens: int = 2000,
 ) -> Optional[str]:
-    """Call DashScope via OpenAI-compatible endpoint (httpx, not SDK).
+    """Call DashScope via OpenAI-compatible endpoint (true async HTTP via aiohttp).
 
+    Auto-retries on failure with progressively simpler requests.
     Returns the content string, or None on error.
     """
-    try:
-        r = httpx.post(
-            QWEN_CHAT_URL,
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json={"model": model, "messages": messages, "temperature": temperature, "max_tokens": max_tokens},
-            timeout=120,
-        )
-        data = r.json()
-        choices = data.get("choices", [])
-        if choices:
-            return choices[0].get("message", {}).get("content")
-        return None
-    except Exception:
-        return None
+    # Retry strategy: on first failure, retry with shorter max_tokens
+    retry_configs = [
+        {"max_tokens": max_tokens, "text_ratio": 1.0},   # original
+        {"max_tokens": max(max_tokens // 2, 500), "text_ratio": 0.7},  # half tokens, 70% text
+        {"max_tokens": max(max_tokens // 4, 200), "text_ratio": 0.4},  # quarter tokens, 40% text
+    ]
+
+    for attempt, cfg in enumerate(retry_configs):
+        try:
+            # Truncate user message text if this is a retry
+            msgs = messages
+            if attempt > 0:
+                msgs = []
+                for m in messages:
+                    if m["role"] == "user" and len(m["content"]) > 500:
+                        trunc_len = int(len(m["content"]) * cfg["text_ratio"])
+                        msgs.append({"role": "user", "content": m["content"][:trunc_len]})
+                    else:
+                        msgs.append(m)
+
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=300)) as session:
+                async with session.post(
+                    QWEN_CHAT_URL,
+                    headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                    json={"model": model, "messages": msgs, "temperature": temperature, "max_tokens": cfg["max_tokens"]},
+                ) as resp:
+                    if resp.status != 200:
+                        if attempt < len(retry_configs) - 1:
+                            continue
+                        return None
+                    data = await resp.json()
+            choices = data.get("choices", [])
+            if choices:
+                return choices[0].get("message", {}).get("content")
+            return None
+        except (asyncio.TimeoutError, aiohttp.ServerTimeoutError, Exception):
+            if attempt < len(retry_configs) - 1:
+                continue
+            return None
+    return None
 
 
 # ── VLM 多模态（图片/视频帧）通过 chat completions + base64 走 qwen3.6-flash ──
@@ -99,18 +128,18 @@ async def _vlm_chat(
             })
         content.append({"type": "text", "text": prompt})
 
-        r = httpx.post(
-            QWEN_CHAT_URL,
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json={
-                "model": VLM_MODEL,
-                "messages": [{"role": "user", "content": content}],
-                "temperature": 0.3,
-                "max_tokens": max_tokens,
-            },
-            timeout=120,
-        )
-        data = r.json()
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=300)) as session:
+            async with session.post(
+                QWEN_CHAT_URL,
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json={
+                    "model": VLM_MODEL,
+                    "messages": [{"role": "user", "content": content}],
+                    "temperature": 0.3,
+                    "max_tokens": max_tokens,
+                },
+            ) as resp:
+                data = await resp.json()
         choices = data.get("choices", [])
         if choices:
             return choices[0].get("message", {}).get("content")
@@ -373,17 +402,26 @@ async def _extract_units(
         return []
 
     prompt = SYSTEM_PROMPTS.get(mode, SYSTEM_PROMPTS["solve"])
-    text_resp = await _qwen_chat(
-        model="qwen3.6-flash",
-        api_key=settings.QWEN_API_KEY,
-        messages=[
-            {"role": "system", "content": prompt},
-            {"role": "user", "content": f"文档内容：\n\n{text[:80000]}\n\n用户问题：{prompt_hint}"},
-        ],
-        temperature=0.1,
-        max_tokens=4096,
-    )
-    if not text_resp:
+    
+    # Retry with progressively shorter text if first attempt fails
+    text_lengths = [80000, 50000, 20000, 8000]
+    for attempt, max_chars in enumerate(text_lengths):
+        if attempt > 0:
+            logger.info(f"_extract_units retry {attempt+1}, truncating to {max_chars} chars")
+        
+        text_resp = await _qwen_chat(
+            model="qwen3.6-flash",
+            api_key=settings.QWEN_API_KEY,
+            messages=[
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": f"文档内容：\n\n{text[:max_chars]}\n\n用户问题：{prompt_hint}"},
+            ],
+            temperature=0.1,
+            max_tokens=4096 if attempt == 0 else 2048,
+        )
+        if text_resp:
+            break
+    else:
         return []
 
     text_resp = re.sub(r"```json\s*|\s*```", "", text_resp).strip()
@@ -476,20 +514,26 @@ async def _parallel_process(units: List[Dict[str, Any]], mode: str, prompt_hint:
     sem = asyncio.Semaphore(MAX_CONCURRENT)
 
     async def _process_one(unit: Dict[str, Any]) -> Dict[str, Any]:
-        """处理单个单元"""
+        """处理单个单元（带超时保护）"""
         async with sem:
             task_prompt = _build_task_prompt(unit, mode)
-            text = await _qwen_chat(
-                model="qwen3.6-flash",
-                api_key=settings.QWEN_API_KEY,
-                messages=[
-                    {"role": "system", "content": "你是一个专业的解题和分析助手。"},
-                    {"role": "user", "content": task_prompt},
-                ],
-                temperature=0.3,
-                max_tokens=2048,
-            )
-            return {"id": unit["id"], "result": text or "（无结果）"}
+            try:
+                text = await asyncio.wait_for(
+                    _qwen_chat(
+                        model="qwen3.6-flash",
+                        api_key=settings.QWEN_API_KEY,
+                        messages=[
+                            {"role": "system", "content": "你是一个专业的解题和分析助手。"},
+                            {"role": "user", "content": task_prompt},
+                        ],
+                        temperature=0.3,
+                        max_tokens=2048,
+                    ),
+                    timeout=240,  # 每单元最大240s
+                )
+                return {"id": unit["id"], "result": text or "（无结果）"}
+            except asyncio.TimeoutError:
+                return {"id": unit["id"], "result": "（处理超时，已跳过）"}
 
     results = await asyncio.gather(
         *[_process_one(u) for u in units],
@@ -724,7 +768,7 @@ def _convert_to_wav(path: str) -> Optional[str]:
             ["ffmpeg", "-y", "-i", path,
              "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1",
              wav_path],
-            capture_output=True, text=True, timeout=120
+            capture_output=True, text=True, timeout=300
         )
         if result.returncode == 0 and os.path.exists(wav_path) and os.path.getsize(wav_path) > 0:
             return wav_path
@@ -752,7 +796,7 @@ def _get_duration(path: str) -> float:
         result = subprocess.run(
             ["ffprobe", "-v", "error", "-show_entries", "format=duration",
              "-of", "default=noprint_wrappers=1:nokey=1", path],
-            capture_output=True, text=True, timeout=10
+            capture_output=True, text=True, timeout=30
         )
         s = result.stdout.strip()
         return float(s) if s else 0.0
@@ -775,7 +819,7 @@ def _extract_keyframes(video_path: str, interval: int = 10, max_frames: int = 30
             "-q:v", "2",
             os.path.join(frame_dir, "frame_%04d.jpg"),
         ]
-        subprocess.run(cmd, capture_output=True, timeout=120)
+        subprocess.run(cmd, capture_output=True, timeout=300)
         frames = sorted(
             os.path.join(frame_dir, f)
             for f in os.listdir(frame_dir)
