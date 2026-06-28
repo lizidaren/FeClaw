@@ -1035,30 +1035,36 @@ class ParseFileMixin(AgentToolsServiceBase):
                     f.write(file_bytes)
                 text = _extract_text(tmp_path)
 
-                # Garbled-text fallback: if > 10% U+FFFD, render pages and OCR via VLM
-                if text and ext == "pdf":
-                    garbled_count = text.count("\ufffd")
-                    garbled_ratio = garbled_count / max(len(text), 1)
-                    if garbled_ratio > 0.10:
-                        logger.info(
-                            f"PDF garbled {garbled_count}/{len(text)} chars ({garbled_ratio:.1%}), "
-                            "falling back to VLM OCR"
-                        )
-                        text = ""  # force VLM fallback below
-
-                # Scanned PDF fallback: render pages to images and OCR via VLM
-                if (not text or not text.strip()) and ext == "pdf":
-                    import fitz
+                # VLM fallback for PDFs: garbled text > 10% OR embedded images
+                needs_vlm = False
+                if ext == "pdf":
                     doc = fitz.open(tmp_path)
-                    for i in range(len(doc)):
-                        pix = doc[i].get_pixmap(dpi=200)
-                        img_path = os.path.join(
-                            tempfile.gettempdir(),
-                            f"parse_pdf_page_{os.urandom(4).hex()}_{i}.png",
-                        )
-                        pix.save(img_path)
-                        _page_images.append(img_path)
+                    has_images = any(page.get_images() for page in doc)
                     doc.close()
+
+                    if has_images:
+                        needs_vlm = True
+                        logger.info("PDF has embedded images, using VLM OCR")
+                    elif text and text.count("\ufffd") / max(len(text), 1) > 0.10:
+                        needs_vlm = True
+                        garbled_count = text.count("\ufffd")
+                        logger.info(
+                            f"PDF garbled {garbled_count}/{len(text)} chars "
+                            f"({100*garbled_count/max(len(text),1):.1f}%), using VLM OCR"
+                        )
+                        text = ""
+
+                    if needs_vlm:
+                        doc = fitz.open(tmp_path)
+                        for i in range(len(doc)):
+                            pix = doc[i].get_pixmap(dpi=200)
+                            img_path = os.path.join(
+                                tempfile.gettempdir(),
+                                f"parse_pdf_page_{os.urandom(4).hex()}_{i}.png",
+                            )
+                            pix.save(img_path)
+                            _page_images.append(img_path)
+                        doc.close()
                     if _page_images:
                         from config import settings
                         prompt_text = f"""请识别这份文档的全部内容，包括所有文字和数学公式（用LaTeX格式输出）。注意保留：
