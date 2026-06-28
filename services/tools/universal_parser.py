@@ -1034,6 +1034,18 @@ class ParseFileMixin(AgentToolsServiceBase):
                 with open(tmp_path, "wb") as f:
                     f.write(file_bytes)
                 text = _extract_text(tmp_path)
+
+                # Garbled-text fallback: if > 10% U+FFFD, render pages and OCR via VLM
+                if text and ext == "pdf":
+                    garbled_count = text.count("\ufffd")
+                    garbled_ratio = garbled_count / max(len(text), 1)
+                    if garbled_ratio > 0.10:
+                        logger.info(
+                            f"PDF garbled {garbled_count}/{len(text)} chars ({garbled_ratio:.1%}), "
+                            "falling back to VLM OCR"
+                        )
+                        text = ""  # force VLM fallback below
+
                 # Scanned PDF fallback: render pages to images and OCR via VLM
                 if (not text or not text.strip()) and ext == "pdf":
                     import fitz
@@ -1049,7 +1061,12 @@ class ParseFileMixin(AgentToolsServiceBase):
                     doc.close()
                     if _page_images:
                         from config import settings
-                        prompt_text = f"请识别这份文档的全部内容。用户的问题：{prompt}"
+                        prompt_text = f"""请识别这份文档的全部内容，包括所有文字和数学公式（用LaTeX格式输出）。注意保留：
+- 所有题目编号和题干
+- 数学公式（用 $...$ 或 $$...$$ 包围）
+- 几何图形中的标注文字
+- 任何图表或表格中的数据
+- 用户的问题：{prompt}"""
                         text = await _vlm_chat(_page_images, prompt_text, settings.QWEN_API_KEY) or ""
             except Exception as e:
                 return f"（读取文件失败：{e}）"
