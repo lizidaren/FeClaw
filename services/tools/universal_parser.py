@@ -153,6 +153,10 @@ DOC_LARGE_THRESHOLD = 20 * 1024  # 20KB
 # 文本截断长度（避免 LLM context 爆炸）
 TEXT_TRUNCATE_CHARS = 100_000
 
+# 平行处理限制
+MAX_CONCURRENT = 20     # 最多20路并发
+MAX_UNITS = 100         # 最多100个单元
+
 # 支持的扩展名（用于错误提示）
 SUPPORTED_EXTS = sorted(EXT_CATEGORY.keys())
 
@@ -240,7 +244,21 @@ async def _route_decision(
    - 需要：背景音识别（"海浪声"）、音色情绪（"生气吗"）、画面内容（"在做什么"）
    - 不需要：只问内容/摘要 → false
 
-返回 JSON: {{"needs_chunking": bool, "requires_omni": bool, "reasoning": "简短理由"}}
+4. 新模式判断（mode）：
+   mode="solve": 用户要求解/做/计算文档中的题目（如"解所有题"、"求答案"）
+   mode="grade": 用户要求批改/评分（如"批改答案"、"判断对错"）
+   mode="extract_terms": 用户要求提取/列出离散元素（术语、公式等）
+   mode="summarize": 用户要求总结/概括文档内容
+   mode="default": 其他情况
+
+   has_units: 文档是否包含可拆分处理的离散单元（题、术语等）
+   unit_type: "problem"（试题）| "answer_pair"（题目+学生答案）| "term"（术语/公式）
+   unit_count_estimate: 预估单元数量
+
+返回示例:
+{{"mode":"solve","has_units":true,"unit_type":"problem","unit_count_estimate":12,"needs_chunking":false,"reasoning":"数学试卷，12道选择题"}}
+
+返回 JSON: {{"mode": str, "has_units": bool, "unit_type": str|null, "unit_count_estimate": int, "needs_chunking": bool, "requires_omni": bool, "reasoning": "简短理由"}}
 """
 
     result: Dict[str, Any]
@@ -265,6 +283,10 @@ async def _route_decision(
             if m:
                 parsed = json.loads(m.group(0))
                 result = {
+                    "mode": str(parsed.get("mode", "default")),
+                    "has_units": bool(parsed.get("has_units", False)),
+                    "unit_type": parsed.get("unit_type") if parsed.get("unit_type") in ("problem", "answer_pair", "term") else None,
+                    "unit_count_estimate": int(parsed.get("unit_count_estimate", 0) or 0),
                     "needs_chunking": bool(parsed.get("needs_chunking", False)),
                     "requires_omni": bool(parsed.get("requires_omni", False)),
                     "reasoning": str(parsed.get("reasoning", "")),
@@ -284,8 +306,237 @@ async def _route_decision(
 def _sr_fallback(content_type: str, reason: str) -> Dict[str, Any]:
     """SR 失败时的保守默认值"""
     if content_type in ("audio", "video"):
-        return {"needs_chunking": False, "requires_omni": True, "reasoning": f"fallback: {reason}"}
-    return {"needs_chunking": False, "requires_omni": False, "reasoning": f"fallback: {reason}"}
+        return {
+            "mode": "default",
+            "has_units": False,
+            "unit_type": None,
+            "unit_count_estimate": 0,
+            "needs_chunking": False,
+            "requires_omni": True,
+            "reasoning": f"fallback: {reason}",
+        }
+    return {
+        "mode": "default",
+        "has_units": False,
+        "unit_type": None,
+        "unit_count_estimate": 0,
+        "needs_chunking": False,
+        "requires_omni": False,
+        "reasoning": f"fallback: {reason}",
+    }
+
+
+# ── 平行单元处理（提取 → 并发 → 聚合） ─────────────────────────
+
+
+async def _extract_units(
+    text: str,
+    mode: str,
+    unit_type: Optional[str],
+    prompt_hint: str,
+) -> List[Dict[str, Any]]:
+    """用一次 LLM 调用从文档中提取可并行处理的单元列表。
+
+    Returns: list of {"id": int, "stem": str, "metadata": dict}
+    """
+    SYSTEM_PROMPTS = {
+        "solve": """你是一个文档解析器。从文档中逐一提取所有独立的题目。
+返回 JSON 数组，每项包含：
+- id: 题号（从1开始）
+- stem: 完整的题目内容（包括题干、选项、配图描述等所有信息）
+- metadata: { "type": "choice"|"fill"|"解答"|"其他" }
+
+注意：
+- 每题独立，不要遗漏
+- 选择题要保留所有选项
+- 解答题保留全部文字
+- 即使题目之间有共享材料（如同一段阅读材料），也单独列出""",
+        "grade": """你是一个批改助手。从文档中提取所有包含"题目"和对应"学生答案"的对。
+
+返回 JSON 数组，每项包含：
+- id: 题号
+- stem: 题目内容
+- student_answer: 学生给出的答案
+- metadata: {}""",
+        "extract_terms": """你是一个术语提取器。从文档中提取所有离散的信息单元。
+
+返回 JSON 数组，每项包含：
+- id: 序号
+- stem: 术语/公式/标题 + 内容
+- metadata: { "type": "term"|"formula"|"table"|"section" }""",
+    }
+
+    try:
+        from config import settings
+    except Exception:
+        logger.warning("config import failed in _extract_units")
+        return []
+
+    prompt = SYSTEM_PROMPTS.get(mode, SYSTEM_PROMPTS["solve"])
+    text_resp = await _qwen_chat(
+        model="qwen3.6-flash",
+        api_key=settings.QWEN_API_KEY,
+        messages=[
+            {"role": "system", "content": prompt},
+            {"role": "user", "content": f"文档内容：\n\n{text[:80000]}\n\n用户问题：{prompt_hint}"},
+        ],
+        temperature=0.1,
+        max_tokens=4096,
+    )
+    if not text_resp:
+        return []
+
+    text_resp = re.sub(r"```json\s*|\s*```", "", text_resp).strip()
+    # 非贪婪匹配：取第一个完整的 JSON 数组（模型有时在数组后追加解释文字）
+    m = re.search(r"\[[\s\S]*?\]", text_resp)
+    if not m:
+        return []
+
+    try:
+        parsed = json.loads(m.group(0))
+    except Exception as e:
+        logger.warning(f"_extract_units JSON parse failed: {e}")
+        return []
+
+    units: List[Dict[str, Any]] = []
+    for i, item in enumerate(parsed):
+        if not isinstance(item, dict):
+            continue
+        stem = item.get("stem", "")
+        if not stem:
+            continue
+        units.append({
+            "id": item.get("id", i + 1),
+            "stem": stem,
+            "metadata": item.get("metadata", {}) if isinstance(item.get("metadata"), dict) else {},
+        })
+        if mode == "grade" and item.get("student_answer"):
+            units[-1]["student_answer"] = item["student_answer"]
+
+    return units
+
+
+async def _parallel_process(units: List[Dict[str, Any]], mode: str, prompt_hint: str) -> List[Dict[str, Any]]:
+    """并发处理所有单元，返回结果列表。"""
+
+    if len(units) > MAX_UNITS:
+        units = units[:MAX_UNITS]
+
+    try:
+        from config import settings
+    except Exception:
+        logger.warning("config import failed in _parallel_process")
+        return [{"id": u["id"], "result": "（配置加载失败）"} for u in units]
+
+    def _build_task_prompt(unit: Dict[str, Any], mode: str) -> str:
+        """为单个单元构建处理 prompt"""
+        if mode == "solve":
+            return f"""你是一个解题助手。请解答以下题目，给出详细的解题步骤和最终答案。
+
+题目：
+{unit['stem']}
+
+请按以下格式输出：
+## 解题过程
+（写出详细步骤）
+## 最终答案
+（写出最终答案）"""
+
+        elif mode == "grade":
+            return f"""你是一个批改助手。判断答案是否正确，如有错误请指出并给出正确答案。
+
+题目：
+{unit['stem']}
+
+学生答案：
+{unit.get('student_answer', '（无学生答案）')}
+
+请按以下格式输出：
+## 判断
+正确/错误（需改正）/部分正确
+## 评语
+...
+## 正确答案
+..."""
+
+        elif mode == "extract_terms":
+            return f"""请解释以下内容：
+
+{unit['stem']}
+
+请给出简要的解释说明。"""
+
+        else:
+            return f"""请处理以下内容：
+
+{unit['stem']}
+
+给出你的分析和结论。"""
+
+    sem = asyncio.Semaphore(MAX_CONCURRENT)
+
+    async def _process_one(unit: Dict[str, Any]) -> Dict[str, Any]:
+        """处理单个单元"""
+        async with sem:
+            task_prompt = _build_task_prompt(unit, mode)
+            text = await _qwen_chat(
+                model="qwen3.6-flash",
+                api_key=settings.QWEN_API_KEY,
+                messages=[
+                    {"role": "system", "content": "你是一个专业的解题和分析助手。"},
+                    {"role": "user", "content": task_prompt},
+                ],
+                temperature=0.3,
+                max_tokens=2048,
+            )
+            return {"id": unit["id"], "result": text or "（无结果）"}
+
+    results = await asyncio.gather(
+        *[_process_one(u) for u in units],
+        return_exceptions=True,
+    )
+
+    processed: List[Dict[str, Any]] = []
+    for i, r in enumerate(results):
+        if isinstance(r, Exception):
+            processed.append({"id": units[i]["id"], "result": f"（处理失败：{r}）"})
+        else:
+            processed.append(r)
+
+    return processed
+
+
+async def _aggregate(results: List[Dict[str, Any]], mode: str) -> str:
+    """聚合所有并行处理的结果"""
+    if not results:
+        return "（无处理结果）"
+
+    if mode == "solve":
+        lines: List[str] = []
+        for r in results:
+            lines.append(f"## 第 {r['id']} 题\n{r['result']}\n")
+        return "\n".join(lines)
+
+    # For other modes, use LLM to summarize
+    summary_input = json.dumps(
+        [{"id": r["id"], "result": r["result"][:500]} for r in results],
+        ensure_ascii=False, indent=2,
+    )
+    try:
+        from config import settings
+        text = await _qwen_chat(
+            model="qwen3.6-flash",
+            api_key=settings.QWEN_API_KEY,
+            messages=[
+                {"role": "system", "content": "你是一个结果汇总助手。汇总以下并行处理的结果，生成清晰的结构化报告。"},
+                {"role": "user", "content": f"请汇总以下并行处理结果：\n\n{summary_input}"},
+            ],
+            max_tokens=3000,
+        )
+        return text or "（汇总失败）"
+    except Exception as e:
+        logger.warning(f"_aggregate failed: {e}")
+        return "（汇总失败）"
 
 
 # ── LLM 文本回答 ──────────────────────────────────────────────
@@ -773,6 +1024,25 @@ class ParseFileMixin(AgentToolsServiceBase):
         # 大文件：小模型决策要不要切块
         decision = await _route_decision("doc", prompt, file_size)
         logger.info(f"Doc SR decision: {decision}")
+
+        mode = decision.get("mode", "default")
+
+        # 平行单元处理模式
+        if mode in ("solve", "grade", "extract_terms") and decision.get("has_units"):
+            logger.info(
+                f"Parallel mode: {mode}, estimated units: {decision.get('unit_count_estimate', '?')}"
+            )
+            try:
+                units = await _extract_units(
+                    text, mode, decision.get("unit_type"), prompt
+                )
+                if units:
+                    logger.info(f"Extracted {len(units)} units for parallel processing")
+                    results = await _parallel_process(units, mode, prompt)
+                    return await _aggregate(results, mode)
+                logger.warning("extract_units returned empty, falling back")
+            except Exception as e:
+                logger.warning(f"Parallel processing failed: {e}, falling back")
 
         # 智能切块检索：SemanticChunker 切分 → embedding 相似度 → top-K
         if decision.get("needs_chunking") and file_size > 50000:
