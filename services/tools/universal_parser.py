@@ -660,10 +660,117 @@ async def _llm_answer(
 
 # ── Omni 调用（音频理解；ASR 也走 Omni） ─────────────────────
 
-# BLOCKER: 真正的 ASR 走 DashScope Paraformer (services/tools/...
-# 中可加 _asr_transcribe)，但当前 API key 权限只允许 Omni 多模态，
-# 所以音频转写也通过 qwen3.5-omni-plus 完成。授权问题解决后可在
-# 这里加分支：短音频用 Paraformer（便宜），长音频用 Omni。
+# 智能路由：先用 _route_audio_decision 判断是否需要 Omni，
+# 需要 → qwen3.5-omni-flash（多模态理解），只需转写 → Paraformer（便宜）。
+
+
+async def _route_audio_decision(prompt: str, api_key: str) -> str:
+    """SmartRouter 风格：判断音频任务是否需要 Omni（理解非文本内容）。
+
+    Returns "omni"（需理解语调/情感/音乐/背景音/说话人）或 "asr"（仅需转录文字）。
+    """
+    try:
+        system = """你是一个音频路由决策器。判断用户的请求是否需要「理解」音频中的非文本内容。
+
+返回 JSON: {"mode": "omni" | "asr", "reason": "..."}
+
+需要 Omni 的情况（需要理解非文本内容）：
+- 分析语调、情感、语气
+- 识别音乐、旋律、歌曲
+- 识别说话人、多人对话区分
+- 检测背景音、环境声音、音效
+- 判断朗读节奏、停顿、重音
+- 理解音频中的艺术表现（表演、演唱等）
+
+走 ASR 的情况（只需转录和理解文字）：
+- 转写/听写录音内容
+- 总结会议/讲座内容
+- 回答基于录音文字内容的问题
+- 提取录音中的关键信息
+- 翻译录音中的文字内容
+- 校对或检查文字内容准确度"""
+
+        text = await _qwen_chat(
+            model="qwen3.6-flash",
+            api_key=api_key,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": f"用户请求：{prompt}"},
+            ],
+            temperature=0.1,
+            max_tokens=100,
+        )
+        if not text:
+            return "omni"  # fallback to omni on failure
+
+        # Try to extract JSON from response
+        m = re.search(r"mode\s*:\s*(omni|asr)", text)
+        if m:
+            return m.group(1)
+        # Try full JSON parse
+        m = re.search(r"\{[\s\S]*?\}", text)
+        if m:
+            try:
+                d = json.loads(m.group(0))
+                return d.get("mode", "omni")
+            except Exception:
+                pass
+        return "omni"  # safe fallback
+    except Exception as e:
+        logger.warning(f"_route_audio_decision failed: {e}")
+        return "omni"
+
+
+async def _asr_transcribe(audio_path: str, api_key: str) -> Optional[str]:
+    """使用 Paraformer 纯转写（¥0.29/小时），适合仅需文字的场景。
+
+    Args:
+        audio_path: 本地 WAV 文件路径
+        api_key: DashScope API Key
+
+    Returns:
+        转写文本，失败返回 None
+    """
+    try:
+        # Set API key for dashscope SDK
+        os.environ["DASHSCOPE_API_KEY"] = api_key
+
+        from dashscope.audio.asr import Recognition
+
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(
+            None,
+            lambda: Recognition(model="paraformer-realtime-v2").call(
+                file=audio_path,
+                diarization_enabled=False,
+            )
+        )
+
+        if result is None:
+            return None
+
+        sentences = result.get_sentence()
+        if not sentences:
+            # Try to get from output directly
+            if hasattr(result, "output") and result.output:
+                sentences = result.output.get("sentence", [])
+
+        if not sentences:
+            return None
+
+        # Join all sentence texts
+        texts = []
+        for s in (sentences if isinstance(sentences, list) else [sentences]):
+            if isinstance(s, dict):
+                texts.append(s.get("text", ""))
+            else:
+                texts.append(str(s))
+
+        full_text = "".join(texts).strip()
+        return full_text or None
+    except Exception as e:
+        logger.warning(f"_asr_transcribe failed: {e}")
+        return None
 
 
 async def _omni_analyze(
@@ -673,7 +780,7 @@ async def _omni_analyze(
     extra_text_hint: str = "",
 ) -> str:
     """
-    调用 Qwen3.5-Omni-Plus 分析音频或视频。
+    调用 Qwen3.5-Omni-Flash 分析音频或视频。
     音频输入支持本地文件路径（SDK 自动上传）。
     """
     try:
@@ -703,7 +810,7 @@ async def _omni_analyze(
         response = await loop.run_in_executor(
             None,
             lambda: MultiModalConversation.call(
-                model="qwen3.5-omni-plus",
+                model="qwen3.5-omni-flash",
                 api_key=settings.QWEN_API_KEY,
                 messages=messages,
                 result_format="message",
@@ -993,7 +1100,7 @@ class ParseFileMixin(AgentToolsServiceBase):
             "支持的文件类型：\n"
             "- 图片: jpg, jpeg, png, gif, webp, svg, bmp, heic（→ Qwen VL-Max）\n"
             "- 文档: pdf, docx, pptx, xlsx, txt, md, json, csv, yaml, xml, html, py 等（→ 文本提取 + Qwen-Turbo）\n"
-            "- 音频: mp3, wav, m4a, ogg, flac, aac, wma（→ Qwen3.5-Omni-Plus）\n"
+            "- 音频: mp3, wav, m4a, ogg, flac, aac, wma（→ Qwen3.5-Omni-Flash / Paraformer）\n"
             "- 视频: mp4, mov, avi, mkv, webm, flv（→ 关键帧 VLM + 音频 Omni）\n"
             "- 网址: http://, https://（→ 抓取 + Qwen-Turbo）\n\n"
             "提示：对于大文件，具体的问题（\u201c第二章讲什么\u201d）比笼统的问题（\u201c总结一下\u201d）结果更精确。"
@@ -1267,8 +1374,7 @@ class ParseFileMixin(AgentToolsServiceBase):
     # ── Audio Handler ──────────────────────────────────────
 
     async def _handle_audio(self, path: str, prompt: str) -> str:
-        """音频 → 16kHz mono WAV → Qwen3.5-Omni-Plus
-        (ASR 也走 Omni，授权问题解决后可在此加 Paraformer 分支)"""
+        """音频 → 16kHz mono WAV → 智能路由（Omni 多模态 或 Paraformer ASR）"""
         file_bytes = await self._vfs_read_bytes(path)
         if not file_bytes:
             return "（找不到文件或无法读取）"
@@ -1280,9 +1386,27 @@ class ParseFileMixin(AgentToolsServiceBase):
             with open(tmp_path, "wb") as f:
                 f.write(file_bytes)
 
-            # 优先转 16kHz mono WAV（Omni 对此最稳定）；失败时回退到原始文件
+            # 优先转 16kHz mono WAV（Omni/Paraformer 对此最稳定）；失败时回退到原始文件
             wav_path = _convert_to_wav(tmp_path) or tmp_path
 
+            from config import settings
+
+            # 智能路由：判断本次任务需要 Omni 还是只需 ASR
+            mode = await _route_audio_decision(prompt, settings.QWEN_API_KEY)
+            logger.info(f"Audio route decision: {mode} (prompt: {prompt[:50]}...)")
+
+            if mode == "asr":
+                # 纯转写路径：Paraformer（便宜）→ Qwen 理解转写后的文字
+                transcript = await _asr_transcribe(wav_path, settings.QWEN_API_KEY)
+                if transcript:
+                    return await _llm_answer(
+                        prompt,
+                        f"音频转写内容：\n\n{transcript}",
+                    )
+                # 转写失败 → 回退到 Omni
+                logger.warning("ASR transcription failed, falling back to Omni")
+
+            # Omni 路径：理解非文本内容（语调、音乐、背景音等）
             extra_hint = (
                 "如果用户要求转写/听写，请把音频中实际说出的文字逐字记录下来；"
                 "无法听清的部分明确标注'（听不清）'。"
