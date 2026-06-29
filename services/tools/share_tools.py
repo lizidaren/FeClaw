@@ -50,6 +50,8 @@ class ShareToolsMixin(AgentToolsServiceBase):
 
         if result is None:
             return "Error: 创建分享链接失败（可能是敏感文件或无效路径）"
+        if isinstance(result, dict) and result.get("_error") == "not_found":
+            return f"Error: 文件不存在，无法分享：{result.get('vfs_path', path)}"
 
         return result["url"]
 

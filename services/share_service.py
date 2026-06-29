@@ -200,7 +200,7 @@ def create_share_link(
             cos_key = f"feclaw/agents/{agent_hash}/{vfs_path.lstrip('/')}"
             if not StorageService().file_exists(cos_key):
                 logger.warning(f"Share link failed: file not found in VFS: {cos_key}")
-                return None
+                return {"_error": "not_found", "vfs_path": vfs_path}
 
         if mode == "path":
             url = f"https://{settings.FECLAW_STATIC_DOMAIN}/share/{vfs_path.lstrip('/')}"
