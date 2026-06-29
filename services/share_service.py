@@ -194,6 +194,14 @@ def create_share_link(
     from models.database import ShareMapping, SessionLocal
 
     try:
+        # 检查文件是否真的存在
+        if agent_hash and vfs_path:
+            from services.storage_service import StorageService
+            cos_key = f"feclaw/agents/{agent_hash}/{vfs_path.lstrip('/')}"
+            if not StorageService().file_exists(cos_key):
+                logger.warning(f"Share link failed: file not found in VFS: {cos_key}")
+                return None
+
         if mode == "path":
             url = f"https://{settings.FECLAW_STATIC_DOMAIN}/share/{vfs_path.lstrip('/')}"
             return {"url": url}
