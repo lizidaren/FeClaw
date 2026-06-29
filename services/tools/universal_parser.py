@@ -25,7 +25,6 @@ import aiohttp
 import shutil
 import tempfile
 import subprocess
-import httpx
 from collections import OrderedDict
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Tuple
@@ -90,7 +89,8 @@ async def _qwen_chat(
             if choices:
                 return choices[0].get("message", {}).get("content")
             return None
-        except (asyncio.TimeoutError, aiohttp.ServerTimeoutError, Exception):
+        except (asyncio.TimeoutError, aiohttp.ServerTimeoutError, Exception) as e:
+            logger.warning(f"_qwen_chat attempt {attempt+1} failed: {e}")
             if attempt < len(retry_configs) - 1:
                 continue
             return None
@@ -121,7 +121,8 @@ async def _vlm_chat(
             with open(path, "rb") as f:
                 b64 = base64.b64encode(f.read()).decode("utf-8")
             ext = path.rsplit(".", 1)[-1].lower()
-            mime = f"image/{'png' if ext == 'png' else 'jpeg'}"
+            import mimetypes
+            mime = mimetypes.guess_type(path)[0] or f"image/{ext}"
             content.append({
                 "type": "image_url",
                 "image_url": {"url": f"data:{mime};base64,{b64}"}
@@ -144,7 +145,8 @@ async def _vlm_chat(
         if choices:
             return choices[0].get("message", {}).get("content")
         return None
-    except Exception:
+    except Exception as e:
+        logger.warning(f"_vlm_chat failed: {e}")
         return None
 
 # ── 文件类型检测 ──────────────────────────────────────────────
@@ -697,11 +699,15 @@ async def _omni_analyze(
             messages[0]["content"].append({"audio": audio_path})
         messages[0]["content"].append({"text": "\n".join(text_parts)})
 
-        response = MultiModalConversation.call(
-            model="qwen3.5-omni-plus",
-            api_key=settings.QWEN_API_KEY,
-            messages=messages,
-            result_format="message",
+        loop = asyncio.get_running_loop()
+        response = await loop.run_in_executor(
+            None,
+            lambda: MultiModalConversation.call(
+                model="qwen3.5-omni-plus",
+                api_key=settings.QWEN_API_KEY,
+                messages=messages,
+                result_format="message",
+            ),
         )
 
         output = response.get("output", {})
@@ -731,16 +737,16 @@ def _extract_text(path: str, max_chars: int = TEXT_TRUNCATE_CHARS) -> str:
         if ext == "pdf":
             try:
                 import fitz  # PyMuPDF
-                doc = fitz.open(path)
-                parts: List[str] = []
-                total = 0
-                for page in doc:
-                    page_text = page.get_text()
-                    parts.append(page_text)
-                    total += len(page_text)
-                    if total > max_chars:
-                        break
-                return "".join(parts)[:max_chars]
+                with fitz.open(path) as doc:
+                    parts: List[str] = []
+                    total = 0
+                    for page in doc:
+                        page_text = page.get_text()
+                        parts.append(page_text)
+                        total += len(page_text)
+                        if total > max_chars:
+                            break
+                    return "".join(parts)[:max_chars]
             except ImportError:
                 return "（PyMuPDF 未安装）"
             except Exception as e:
@@ -935,11 +941,11 @@ async def _vlm_analyze_content(content: List[dict]) -> str:
 
     content: list of {"image": "data:image/...;base64,..."} or {"text": str}
     """
+    image_paths: List[str] = []
     try:
         from config import settings
         import base64 as _b64
 
-        image_paths: List[str] = []
         text_parts: List[str] = []
         for c in content:
             if "image" in c:
@@ -966,7 +972,10 @@ async def _vlm_analyze_content(content: List[dict]) -> str:
                 text_parts.append(c["text"])
 
         prompt = "\n".join(text_parts) if text_parts else "请描述这些图片的内容。"
-        text = await _vlm_chat(image_paths, prompt, settings.QWEN_API_KEY)
+        try:
+            text = await _vlm_chat(image_paths, prompt, settings.QWEN_API_KEY)
+        finally:
+            _cleanup_paths(*image_paths)
         return text or "（VLM 未返回内容）"
     except Exception as e:
         return f"（VLM 帧分析失败：{e}）"
@@ -1083,6 +1092,7 @@ class ParseFileMixin(AgentToolsServiceBase):
                 with open(tmp_path, "wb") as f:
                     f.write(file_bytes)
                 text = _extract_text(tmp_path)
+                garbled_text = ""  # backup for fallback if VLM returns empty
 
                 # VLM fallback for PDFs: garbled text > 10% OR embedded meaningful images
                 needs_vlm = False
@@ -1121,11 +1131,16 @@ class ParseFileMixin(AgentToolsServiceBase):
                             f"PDF garbled {garbled_count}/{len(text)} chars "
                             f"({100*garbled_count/max(len(text),1):.1f}%), using VLM OCR"
                         )
+                        garbled_text = text  # backup for fallback
                         text = ""
 
                     if needs_vlm:
                         doc = fitz.open(tmp_path)
-                        for i in range(len(doc)):
+                        MAX_PDF_PAGES = 50
+                        total_pages = len(doc)
+                        if total_pages > MAX_PDF_PAGES:
+                            logger.warning(f"PDF has {total_pages} pages, limiting to {MAX_PDF_PAGES}")
+                        for i in range(min(total_pages, MAX_PDF_PAGES)):
                             pix = doc[i].get_pixmap(dpi=200)
                             img_path = os.path.join(
                                 tempfile.gettempdir(),
@@ -1143,10 +1158,16 @@ class ParseFileMixin(AgentToolsServiceBase):
 - 任何图表或表格中的数据
 - 用户的问题：{prompt}"""
                         text = await _vlm_chat(_page_images, prompt_text, settings.QWEN_API_KEY) or ""
+                        # Fall back to garbled text if VLM returned empty
+                        if not text and garbled_text:
+                            logger.warning("VLM returned empty, falling back to garbled text")
+                            text = garbled_text
             except Exception as e:
+                _cleanup_paths(*_page_images)
                 return f"（读取文件失败：{e}）"
             finally:
                 _cleanup_paths(tmp_path)
+                _cleanup_paths(*_page_images)
 
         if not text or not text.strip():
             _cleanup_paths(*_page_images)
