@@ -791,6 +791,9 @@ async def get_signed_url(body: SignedUrlRequest, req: Request, user: User = Depe
         signed_url = s().generate_presigned_put_url(full_path, body.expires)
         method = "PUT"
     elif body.operation == "download":
+        # 先检查文件是否存在
+        if not s().file_exists(full_path):
+            raise HTTPException(status_code=404, detail="文件不存在")
         # 下载签名 URL（GET）
         public_url = s().get_object_public_url(full_path)
         signed_url = s().generate_presigned_get_url(
