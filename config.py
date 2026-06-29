@@ -188,6 +188,8 @@ class Settings(BaseSettings):
     SANDBOX_READ_RATE_LIMIT: int = 1 * 1024 * 1024      # 1 MB/s
     SANDBOX_WRITE_RATE_LIMIT: int = 1 * 1024 * 1024     # 1 MB/s
     SANDBOX_MAX_FILE_SIZE: int = 100 * 1024 * 1024      # 100 MB
+    # Python venv 路径（沙箱内绑定到 /venv），默认服务器路径
+    FECLAW_VENV_PATH: str = "/home/ubuntu/FeClaw/venv"
 
     # FUSE 文件系统配置
     FUSE_ENABLED: bool = True

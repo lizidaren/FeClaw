@@ -578,7 +578,8 @@ class SandboxManager:
             env.pop("LD_LIBRARY_PATH", None)
 
             # 优先用 venv python3（系统 python3.8 有兼容问题）
-            _pip3 = "/home/ubuntu/FeClaw/venv/bin/python3"
+            from config import settings as _sttngs
+            _pip3 = os.path.join(_sttngs.FECLAW_VENV_PATH, "bin", "python3")
             _python3_cmd = _pip3 if os.path.exists(_pip3) else "python3"
             result = subprocess.run(
                 [_python3_cmd, script_path],
@@ -624,7 +625,7 @@ class SandboxManager:
     def _build_bwrap_base_opts(self, script_path: str) -> List[str]:
         """构建 bwrap 公共挂载选项（两个沙箱执行路径共享）"""
         host_path = os.environ.get("PATH", "/usr/bin:/bin")
-        FECLAW_VENV = "/home/ubuntu/FeClaw/venv"
+        FECLAW_VENV = settings.FECLAW_VENV_PATH
 
         # Python stdlib 路径: 从 venv 解析
         _venv_python = os.path.join(FECLAW_VENV, "bin", "python3")
@@ -729,7 +730,7 @@ class SandboxManager:
 
     def _build_bwrap_command(self, script_path: str, timeout: int) -> List[str]:
         """构建 bubblewrap 隔离命令（含 netns 网络隔离 + seccomp enforcer）"""
-        FECLAW_VENV = "/home/ubuntu/FeClaw/venv"
+        FECLAW_VENV = settings.FECLAW_VENV_PATH
         python_bin = "/venv/bin/python3" if os.path.exists(FECLAW_VENV) else \
             os.path.realpath(shutil.which("python3") or "/usr/local/bin/python3.12")
         opts = self._build_bwrap_base_opts(script_path)
