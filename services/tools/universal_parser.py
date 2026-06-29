@@ -733,17 +733,21 @@ async def _asr_transcribe(audio_path: str, api_key: str) -> Optional[str]:
     """
     try:
         # Set API key for dashscope SDK
-        os.environ["DASHSCOPE_API_KEY"] = api_key
+        import dashscope
+        dashscope.api_key = api_key
 
         from dashscope.audio.asr import Recognition
 
         loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(
-            None,
-            lambda: Recognition(model="paraformer-realtime-v2").call(
-                file=audio_path,
-                diarization_enabled=False,
-            )
+        result = await asyncio.wait_for(
+            loop.run_in_executor(
+                None,
+                lambda: Recognition(model="paraformer-realtime-v2").call(
+                    file=audio_path,
+                    diarization_enabled=False,
+                )
+            ),
+            timeout=120.0
         )
 
         if result is None:
@@ -1204,29 +1208,28 @@ class ParseFileMixin(AgentToolsServiceBase):
                 # VLM fallback for PDFs: garbled text > 10% OR embedded meaningful images
                 needs_vlm = False
                 if ext == "pdf":
-                    doc = fitz.open(tmp_path)
+                    with fitz.open(tmp_path) as doc:
 
-                    # Smarter image detection: skip full-page backgrounds (>90%) and tiny icons (<5%)
-                    has_meaningful = False
-                    page_rects = [page.rect for page in doc]
-                    for i, page in enumerate(doc):
-                        pw, ph = page_rects[i].width, page_rects[i].height
-                        for img in page.get_images(full=True):
-                            bbox = page.get_image_bbox(img)
-                            if bbox is None or bbox.is_empty:
-                                continue
-                            rw = bbox.width / pw
-                            rh = bbox.height / ph
-                            # Skip full-page background (>90%) and tiny icons (<5%)
-                            if rw > 0.9 and rh > 0.9:
-                                continue
-                            if rw < 0.05 and rh < 0.05:
-                                continue
-                            has_meaningful = True
-                            break
-                        if has_meaningful:
-                            break
-                    doc.close()
+                        # Smarter image detection: skip full-page backgrounds (>90%) and tiny icons (<5%)
+                        has_meaningful = False
+                        page_rects = [page.rect for page in doc]
+                        for i, page in enumerate(doc):
+                            pw, ph = page_rects[i].width, page_rects[i].height
+                            for img in page.get_images(full=True):
+                                bbox = page.get_image_bbox(img)
+                                if bbox is None or bbox.is_empty:
+                                    continue
+                                rw = bbox.width / pw
+                                rh = bbox.height / ph
+                                # Skip full-page background (>90%) and tiny icons (<5%)
+                                if rw > 0.9 and rh > 0.9:
+                                    continue
+                                if rw < 0.05 and rh < 0.05:
+                                    continue
+                                has_meaningful = True
+                                break
+                            if has_meaningful:
+                                break
 
                     if has_meaningful:
                         needs_vlm = True
@@ -1242,20 +1245,19 @@ class ParseFileMixin(AgentToolsServiceBase):
                         text = ""
 
                     if needs_vlm:
-                        doc = fitz.open(tmp_path)
-                        MAX_PDF_PAGES = 50
-                        total_pages = len(doc)
-                        if total_pages > MAX_PDF_PAGES:
-                            logger.warning(f"PDF has {total_pages} pages, limiting to {MAX_PDF_PAGES}")
-                        for i in range(min(total_pages, MAX_PDF_PAGES)):
-                            pix = doc[i].get_pixmap(dpi=200)
-                            img_path = os.path.join(
-                                tempfile.gettempdir(),
-                                f"parse_pdf_page_{os.urandom(4).hex()}_{i}.png",
-                            )
-                            pix.save(img_path)
-                            _page_images.append(img_path)
-                        doc.close()
+                        with fitz.open(tmp_path) as doc:
+                            MAX_PDF_PAGES = 50
+                            total_pages = len(doc)
+                            if total_pages > MAX_PDF_PAGES:
+                                logger.warning(f"PDF has {total_pages} pages, limiting to {MAX_PDF_PAGES}")
+                            for i in range(min(total_pages, MAX_PDF_PAGES)):
+                                pix = doc[i].get_pixmap(dpi=200)
+                                img_path = os.path.join(
+                                    tempfile.gettempdir(),
+                                    f"parse_pdf_page_{os.urandom(4).hex()}_{i}.png",
+                                )
+                                pix.save(img_path)
+                                _page_images.append(img_path)
                     if _page_images:
                         from config import settings
                         prompt_text = f"""请识别这份文档的全部内容，包括所有文字和数学公式（用LaTeX格式输出）。注意保留：
