@@ -20,10 +20,12 @@ from services.tools.moments_tools import MomentsToolsMixin
 from services.tools.fehub_tools import FeHubToolsMixin
 from services.tools.tts_tools import TtsToolsMixin
 from services.tools.universal_parser import ParseFileMixin
+from services.tools.pptx_tools import PptxToolsMixin
 
 
 class AgentToolsService(
     TtsToolsMixin,
+    PptxToolsMixin,
     ParseFileMixin,
     FeHubToolsMixin,
     MomentsToolsMixin,
