@@ -633,7 +633,11 @@ async def _llm_answer(
         if page_images:
             text = await _vlm_chat(
                 page_images,
-                f"文件内容：\n\n{context[:TEXT_TRUNCATE_CHARS]}\n\n用户问题：{prompt}",
+                f"请仔细查看图片中的几何图形/图表。"
+                f"结合以下文字内容和用户问题，直接给出答案。"
+                f"不需要复述题目原文，直接回答。\n\n"
+                f"文字内容：\n{context[:TEXT_TRUNCATE_CHARS // 3]}\n\n"
+                f"用户问题：{prompt}",
                 settings.QWEN_API_KEY,
                 max_tokens=max_tokens,
             )
@@ -1022,6 +1026,88 @@ def _cleanup_paths(*paths: Optional[str]) -> None:
                 pass
 
 
+# ── PDF 图片区域提取（含上下文） ────────────────────────────
+
+async def _needs_visual_context(prompt: str, text_preview: str, api_key: str) -> bool:
+    """
+    用轻量 LLM 判断用户问题是否需要用 PDF 中的图片。
+
+    关键词驱动太粗糙（"图"也可能是文字描述中的"如图"），
+    用 LLM 做语义判断更准确。
+    """
+    try:
+        _resp = await _qwen_chat(
+            model="qwen3.6-flash",
+            api_key=api_key,
+            messages=[
+                {
+                    "role": "user",
+                    "content": (
+                        f"文档内容：{text_preview}\n\n"
+                        f"用户问题：{prompt}\n\n"
+                        "判断：解答此问题时是否必须参考文档中的图片、图表或示意图？"
+                        "仅回答「是」或「否」。"
+                    ),
+                }
+            ],
+            temperature=0.1,
+            max_tokens=5,
+        )
+        return "是" in (_resp or "")
+    except Exception as e:
+        logger.warning(f"[Visual context] LLM decision failed: {e}")
+        return False  # 保守回退：不要图
+
+def _extract_pdf_context_images(pdf_path: str, dpi: int = 150) -> Tuple[List[str], bool]:
+    """
+    提取 PDF 中有意义的图片区域，包含上下文字段落。
+
+    只裁剪图片区域附近的矩形（图片 + 上方~2行 + 下方~1行文字），
+    不渲染整页。适用于文字提取质量好、但需要图片作为视觉辅助的场景。
+
+    Returns:
+        (image_paths, has_meaningful) — JPEG 路径列表，是否有意义图片
+    """
+    import fitz
+    image_paths: List[str] = []
+    has_meaningful = False
+    try:
+        with fitz.open(pdf_path) as doc:
+            for page in doc:
+                pw, ph = page.rect.width, page.rect.height
+                for img in page.get_images(full=True):
+                    bbox = page.get_image_bbox(img)
+                    if bbox is None or bbox.is_empty:
+                        continue
+                    rw, rh = bbox.width / pw, bbox.height / ph
+                    # Skip full-page background (>90%) and tiny icons (<5%)
+                    if rw > 0.9 and rh > 0.9:
+                        continue
+                    if rw < 0.05 and rh < 0.05:
+                        continue
+                    has_meaningful = True
+                    # 含上下文：上方留~2行文字，下方留~1行
+                    PAD_TOP = 50
+                    PAD_BOTTOM = 30
+                    PAD_SIDE = 10
+                    clip = fitz.Rect(
+                        max(0, bbox.x0 - PAD_SIDE),
+                        max(0, bbox.y0 - PAD_TOP),
+                        min(pw, bbox.x1 + PAD_SIDE),
+                        min(ph, bbox.y1 + PAD_BOTTOM),
+                    )
+                    pix = page.get_pixmap(dpi=dpi, clip=clip)
+                    img_path = os.path.join(
+                        tempfile.gettempdir(),
+                        f"pdf_img_ctx_{os.urandom(4).hex()}.jpg",
+                    )
+                    pix.save(img_path)
+                    image_paths.append(img_path)
+    except Exception as e:
+        logger.warning(f"[PDF context images] Extraction failed: {e}")
+    return image_paths, has_meaningful
+
+
 # ── VLM 图片分析 ─────────────────────────────────────────────
 
 def _extract_mm_text(response: dict, fallback: str = "（模型未返回内容）") -> str:
@@ -1099,15 +1185,17 @@ class ParseFileMixin(AgentToolsServiceBase):
 
     @tool(
         description=(
-            "万能文件解析器：分析任何文件（图片/文档/音频/视频/网页），"
-            "回答你对文件内容的任何问题。会根据文件类型自动选择最合适的模型。\n\n"
+            "一个高度封装的 SubAgent，专用于文件解析以及处理与文件相关的问题。"
+            "支持图片/文档/音频/视频/网页等所有文件类型。\n\n"
+            "用法：直接向它提问文件中相关内容即可，它会自行分析文件并给出答案。\n\n"
             "支持的文件类型：\n"
-            "- 图片: jpg, jpeg, png, gif, webp, svg, bmp, heic（→ Qwen VL-Max）\n"
-            "- 文档: pdf, docx, pptx, xlsx, txt, md, json, csv, yaml, xml, html, py 等（→ 文本提取 + Qwen-Turbo）\n"
-            "- 音频: mp3, wav, m4a, ogg, flac, aac, wma（→ Qwen3.5-Omni-Flash / Paraformer）\n"
-            "- 视频: mp4, mov, avi, mkv, webm, flv（→ 关键帧 VLM + 音频 Omni）\n"
-            "- 网址: http://, https://（→ 抓取 + Qwen-Turbo）\n\n"
-            "提示：对于大文件，具体的问题（\u201c第二章讲什么\u201d）比笼统的问题（\u201c总结一下\u201d）结果更精确。"
+            "- 图片: jpg, jpeg, png, gif, webp, svg, bmp, heic\n"
+            "- 文档: pdf, docx, pptx, xlsx, txt, md, json, csv, yaml, xml, html, py 等\n"
+            "- 音频: mp3, wav, m4a, ogg, flac, aac, wma\n"
+            "- 视频: mp4, mov, avi, mkv, webm, flv\n"
+            "- 网址: http://, https://\n\n"
+            "提示：对于大文件，具体的问题（\u201c第二章讲什么\u201d）比笼统的问题（\u201c总结一下\u201d）结果更精确。\n"
+            "注意：该工具返回的是 SubAgent 对文件的分析结果，一般可直接采用。但大模型偶尔可能出错，关键问题建议复核。"
         ),
         category="file",
     )
@@ -1203,48 +1291,41 @@ class ParseFileMixin(AgentToolsServiceBase):
                 with open(tmp_path, "wb") as f:
                     f.write(file_bytes)
                 text = _extract_text(tmp_path)
-                garbled_text = ""  # backup for fallback if VLM returns empty
+                garbled_text = ""
 
-                # VLM fallback for PDFs: garbled text > 10% OR embedded meaningful images
-                needs_vlm = False
+                # 智能视觉决策：质量门控 + LLM 意图判断
+                needs_vlm_ocr = False
                 if ext == "pdf":
-                    with fitz.open(tmp_path) as doc:
+                    import fitz
+                    garbled_ratio = text.count("\ufffd") / max(len(text), 1) if text else 1.0
 
-                        # Smarter image detection: skip full-page backgrounds (>90%) and tiny icons (<5%)
-                        has_meaningful = False
-                        page_rects = [page.rect for page in doc]
-                        for i, page in enumerate(doc):
-                            pw, ph = page_rects[i].width, page_rects[i].height
-                            for img in page.get_images(full=True):
-                                bbox = page.get_image_bbox(img)
-                                if bbox is None or bbox.is_empty:
-                                    continue
-                                rw = bbox.width / pw
-                                rh = bbox.height / ph
-                                # Skip full-page background (>90%) and tiny icons (<5%)
-                                if rw > 0.9 and rh > 0.9:
-                                    continue
-                                if rw < 0.05 and rh < 0.05:
-                                    continue
-                                has_meaningful = True
-                                break
-                            if has_meaningful:
-                                break
-
-                    if has_meaningful:
-                        needs_vlm = True
-                        logger.info("PDF has meaningful embedded images, using VLM OCR")
-                    elif text and text.count("\ufffd") / max(len(text), 1) > 0.10:
-                        needs_vlm = True
-                        garbled_count = text.count("\ufffd")
+                    if garbled_ratio > 0.10:
+                        # 文字质量差 → 走整页 VLM OCR
+                        needs_vlm_ocr = True
                         logger.info(
-                            f"PDF garbled {garbled_count}/{len(text)} chars "
-                            f"({100*garbled_count/max(len(text),1):.1f}%), using VLM OCR"
+                            f"PDF garbled {garbled_ratio:.1%}, using VLM OCR"
                         )
-                        garbled_text = text  # backup for fallback
+                        garbled_text = text
                         text = ""
+                    else:
+                        # 文字质量好 → LLM 判断是否需要看图
+                        from config import settings
+                        _needs_img = await _needs_visual_context(
+                            prompt, text[:500], settings.QWEN_API_KEY
+                        )
+                        if _needs_img:
+                            _ctx_images, _has_images = _extract_pdf_context_images(
+                                tmp_path, dpi=150
+                            )
+                            _page_images = _ctx_images
+                            logger.info(
+                                f"PDF context: request needs visuals, "
+                                f"extracted {len(_page_images)} image regions"
+                            )
+                        else:
+                            logger.info("PDF context: request does not need visuals, skipping images")
 
-                    if needs_vlm:
+                    if needs_vlm_ocr:
                         with fitz.open(tmp_path) as doc:
                             MAX_PDF_PAGES = 50
                             total_pages = len(doc)
@@ -1258,7 +1339,8 @@ class ParseFileMixin(AgentToolsServiceBase):
                                 )
                                 pix.save(img_path)
                                 _page_images.append(img_path)
-                    if _page_images:
+
+                    if _page_images and needs_vlm_ocr:
                         from config import settings
                         prompt_text = f"""请识别这份文档的全部内容，包括所有文字和数学公式（用LaTeX格式输出）。注意保留：
 - 所有题目编号和题干
@@ -1267,16 +1349,18 @@ class ParseFileMixin(AgentToolsServiceBase):
 - 任何图表或表格中的数据
 - 用户的问题：{prompt}"""
                         text = await _vlm_chat(_page_images, prompt_text, settings.QWEN_API_KEY) or ""
-                        # Fall back to garbled text if VLM returned empty
                         if not text and garbled_text:
-                            logger.warning("VLM returned empty, falling back to garbled text")
+                            logger.warning("VLM OCR returned empty, falling back to garbled text")
                             text = garbled_text
             except Exception as e:
                 _cleanup_paths(*_page_images)
                 return f"（读取文件失败：{e}）"
             finally:
                 _cleanup_paths(tmp_path)
-                _cleanup_paths(*_page_images)
+                # VLM OCR 整页图片已用完可清理；上下文裁剪图片保留
+                if needs_vlm_ocr:
+                    _cleanup_paths(*_page_images)
+                    _page_images = []
 
         if not text or not text.strip():
             _cleanup_paths(*_page_images)

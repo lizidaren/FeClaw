@@ -207,7 +207,7 @@ def create_share_link(
             return {"url": url}
 
         # share 模式：用 share_hash 引用 vfs_path，不暴露路径明文
-        expires_at = int(time.time()) + expires_hours * 3600
+        expires_at = int(time.time()) + expires_hours * 3600 if expires_hours else int(time.time()) + 100 * 365 * 24 * 3600  # 0 = 100年不过期
         share_hash = _compute_share_hash(vfs_path)
         token = _encode_share_token(share_hash, expires_at)
 

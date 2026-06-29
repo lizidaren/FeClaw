@@ -44,7 +44,7 @@ class ShareToolsMixin(AgentToolsServiceBase):
             mode=mode,
             password=password,
             user_id=self.user_id,
-            expires_hours=24 * 7,  # 默认7天过期
+            expires_hours=0,  # 不过期（0 = 永不过期）
             agent_hash=self.agent_hash,
         )
 

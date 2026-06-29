@@ -215,7 +215,7 @@ class WebChannelService:
                     
                     # 从 VFS 下载 zip
                     agent_hash = self.agent_hash
-                    abs_key = f"feclaw/agents/{agent_hash}/{file_path}"
+                    abs_key = f"feclaw/agents/{agent_hash}/{file_path.lstrip('/')}"
                     storage = StorageService()
                     zip_bytes = storage.get_file_content(abs_key)
                     
@@ -281,14 +281,136 @@ class WebChannelService:
                     err_msg = f"\n【注意】压缩包{file_name or file_path}解压失败，可直接使用原始文件路径。\n"
                     actual_user_input = (err_msg + "\n" + actual_user_input) if actual_user_input else err_msg
             else:
-                # 非 zip 文件：直接注入路径
+                # 非 zip 文件：自动提取文档内容（类似图片预识别）
                 file_suffix = f"（{file_name}）" if file_name else ""
-                file_prefix = f"\n【用户上传文件{file_suffix}】\n文件路径: {file_path}\n提示：如需分析此文件，可以使用「parse_file」工具。\n"
+                file_prefix_parts = [
+                    f"\n【用户上传文件{file_suffix}】",
+                    f"文件路径: {file_path}",
+                ]
+                
+                # 自动提取文档内容
+                parsed_content = None
+                _ext = (file_path or "").lower()
+                _doc_exts = {".pdf", ".docx", ".pptx", ".xlsx", ".txt", ".md", ".json", ".csv", ".yaml", ".xml"}
+                if any(_ext.endswith(e) for e in _doc_exts):
+                    try:
+                        import tempfile
+                        from services.tools.universal_parser import _extract_text
+                        agent_hash = self.agent_hash
+                        abs_key = f"feclaw/agents/{agent_hash}/{file_path.lstrip('/')}"
+                        from services.storage_service import StorageService
+                        _storage = StorageService()
+                        _data = _storage.get_file_content(abs_key)
+                        if _data:
+                            _tmp = tempfile.mktemp(suffix=_ext)
+                            with open(_tmp, "wb") as f:
+                                f.write(_data)
+                            parsed_content = _extract_text(_tmp, max_chars=5000)
+                            import os as _os2
+                            _os2.unlink(_tmp)
+                            # 乱码太多 → 快速提取不可用
+                            if parsed_content and parsed_content.count("\ufffd") > max(len(parsed_content) * 0.10, 50):
+                                parsed_content = None
+                    except Exception as e:
+                        logger.warning(f"[FeClaw] Auto-parse failed for {file_path}: {e}")
+                
+                if parsed_content:
+                    file_prefix_parts.append(f"文档内容:\n{parsed_content[:4000]}")
+                    file_prefix_parts.append("（以上为自动提取的文档内容，Agent 无需再尝试读取文件，可直接基于以上内容回答。如需完整内容或进一步分析，可使用 parse_file 工具。）")
+                    yield f"event: pipeline\ndata: {json.dumps({
+                        "content": "📄 文档自动解析完成",
+                        "result_preview": parsed_content[:2000],
+                        "done": True,
+                        "tool": "document_extractor",
+                        "query": "文档分析"
+                    }, ensure_ascii=False)}\n\n"
+                    
+                    # 后台异步：VFS 向量索引（fire-and-forget）
+                    try:
+                        from services.vfs_indexer import VfsIndexer
+                        asyncio.create_task(
+                            VfsIndexer(
+                                agent_hash=self.agent_hash,
+                                file_path=file_path,
+                            ).run()
+                        )
+                    except Exception as _idx_e:
+                        logger.warning(f"[FeClaw] 后台索引失败: {_idx_e}")
+                else:
+                    # 乱码/扫描 PDF → 自动 VLM OCR（后台处理）
+                    file_prefix_parts.append("（正在对文档进行 OCR 识别...）")
+                    yield f"event: pipeline\ndata: {json.dumps({
+                        "content": "🔍 正在 OCR 识别文档...",
+                        "done": False,
+                        "tool": "document_extractor",
+                    }, ensure_ascii=False)}\n\n"
+                    
+                    try:
+                        from services.storage_service import StorageService as _SS
+                        from services.tools.universal_parser import _vlm_chat
+                        import fitz as _fitz
+                        _data = _SS().get_file_content(abs_key)
+                        if _data:
+                            import tempfile as _tf
+                            _tmp = _tf.mktemp(suffix=_ext)
+                            with open(_tmp, "wb") as _fp:
+                                _fp.write(_data)
+                            _imgs = []
+                            with _fitz.open(_tmp) as _doc:
+                                for _i in range(min(len(_doc), 15)):
+                                    _pix = _doc[_i].get_pixmap(dpi=200)
+                                    _p = _tf.mktemp(suffix=".png")
+                                    _pix.save(_p)
+                                    _imgs.append(_p)
+                            if _imgs:
+                                _vlm_text = await _vlm_chat(
+                                    _imgs,
+                                    "识别全部内容，保留题号、题干、数学公式($...$)、表格数据。",
+                                    settings.QWEN_API_KEY
+                                )
+                                import os as _os4
+                                for _p in _imgs:
+                                    try: _os4.unlink(_p)
+                                    except: pass
+                                try: _os4.unlink(_tmp)
+                                except: pass
+                                
+                                if _vlm_text and len(_vlm_text) > 100:
+                                    file_prefix_parts = [
+                                        f"\n【用户上传文件{file_suffix}】",
+                                        f"文件路径: {file_path}",
+                                        f"【文档 OCR 识别结果】\n{_vlm_text[:6000]}",
+                                        "（以上为自动识别结果）",
+                                    ]
+                                    yield f"event: pipeline\ndata: {json.dumps({
+                                        "content": "📄 文档 OCR 识别完成",
+                                        "result_preview": _vlm_text[:2000],
+                                        "done": True,
+                                    }, ensure_ascii=False)}\n\n"
+                                else:
+                                    yield f"event: pipeline\ndata: {json.dumps({
+                                        "content": "❌ OCR 识别失败",
+                                        "done": True,
+                                    }, ensure_ascii=False)}\n\n"
+                    except Exception as e:
+                        logger.warning(f"[FeClaw] VLM OCR failed: {e}")
+                        yield f"event: pipeline\ndata: {json.dumps({
+                            "content": "❌ OCR 处理异常",
+                            "done": True,
+                        }, ensure_ascii=False)}\n\n"
+                    yield f"event: pipeline\ndata: {json.dumps({
+                        "content": "📄 文档需专用工具解析",
+                        "done": True,
+                        "tool": "document_extractor",
+                        "query": "文档分析"
+                    }, ensure_ascii=False)}\n\n"
+                
+                file_prefix = "\n".join(file_prefix_parts) + "\n"
                 if actual_user_input:
                     actual_user_input = file_prefix + "\n" + actual_user_input
                 else:
                     actual_user_input = file_prefix
-                logger.info(f"[FeClaw] File attached: {file_path}")
+                logger.info(f"[FeClaw] File attached: {file_path}" + (f" (parsed {len(parsed_content)} chars)" if parsed_content else ""))
         
         # 保存用户消息（如果有图片，记录图片信息）
         if image_url:
@@ -306,8 +428,11 @@ class WebChannelService:
                 {"role": m.get("role", "user"), "content": m.get("content", "")}
                 for m in session_messages
             ]
-            # 跳过 ChatService 内置的 _load_history，直接使用已注入的历史
-            chat_service._history_loaded_from_session = True
+            logger.info(f"[FeClaw] Loaded {len(session_messages)} messages from session {session.session_id}")
+        # Web 渠道通过 ConversationSession 管理历史，跳过 ChatService 的 _load_history
+        # 即使新会话也要设置此标志，防止 _load_history 加载跨会话历史
+        chat_service._history_loaded_from_session = True
+        logger.info(f"[FeClaw] history_loaded_from_session=True (session={session.session_id}, messages={len(session_messages)})")
         
         full_response = ""
         usage = {"input_tokens": 0, "output_tokens": 0}

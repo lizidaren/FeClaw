@@ -227,6 +227,9 @@ class SandboxManager:
         command = command.strip()
 
         if command.startswith("python3 -c ") or command.startswith("python -c "):
+            # FUSE 模式：走 bash 脚本路径（干净，避免 regex 引号 bug）
+            if settings.FUSE_ENABLED and self._is_fuse_ready():
+                return self._exec_bash_via_sandbox(command, timeout)
             parts = command.split(" -c ", 1)
             if len(parts) == 2:
                 code = parts[1].strip().strip("\"'")
@@ -569,12 +572,16 @@ class SandboxManager:
 
             env = os.environ.copy()
             env["PYTHONDONTWRITEBYTECODE"] = "1"
+            env["PYTHONWARNINGS"] = "ignore"
             # 清理危险环境变量
             env.pop("LD_PRELOAD", None)
             env.pop("LD_LIBRARY_PATH", None)
 
+            # 优先用 venv python3（系统 python3.8 有兼容问题）
+            _pip3 = "/home/ubuntu/FeClaw/venv/bin/python3"
+            _python3_cmd = _pip3 if os.path.exists(_pip3) else "python3"
             result = subprocess.run(
-                ["python3", script_path],
+                [_python3_cmd, script_path],
                 capture_output=True,
                 text=True,
                 timeout=timeout,
@@ -617,19 +624,32 @@ class SandboxManager:
     def _build_bwrap_base_opts(self, script_path: str) -> List[str]:
         """构建 bwrap 公共挂载选项（两个沙箱执行路径共享）"""
         host_path = os.environ.get("PATH", "/usr/bin:/bin")
-        python_bin = os.path.realpath(shutil.which("python3") or "/usr/local/bin/python3.12")
-        real_python_dir = os.path.dirname(python_bin)
+        FECLAW_VENV = "/home/ubuntu/FeClaw/venv"
 
-        # Python stdlib 路径: /usr/local/bin/python3.12 → /usr/local/lib/python3.12/
-        _py_ver = os.path.basename(python_bin).replace("python", "", 1)
-        python_lib = os.path.join(os.path.dirname(real_python_dir), "lib", f"python{_py_ver}")
+        # Python stdlib 路径: 从 venv 解析
+        _venv_python = os.path.join(FECLAW_VENV, "bin", "python3")
+        if os.path.exists(_venv_python):
+            real_python = os.path.realpath(_venv_python)
+            _py_ver = os.path.basename(real_python).replace("python", "", 1)
+            _py_lib = os.path.join(FECLAW_VENV, "lib", f"python{_py_ver}")
+        else:
+            # fallback: 系统 python
+            python_bin = os.path.realpath(shutil.which("python3") or "/usr/local/bin/python3.12")
+            real_python_dir = os.path.dirname(python_bin)
+            _py_ver = os.path.basename(python_bin).replace("python", "", 1)
+            _py_lib = os.path.join(os.path.dirname(real_python_dir), "lib", f"python{_py_ver}")
 
         # 收集需显式挂载的 Python 路径，覆盖符号链 + 二进制目录 + stdlib
         _py_mounts = set()
-        # 符号链解析路径的每个分量
-        _py_mounts.add(real_python_dir)       # /usr/local/bin
-        _py_mounts.add(python_lib)            # /usr/local/lib/python3.12
-        _py_mounts.add(os.path.dirname(python_lib))  # /usr/local/lib（若 /usr/local 是独立挂载点）
+        if os.path.exists(FECLAW_VENV):
+            _py_mounts.add(FECLAW_VENV)  # /home/ubuntu/FeClaw/venv → /venv
+        else:
+            # fallback: 老式路径绑定
+            python_bin_fb = os.path.realpath(shutil.which("python3") or "/usr/local/bin/python3.12")
+            real_python_dir_fb = os.path.dirname(python_bin_fb)
+            _py_mounts.add(real_python_dir_fb)
+            _py_mounts.add(_py_lib)
+            _py_mounts.add(os.path.dirname(_py_lib))
 
         opts = [
             "bwrap", "--unshare-pid", "--unshare-ipc", "--unshare-uts",
@@ -640,8 +660,9 @@ class SandboxManager:
             "--ro-bind", "/bin", "/bin",
             "--ro-bind", "/lib", "/lib",
             "--ro-bind-try", "/lib64", "/lib64",
-            # Python 二进制和 stdlib 的显式绑定（解决 /usr/local 是独立挂载点的问题）
-            *[mnt for p in _py_mounts if os.path.exists(p) for mnt in ("--ro-bind-try", p, p)],
+            # Python venv（覆盖系统 py3.8）
+            *(["--ro-bind", FECLAW_VENV, "/venv"] if os.path.exists(FECLAW_VENV) else
+              [mnt for p in _py_mounts if os.path.exists(p) for mnt in ("--ro-bind-try", p, p)]),
             # 符号链解析
             "--ro-bind-try", "/etc/alternatives", "/etc/alternatives",
             # 动态链接器
@@ -658,18 +679,19 @@ class SandboxManager:
             if os.path.exists(etc_path):
                 opts += ["--ro-bind", etc_path, etc_path]
 
-        # 条件路径绑定：自动发现当前 Python 的 site-packages 路径
-        _site_pkgs = next(
-            (p for p in __import__("sys").path if "site-packages" in p),
-            os.path.join(python_lib, "site-packages"),
-        )
-        for extra_path in [
-            _site_pkgs,
-            os.path.dirname(_site_pkgs),
-            real_python_dir,
-        ]:
-            if extra_path and os.path.exists(extra_path):
-                opts += ["--ro-bind-try", extra_path, extra_path]
+        # site-packages 绑定（非 venv 时走老路径，venv 时自动包含）
+        if not os.path.exists(FECLAW_VENV):
+            _site_pkgs = next(
+                (p for p in __import__("sys").path if "site-packages" in p),
+                os.path.join(_py_lib, "site-packages"),
+            )
+            for extra_path in [
+                _site_pkgs,
+                os.path.dirname(_site_pkgs),
+                os.path.dirname(shutil.which("python3") or "/usr/local/bin/python3.12"),
+            ]:
+                if extra_path and os.path.exists(extra_path):
+                    opts += ["--ro-bind-try", extra_path, extra_path]
 
         # 检查全局 FUSE 是否可用（独立于 per-agent workspace）
         _global_fuse_ok = settings.FUSE_ENABLED and _check_fuse_cached()
@@ -693,18 +715,13 @@ class SandboxManager:
                 "--ro-bind", self.BWRAP_BPF_PATH, "/seccomp.bpf",
             ]
 
-        # 确保 python3 指向 python3.12（系统默认 python3 通常是 3.8）
-        p12 = shutil.which("python3.12") or "/usr/local/bin/python3.12"
-        p3 = os.path.join(os.path.dirname(p12), "python3")
-        if os.path.exists(p12) and not os.path.exists(p3):
-            opts += ["--ro-bind", p12, p3]
-
         # 环境变量设置
+        venv_path = "/venv/bin:" if os.path.exists(FECLAW_VENV) else ""
         opts += [
-            "--setenv", "PATH", host_path,
+            "--setenv", "PATH", f"{venv_path}{host_path}",
             "--setenv", "HOME", "/tmp",
             "--setenv", "PYTHONDONTWRITEBYTECODE", "1",
-            "--setenv", "PYTHONPATH", _site_pkgs,
+            "--setenv", "PYTHONWARNINGS", "ignore",
             "--bind", script_path, script_path,  # 覆写 --tmpfs /tmp
         ]
 
@@ -712,7 +729,9 @@ class SandboxManager:
 
     def _build_bwrap_command(self, script_path: str, timeout: int) -> List[str]:
         """构建 bubblewrap 隔离命令（含 netns 网络隔离 + seccomp enforcer）"""
-        python_bin = os.path.realpath(shutil.which("python3") or "/usr/local/bin/python3.12")
+        FECLAW_VENV = "/home/ubuntu/FeClaw/venv"
+        python_bin = "/venv/bin/python3" if os.path.exists(FECLAW_VENV) else \
+            os.path.realpath(shutil.which("python3") or "/usr/local/bin/python3.12")
         opts = self._build_bwrap_base_opts(script_path)
 
         # 入口：/seccomp-enforcer → 装 seccomp 白名单 → exec python
@@ -816,6 +835,7 @@ class SandboxManager:
 
         env = os.environ.copy()
         env["PYTHONDONTWRITEBYTECODE"] = "1"
+        env["PYTHONWARNINGS"] = "ignore"
 
         process = subprocess.Popen(
             ["python3", script_path],

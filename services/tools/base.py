@@ -138,7 +138,7 @@ class AgentToolsServiceBase:
         将相对路径解析为 COS key
         path: workspace/, agent/, workspace/subdir/, workspace/subdir/file.txt 等
         """
-        if ".." in path or path.startswith("/"):
+        if ".." in path:
             return None
         normalized = path.strip("/")
         return f"{self.base_path}{normalized}"

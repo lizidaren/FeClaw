@@ -3,7 +3,7 @@ VFS Indexer - VFS 文件自动索引调度器
 
 流程:
 1. 读取文件内容（通过 VFS cat / COS 直接读取）
-2. Markdown 分块
+2. LLM 语义分块（失败时自动回退到段落分块）
 3. 删除该文件的旧向量（文件更新/覆盖时）
 4. 批量嵌入
 5. 写入 COS 向量桶（index: idx-{agent_hash}-kb）
@@ -15,7 +15,7 @@ import json
 import logging
 from typing import List, Optional
 
-from services.vfs_markdown_chunker import MarkdownChunker
+from services.llm_chunker import LlmChunker
 from services.embedding_service import EmbeddingService
 from services.vector_search_service import (
     VectorSearchService,
@@ -30,7 +30,7 @@ class VfsIndexer:
     def __init__(self, agent_hash: str, file_path: str):
         self.agent_hash = agent_hash
         self.file_path = file_path
-        self._chunker = MarkdownChunker()
+        self._chunker = LlmChunker()
         self._embedder = EmbeddingService()
         self._vector_service = VectorSearchService(agent_hash=agent_hash)
 
@@ -43,14 +43,8 @@ class VfsIndexer:
                 logger.debug(f"[VFS Index] 文件为空或无法读取: {self.file_path}")
                 return
 
-            # 2. Markdown / 纯文本分块
-            if self.file_path.endswith(".md"):
-                chunks = self._chunker.chunk(content, self.file_path, self.agent_hash)
-            else:
-                # .txt 文件按段落切分
-                chunks = self._chunker._chunk_by_paragraph(
-                    content, self.file_path, self.agent_hash
-                )
+            # 2. LLM 语义分块（所有文件类型统一处理）
+            chunks = self._chunker.chunk(content, self.file_path, self.agent_hash)
 
             if not chunks:
                 logger.debug(f"[VFS Index] 无有效分块: {self.file_path}")

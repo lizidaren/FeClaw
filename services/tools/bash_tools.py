@@ -17,8 +17,6 @@ logger = logging.getLogger(__name__)
 
 # 白名单命令
 ALLOWED_BASH_COMMANDS = {"mkdir", "ls", "cat", "grep", "find", "head", "tail", "wc", "echo", "pwd", "cd", "cp", "mv", "rm", "fe", "python3.12"}
-# Shell 元字符黑名单（防止通过 echo/cat 等配合重定向/管道绕过文件操作限制）
-_SHELL_METACHARS = re.compile(r'[><|;&`$]')
 
 
 class BashToolsMixin(AgentToolsServiceBase):
@@ -30,10 +28,6 @@ class BashToolsMixin(AgentToolsServiceBase):
     async def bash(self, command: str) -> str:
         """执行 bash 命令（委托给 VirtualFileSystem 或 Python 沙箱）"""
         stripped = command.strip()
-
-        # Shell 元字符检查（防止通过重定向/管道绕过文件操作限制）
-        if _SHELL_METACHARS.search(stripped):
-            return f"Error: 命令包含不允许的 shell 元字符（><|;&`$），请使用 file_read/file_write 工具操作文件"
 
         # Python 命令路由到沙箱执行
         py_prefixes = ("python3 ", "python ", "python3.12 ")
@@ -79,7 +73,30 @@ class BashToolsMixin(AgentToolsServiceBase):
             meta_cache = MetadataCache()
             meta_cache.invalidate_all()
 
-        return await asyncio.to_thread(self._vfs.execute, command)
+        result = await asyncio.to_thread(self._vfs.execute, command)
+        return self._hint_binary_file(stripped, result)
+
+    # ── 智能错误提示 ─────────────────────────────────────
+
+    _BINARY_EXTS = ('.pdf', '.png', '.jpg', '.jpeg', '.docx', '.doc', '.pptx', '.xlsx', '.xls')
+    _PARSE_FILE_HINT = (
+        '\n\n💡 提示：检测到你正在操作二进制文件（PDF/图片/Office文档）。'
+        'bash 无法直接读取此类文件的内容，请使用「parse_file」工具来分析。'
+        '用法：parse_file(path="/workspace/文件名.pdf", prompt="你的问题")'
+    )
+
+    def _hint_binary_file(self, command: str, result: str) -> str:
+        """如果命令操作二进制文件，追加 parse_file 提示（无论成败）"""
+        command_lower = command.lower()
+        if not any(ext in command_lower for ext in self._BINARY_EXTS):
+            return result
+        # 已有错误 → 追加提示
+        if result.startswith('Error:'):
+            return result + self._PARSE_FILE_HINT
+        # 成功但输出包含大量 U+FFFD 乱码 → 追加提示
+        if result.count('\ufffd') > max(len(result) * 0.10, 20):
+            return result + self._PARSE_FILE_HINT
+        return result
 
     def _has_active_sandbox(self) -> bool:
         """检查是否有活跃的 sandbox"""
@@ -158,9 +175,25 @@ class BashToolsMixin(AgentToolsServiceBase):
             from services.sandbox_manager import SandboxManager
             self._sandbox = SandboxManager(self._vfs, self.user_id)
 
-        m = re.match(r'^python3(?:\.\d+)?\s+-c\s+["\'](.+?)["\']', command, re.DOTALL)
+        # FUSE + bwrap 可用 → 写成 bash script 走 bwrap（干净，无 quota 问题）
+        from services.vfs_fuse_daemon import check_fuse_available
+        if check_fuse_available() and self._has_active_sandbox():
+            result = await asyncio.to_thread(
+                self._sandbox.exec_command, command
+            )
+            output = ""
+            if result.stdout:
+                output += result.stdout
+            if result.stderr:
+                output += ("\n" if output else "") + f"[stderr] {result.stderr}"
+            if result.exit_code != 0:
+                output += f"\n[退出码: {result.exit_code}]"
+            return output if output else "(无输出)"
+
+        # 无 FUSE → 回退到旧的 exec_code 路径（VFSBootstrap + 预取 + 文件锁）
+        m = re.match(r'^python3(?:\.\d+)?\s+-c\s+(["\'])(.+)(?:\1)', command, re.DOTALL)
         if m:
-            code = m.group(1)
+            code = m.group(2)
             result = self._sandbox.exec_code(code)
         else:
             m2 = re.match(r'^python3(?:\.\d+)?\s+(.+\.py)\s*$', command.strip())
@@ -211,7 +244,7 @@ class BashToolsMixin(AgentToolsServiceBase):
             output += ("\n" if output else "") + f"[stderr] {result.stderr}"
         if result.timed_out:
             output += "\n[执行超时]"
-        return output if output else "(no output)"
+        return self._hint_binary_file(command, output if output else "(no output)")
 
     # ========== 后台 Python 任务 ==========
 

@@ -336,6 +336,7 @@ class AgentExecutor:
 
         # 熔断器：同一工具连续错误/循环检测
         consecutive_errors = 0
+        last_tool_name = ""  # 上次使用工具名，用于跨工具熔断重置
         same_tool_count: Dict[str, int] = {}
 
         # 2b. 预取工具执行（流式进度推送）
@@ -623,14 +624,18 @@ class AgentExecutor:
                     "content": enhanced_result
                 })
 
-                # 熔断器：连续错误检测（路径提示不算熔断计数，给模型自纠机会）
+                # 熔断器：连续错误检测（按工具分别计数，切换工具时重置，上限 5 次）
                 if isinstance(tool_result, str) and tool_result.startswith("Error:"):
+                    if func_name != last_tool_name:
+                        # 切换工具了，重置连续错误
+                        consecutive_errors = 0
                     consecutive_errors += 1
-                    if consecutive_errors >= 3:
-                        yield Step(step_type="final", content=f"工具 {func_name} 连续失败 3 次，已停止执行")
+                    if consecutive_errors >= 5:
+                        yield Step(step_type="final", content=f"工具 {func_name} 连续失败 5 次，已停止执行")
                         return
                 else:
                     consecutive_errors = 0
+                last_tool_name = func_name
 
                 # 不再限制同一工具调用次数——Agent 需要时可自由重复调用
                 same_tool_count[func_name] = same_tool_count.get(func_name, 0) + 1
