@@ -102,7 +102,7 @@ class FileOpsMixin(AgentToolsServiceBase):
         except Exception as e:
             return f"Error: 删除失败: {e}"
 
-    @tool(description="对文件进行精确的字符串替换修改。用 new_string 替换文件中第一个出现的 old_string。适用于修改参数、常量、函数调用等。对于简单修改比 file_write 更安全。", category="file")
+    @tool(description="对文件进行精确的字符串替换修改。将 old_string 替换为 new_string。注意：old_string 在文件中必须唯一出现一次，否则拒绝替换。适用于修改参数、常量、函数调用等。对于简单修改比 file_write 更安全。", category="file")
     async def edit(self, path: str, old_string: str, new_string: str) -> str:
         """
         对文件进行精确的字符串替换修改。
@@ -113,13 +113,18 @@ class FileOpsMixin(AgentToolsServiceBase):
             if content.startswith("Error:"):
                 return content
 
-            if old_string not in content:
+            count = content.count(old_string)
+            if count == 0:
                 return f"Error: 在文件中未找到匹配的字符串"
 
-            if content.count(old_string) > 1:
-                new_content = content.replace(old_string, new_string, 1)
-            else:
-                new_content = content.replace(old_string, new_string)
+            if count > 1:
+                return (
+                    f"Error: 目标字符串在文件中出现了 {count} 次，"
+                    f"无法确定替换哪一个。请先用旧字符串的更多上下文来唯一匹配，"
+                    f"或者使用 file_write 覆盖整个文件。"
+                )
+
+            new_content = content.replace(old_string, new_string)
 
             # 走 VFS echo 写入，触发版本控制 + 自动索引
             return await self._vfs.async_write(path, new_content)
