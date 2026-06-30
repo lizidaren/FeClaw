@@ -291,6 +291,9 @@ class GroupDispatchService:
 
                 if not response:
                     logger.info(f"[GroupDispatch] agent={agent_hash} got empty response, skipping")
+                    asyncio.create_task(
+                        self.dispatch_to_members(group_id, round=round + 1, exclude=agent_hash)
+                    )
                     return
 
                 # 记录使用了工具（用于后续扩展如统计）
@@ -299,7 +302,7 @@ class GroupDispatchService:
 
                 # Check NO_REPLY / SILENT signal
                 if response.strip() == SILENT_MAGIC:
-                    # SILENT: 保持沉默，本轮不回复，标记 silent
+                    # SILENT: 保持沉默，本轮不回复，标记 silent，但继续调度下一轮
                     member = (
                         db.query(GroupMember)
                         .filter(GroupMember.group_id == group_id, GroupMember.agent_hash == agent_hash)
@@ -309,11 +312,17 @@ class GroupDispatchService:
                         member.is_silent = True
                         db.commit()
                     logger.info(f"[GroupDispatch] agent={agent_hash} returned SILENT, marked silent")
+                    asyncio.create_task(
+                        self.dispatch_to_members(group_id, round=round + 1, exclude=agent_hash)
+                    )
                     return
 
                 if response.strip() == NO_REPLY_MAGIC:
-                    # NO_REPLY: 本轮不回复，但不清除 silent 状态
+                    # NO_REPLY: 本轮不回复，但继续调度下一轮（防止链条断裂）
                     logger.info(f"[GroupDispatch] agent={agent_hash} returned NO_REPLY, skipping round")
+                    asyncio.create_task(
+                        self.dispatch_to_members(group_id, round=round + 1, exclude=agent_hash)
+                    )
                     return
 
                 # Save reply as GroupMessage
