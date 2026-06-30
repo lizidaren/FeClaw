@@ -34,7 +34,7 @@ SEARCH_CACHE_MAX_SIZE = 200      # 最多缓存 200 个 query
 QWEN_RESPONSES_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1/responses"
 IMAGE_SEARCH_MODEL = "qwen3.6-flash"
 IMAGE_SEARCH_MAX_COUNT = 5       # 单次搜索最多返回的图片数
-IMAGE_SEARCH_TIMEOUT = 30.0      # Responses API 整体超时
+IMAGE_SEARCH_TIMEOUT = 60.0      # Responses API 整体超时（腾讯云→阿里云跨网慢）
 IMAGE_DOWNLOAD_TIMEOUT = 10.0    # 单张图片下载超时
 SUPPORTED_IMAGE_EXTS = ("jpg", "jpeg", "png", "gif", "webp")
 
@@ -42,8 +42,8 @@ SUPPORTED_IMAGE_EXTS = ("jpg", "jpeg", "png", "gif", "webp")
 class WebToolsMixin(AgentToolsServiceBase):
     """网页搜索工具 Mixin"""
 
-    def __init__(self, agent_hash: str):
-        super().__init__(agent_hash)
+    def __init__(self, agent_hash: str, **kwargs):
+        super().__init__(agent_hash, **kwargs)
         self.search = SearchService(agent_hash)
 
     # 类级搜索缓存：所有实例共享
