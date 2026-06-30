@@ -29,6 +29,7 @@ class GroupDispatchService:
 
     def __init__(self):
         self._running_tasks: Dict[str, asyncio.Task] = {}
+        self._round_active: Dict[str, int] = {}  # group_id → 当前活跃轮次
 
     # ========== Entry Point ==========
 
@@ -94,6 +95,13 @@ class GroupDispatchService:
             logger.info(f"[GroupDispatch] group={group_id} reached MAX_ROUNDS={self.MAX_ROUNDS}, stopping")
             return
 
+        # Guard: 防止指数级级联——同一 group 同一轮只调度一次
+        prev_round = self._round_active.get(group_id, -1)
+        if round <= prev_round:
+            logger.info(f"[GroupDispatch] group={group_id} round={round} already active (prev={prev_round}), skipping")
+            return
+        self._round_active[group_id] = round
+
         db = SessionLocal()
         try:
             members = (
@@ -106,6 +114,8 @@ class GroupDispatchService:
                 return
 
             for member in members:
+                if not member.agent_hash:       # 跳过群主（agent_hash 为空）
+                    continue
                 if member.agent_hash == exclude:
                     continue
 
