@@ -325,6 +325,32 @@ class GroupDispatchService:
                     )
                     return
 
+                # 从回复中提取 @{name} 自动转为 mentions
+                reply_mentions: List[str] = []
+                try:
+                    import re as _re
+                    at_names = _re.findall(r'@(\S+)', response)
+                    if at_names:
+                        # 查群成员名→hash 映射
+                        name_to_hash = {}
+                        member_list = db.query(GroupMember).filter(
+                            GroupMember.group_id == group_id,
+                            GroupMember.agent_hash != '',
+                        ).all()
+                        agent_hashes = [m.agent_hash for m in member_list]
+                        agent_rows = db.query(AgentProfile.hash, AgentProfile.name).filter(
+                            AgentProfile.hash.in_(agent_hashes)
+                        ).all()
+                        for h, n in agent_rows:
+                            if n:
+                                name_to_hash[n] = h
+                        for n in at_names:
+                            h = name_to_hash.get(n)
+                            if h and h not in reply_mentions and h != agent_hash:
+                                reply_mentions.append(h)
+                except Exception:
+                    pass
+
                 # Save reply as GroupMessage
                 msg_id = str(_uuid.uuid4())
                 reply_msg = GroupMessage(
@@ -335,7 +361,7 @@ class GroupDispatchService:
                     content=response,
                     message_type="text",
                     attachments=None,
-                    mentions=[],
+                    mentions=reply_mentions,
                     round=round,
                     created_at=datetime.utcnow(),
                 )
@@ -461,6 +487,11 @@ class GroupDispatchService:
             lines.append(f"[{role_label} {sender}]: {msg['content']}")
 
         lines.append("")
+        lines.append("【@提及机制】")
+        lines.append("在回复中写 @{对方名字}（如 @Designer-林一）可唤醒被@的Agent（即使他处于静默状态）。")
+        lines.append("需要在下一轮继续推进某个话题，或者需要某位成员回应你的观点时，请使用 @提及。")
+        lines.append("")
+
         lines.append("【回复规则】")
         lines.append("1. 如果你不需要回复（消息不针对你或无实质内容），请回复：NO_REPLY")
         lines.append("2. 对于@类消息，如果你未被@且消息也与你的专业领域关系不大")
@@ -707,7 +738,10 @@ class GroupDispatchService:
             "如果根据历史已经能回答，则无需重复调用工具。"
         )
         lines.append("")
-
+        lines.append("")
+        lines.append("【@提及机制】")
+        lines.append("在回复中写 @{对方名字}（如 @Designer-林一）可唤醒被@的Agent（即使他处于静默状态）。")
+        lines.append("")
         lines.append("【回复规则】")
         lines.append("1. 如果你不需要回复（消息不针对你或无实质内容），请回复：NO_REPLY")
         lines.append("2. 对于@类消息，如果你未被@且消息也与你的专业领域关系不大")
@@ -718,9 +752,8 @@ class GroupDispatchService:
         lines.append("   静默后错过若干条新消息将自动解除沉默，你也可以重新回复SILENT续期")
         lines.append("6. 否则，请以你的角色身份自然回复，不要声明你的思考过程")
         lines.append("7. 仅在确实需要实时数据或文件内容时才调用工具；闲聊/问候/已知信息直接回复")
-
+        lines.append("")
         return "\n".join(lines)
-
     # ========== Tool Execution (group-scoped) ==========
 
     async def _execute_group_tool(
