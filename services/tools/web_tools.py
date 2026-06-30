@@ -30,6 +30,14 @@ logger = logging.getLogger(__name__)
 SEARCH_CACHE_TTL_SECONDS = 300   # 5分钟内相同 query 不重复请求
 SEARCH_CACHE_MAX_SIZE = 200      # 最多缓存 200 个 query
 
+# 图片搜索配置（Alibaba Responses API + web_search_image 工具）
+QWEN_RESPONSES_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1/responses"
+IMAGE_SEARCH_MODEL = "qwen3.6-flash"
+IMAGE_SEARCH_MAX_COUNT = 5       # 单次搜索最多返回的图片数
+IMAGE_SEARCH_TIMEOUT = 30.0      # Responses API 整体超时
+IMAGE_DOWNLOAD_TIMEOUT = 10.0    # 单张图片下载超时
+SUPPORTED_IMAGE_EXTS = ("jpg", "jpeg", "png", "gif", "webp")
+
 
 class WebToolsMixin(AgentToolsServiceBase):
     """网页搜索工具 Mixin"""
@@ -569,12 +577,19 @@ class WebToolsMixin(AgentToolsServiceBase):
 
     # ========== 主搜索工具（异步 @tool） ==========
 
-    @tool(description="网页搜索，支持四级搜索: raw(原始数据~1s) / quick(快速验证~2s) / balanced(均衡推荐~4s) / deep(深度研究~15s) / auto(自动选择)", category="web")
+    @tool(
+        description=(
+            "网页搜索，支持四级搜索: raw(原始数据~1s) / quick(快速验证~2s) / balanced(均衡推荐~4s) / deep(深度研究~15s) / auto(自动选择)。\n"
+            "balanced 级别（含 auto 解析为 balanced）下，设置 allow_images=True 会同时调用图片搜索（最多 5 张），自动下载到 VFS 的 images/fetched/ 目录并返回路径。其他级别忽略 allow_images。"
+        ),
+        category="web"
+    )
     async def web_search(
         self,
         query: str,
         level: str = "balanced",
         use_cache: bool = True,
+        allow_images: bool = False,
         on_progress=None
     ) -> str:
         """
@@ -582,11 +597,12 @@ class WebToolsMixin(AgentToolsServiceBase):
 
         Args:
             query: 搜索关键词
-            level: 搜索级别
-            use_cache: 是否使用缓存（默认 True）
+            level: 搜索级别（raw / quick / balanced / deep / auto）
+            use_cache: 是否使用缓存（默认 True；allow_images=True 时自动禁用）
+            allow_images: 是否同时搜索并下载图片（仅 balanced 级别生效）
 
         Returns:
-            搜索结果文本
+            搜索结果文本（含可选的图片段落）
         """
         if level == "auto":
             query_len = len(query)
@@ -600,7 +616,13 @@ class WebToolsMixin(AgentToolsServiceBase):
         level_map = {"minimal": "raw", "advanced": "balanced", "research": "deep"}
         level = level_map.get(level, level)
 
-        if use_cache:
+        # 图片搜索仅在 balanced 级别生效（auto 解析为 balanced 时也会生效）
+        if allow_images and level != "balanced":
+            logger.info(f"[web_search] allow_images=True 但 level={level} 非 balanced，忽略图片搜索")
+            allow_images = False
+
+        # 图片搜索会改变返回内容（增加图片段落），绕过缓存避免命中老结果
+        if use_cache and not allow_images:
             cached_result = self._get_cached_search(query, level)
             if cached_result:
                 return f"{cached_result}\n\n💾 (缓存命中)"
@@ -608,16 +630,38 @@ class WebToolsMixin(AgentToolsServiceBase):
         start_time = time.time()
         result = None
         service_name = ""
+        image_section = ""
 
-        if level == "raw":
+        if level == "balanced":
+            # 并行：文本搜索 + 可选图片搜索
+            tasks = [self.search.search_qwen(query, on_progress=on_progress)]
+            if allow_images:
+                tasks.append(self._search_qwen_images(query))
+            gathered = await asyncio.gather(*tasks, return_exceptions=True)
+            text_result = gathered[0]
+            if isinstance(text_result, Exception):
+                result = f"Error: 文本搜索异常: {text_result}"
+            else:
+                result = text_result
+            service_name = "Qwen3.5-Flash"
+
+            # 处理图片搜索结果
+            if allow_images and len(gathered) > 1:
+                img_res = gathered[1]
+                if isinstance(img_res, list) and img_res:
+                    try:
+                        image_section = await self._download_and_format_images(img_res, query)
+                    except Exception as e:
+                        logger.warning(f"[web_search] 图片下载汇总失败: {e}")
+                        image_section = "\n\n[图片搜索结果] (下载失败)"
+                elif isinstance(img_res, Exception):
+                    logger.warning(f"[web_search] 图片搜索异常: {img_res}")
+        elif level == "raw":
             result = await self.search.search_tencent(query)
             service_name = "腾讯搜狗(原始)"
         elif level == "quick":
             result = await self.search.search_tencent_deepseek(query)
             service_name = "腾讯+DeepSeek"
-        elif level == "balanced":
-            result = await self.search.search_qwen(query, on_progress=on_progress)
-            service_name = "Qwen3.5-Flash"
         elif level == "deep":
             # 并发发动 Kimi + 百度，结果合并
             _kimi_task = asyncio.create_task(self.search.search_kimi(query))
@@ -651,10 +695,217 @@ class WebToolsMixin(AgentToolsServiceBase):
                 return fallback_result
             return f"{result} | 耗时: {elapsed_sec:.1f}s [{service_name}]"
 
-        if use_cache:
+        if use_cache and not allow_images:
             self._set_cached_search(query, level, result)
 
-        return f"{result}\n\n⏱️ 耗时: {elapsed_sec:.1f}s | 级别: {level} ({service_name})"
+        final = f"{result}\n\n⏱️ 耗时: {elapsed_sec:.1f}s | 级别: {level} ({service_name})"
+        if image_section:
+            final += image_section
+        return final
+
+    # ========== 图片搜索（Responses API + VFS 下载） ==========
+
+    @staticmethod
+    def _slugify_query(query: str, max_len: int = 40) -> str:
+        """
+        将 query 转为文件名安全的 slug
+        - 保留 ASCII 字母数字、下划线、连字符、Unicode 字母（含中文）
+        - 其他字符替换为 _
+        - 限制最大长度，避免超长文件名
+        """
+        slug = re.sub(r"[^\w\u4e00-\u9fff\-]+", "_", query.strip())
+        slug = re.sub(r"_+", "_", slug).strip("_-")
+        if not slug:
+            slug = "search"
+        return slug[:max_len]
+
+    @staticmethod
+    def _infer_image_ext(url: str) -> Optional[str]:
+        """
+        从 URL 路径推断图片扩展名（必须是白名单内的格式）
+        """
+        try:
+            path = urlparse(url).path.lower()
+        except Exception:
+            return None
+        for ext in SUPPORTED_IMAGE_EXTS:
+            if path.endswith(f".{ext}"):
+                return "jpg" if ext == "jpeg" else ext  # 统一用 jpg 扩展名
+        return None
+
+    async def _search_qwen_images(self, query: str) -> List[Dict[str, str]]:
+        """
+        调用 Alibaba Responses API 的 web_search_image 工具，返回图片列表
+        失败 / 无结果时返回空列表（不抛异常，让文本搜索结果照常返回）
+
+        Returns:
+            [{"url": "...", "title": "..."}, ...] （最多 IMAGE_SEARCH_MAX_COUNT 项）
+        """
+        qwen_key = settings.QWEN_API_KEY or settings.QWEN_VL_KEY or ""
+        if not qwen_key:
+            logger.warning("[IMAGE-SEARCH] QWEN_API_KEY 未配置，跳过图片搜索")
+            return []
+
+        headers = {
+            "Authorization": f"Bearer {qwen_key}",
+            "Content-Type": "application/json",
+        }
+        body = {
+            "model": IMAGE_SEARCH_MODEL,
+            "input": query,
+            "tools": [{"type": "web_search_image"}],
+            "stream": False,
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=IMAGE_SEARCH_TIMEOUT) as client:
+                resp = await client.post(QWEN_RESPONSES_URL, headers=headers, json=body)
+                resp.raise_for_status()
+                data = resp.json()
+        except Exception as e:
+            logger.warning(f"[IMAGE-SEARCH] Responses API 调用失败: {e}")
+            return []
+
+        images: List[Dict[str, str]] = []
+        try:
+            for item in data.get("output", []) or []:
+                if item.get("type") != "web_search_image_call":
+                    continue
+                output_raw = item.get("output", "[]")
+                if isinstance(output_raw, list):
+                    items = output_raw
+                else:
+                    try:
+                        items = json.loads(output_raw)
+                    except (json.JSONDecodeError, TypeError):
+                        logger.warning("[IMAGE-SEARCH] 无法解析 web_search_image_call.output")
+                        continue
+                if not isinstance(items, list):
+                    continue
+                for img in items[:IMAGE_SEARCH_MAX_COUNT]:
+                    url = (
+                        img.get("url")
+                        or img.get("image_url")
+                        or img.get("imageUrl")
+                        or ""
+                    )
+                    title = (
+                        img.get("title")
+                        or img.get("alt")
+                        or img.get("description")
+                        or img.get("name")
+                        or ""
+                    )
+                    if not isinstance(url, str) or not url.startswith(("http://", "https://")):
+                        continue
+                    if not self._infer_image_ext(url):
+                        # 跳过非图片 URL（防 SVG / ico / 视频缩略图等）
+                        continue
+                    images.append({"url": url, "title": title or "image"})
+                    if len(images) >= IMAGE_SEARCH_MAX_COUNT:
+                        break
+                if len(images) >= IMAGE_SEARCH_MAX_COUNT:
+                    break
+        except Exception as e:
+            logger.warning(f"[IMAGE-SEARCH] 解析 output 异常: {e}")
+
+        logger.info(f"[IMAGE-SEARCH] query={query[:30]!r} 返回 {len(images)} 张图片")
+        return images
+
+    async def _download_image_to_vfs(self, url: str, base_vfs_path: str) -> Optional[str]:
+        """
+        下载单张图片并上传到 VFS（通过 COS put_object 直传二进制）
+        失败返回 None；成功返回最终 VFS 路径（含扩展名）
+
+        base_vfs_path: 不含扩展名的 VFS 路径，如 'images/fetched/xxx_1'
+        """
+        ext = self._infer_image_ext(url)
+        if not ext:
+            return None
+
+        # base_vfs_path 已 strip 过 '/'
+        vfs_path = base_vfs_path
+        if not vfs_path.endswith(f".{ext}"):
+            vfs_path = f"{base_vfs_path}.{ext}"
+
+        cos_key = self._resolve(vfs_path.lstrip("/"))
+        if not cos_key:
+            logger.warning(f"[IMAGE-SEARCH] _resolve 失败: {vfs_path}")
+            return None
+
+        try:
+            async with httpx.AsyncClient(
+                timeout=IMAGE_DOWNLOAD_TIMEOUT,
+                follow_redirects=True,
+                headers={"User-Agent": self._WEB_FETCH_USER_AGENT},
+            ) as client:
+                resp = await client.get(url)
+                resp.raise_for_status()
+                content = resp.content
+
+            # 基本校验：非空 + 至少 100 字节（避免 HTML 错误页 / 1x1 占位图）
+            if not content or len(content) < 100:
+                logger.warning(f"[IMAGE-SEARCH] 内容过小或为空: {url} ({len(content) if content else 0} bytes)")
+                return None
+
+            # 写入 COS（FileStorage.put_object 是同步方法）
+            await asyncio.to_thread(self.storage.put_object, cos_key, content)
+            logger.info(f"[IMAGE-SEARCH] saved {url} → {cos_key} ({len(content)} bytes)")
+            return vfs_path
+        except Exception as e:
+            logger.warning(f"[IMAGE-SEARCH] 下载/上传失败 {url}: {e}")
+            return None
+
+    async def _download_and_format_images(
+        self,
+        images: List[Dict[str, str]],
+        query: str,
+    ) -> str:
+        """
+        并发下载图片列表，格式化为结果段落。
+        任一图片失败不影响其他图片；全部失败时返回简短提示。
+        """
+        if not images:
+            return ""
+
+        slug = self._slugify_query(query)
+        images = images[:IMAGE_SEARCH_MAX_COUNT]
+
+        async def _one(idx: int, img: Dict[str, str]) -> Optional[str]:
+            url = img.get("url", "")
+            if not url:
+                return None
+            base_path = f"images/fetched/{slug}_{idx}"
+            return await self._download_image_to_vfs(url, base_path)
+
+        tasks = [_one(i + 1, img) for i, img in enumerate(images)]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        saved: List[Optional[str]] = []
+        for r in results:
+            if isinstance(r, BaseException):
+                saved.append(None)
+            else:
+                saved.append(r)
+
+        success_count = sum(1 for s in saved if s)
+        if success_count == 0:
+            return "\n\n[图片搜索结果] (全部下载失败)"
+
+        lines = [f"\n\n[图片搜索结果] 共 {len(images)} 张（成功 {success_count}）"]
+        for i, (img, path) in enumerate(zip(images, saved), 1):
+            title = img.get("title") or "image"
+            # 截断过长标题（控制台/上下文显示友好）
+            if len(title) > 60:
+                title = title[:57] + "..."
+            if path:
+                # VFS 路径返回绝对路径形式（与现有 file_* 工具一致）
+                vfs_abs = f"/{path.lstrip('/')}"
+                lines.append(f"  [{i}] {title} → vfs: {vfs_abs}")
+            else:
+                lines.append(f"  [{i}] {title} → (下载失败)")
+
+        return "\n".join(lines)
 
     # ========== 多引擎搜索（保留旧接口，已禁用 @tool） ==========
 
@@ -725,7 +976,7 @@ class WebToolsMixin(AgentToolsServiceBase):
     @tool(
         description=(
             "抓取任意 URL 的内容。支持 4 种 mode：\n"
-            "- 'text'(默认): 渲染后提取纯文本（Playwright + networkidle），最长 100K 字符\n"
+            "- 'text'(默认): 渲染后提取纯文本（Playwright + load + 1s 等待），最长 100K 字符\n"
             "- 'image': 截取首屏 1280x720 截图，保存到临时文件并返回路径\n"
             "- 'llm-text': 提取文本后调用 qwen3.6-flash 回答 prompt\n"
             "- 'llm-image': 截图后调用 qwen3.6-flash VLM 分析图片并回答 prompt\n\n"
@@ -875,7 +1126,8 @@ class WebToolsMixin(AgentToolsServiceBase):
                     "Object.defineProperty(navigator, 'webdriver', { get: () => undefined });"
                 )
 
-                await page.goto(url, wait_until="networkidle", timeout=30_000)
+                await page.goto(url, wait_until="load", timeout=30_000)
+                await asyncio.sleep(1)  # 给 JS 渲染时间
 
                 # 等待一下确保 JS 渲染完成
                 await asyncio.sleep(0.5)
@@ -937,7 +1189,8 @@ class WebToolsMixin(AgentToolsServiceBase):
                     "Object.defineProperty(navigator, 'webdriver', { get: () => undefined });"
                 )
 
-                await page.goto(url, wait_until="networkidle", timeout=30_000)
+                await page.goto(url, wait_until="load", timeout=30_000)
+                await asyncio.sleep(1)  # 给 JS 渲染时间
                 await asyncio.sleep(0.5)
 
                 await page.screenshot(path=img_path, type="png", full_page=False)
