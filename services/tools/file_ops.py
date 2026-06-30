@@ -33,7 +33,7 @@ class FileOpsMixin(AgentToolsServiceBase):
             )
         return result
 
-    @tool(description="写入内容到文件。path 用绝对路径（以 / 开头），如 /workspace/notes.txt", category="file")
+    @tool(description="写入内容到文件（覆盖写）。path 用绝对路径（以 / 开头），如 /workspace/notes.txt。注意：会完全覆盖文件原有内容，不确定文件是否存在时请先用 file_read 查看。如果是修改性的编辑操作，建议使用 Edit 工具，更加方便且精确。", category="file")
     async def file_write(self, path: str, content: str) -> str:
         """写入文件到 COS"""
         if not self._check_write(path):
