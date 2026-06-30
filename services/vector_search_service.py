@@ -345,11 +345,13 @@ class CosVectorStorage(VectorStorage):
 
         client = self._get_client()
         _, data = client.list_vector_buckets()
-        buckets = data.get("VectorBuckets", data.get("vector_buckets", []))
+        buckets = data.get("VectorBuckets", data.get("vector_buckets", data.get("vectorBuckets", [])))
 
         # Ensure legacy bucket is included
         legacy = "firstentrance-gzvec-1257148458"
-        if not any(b.get("Name", b.get("name", "")) == legacy for b in buckets):
+        def _bucket_name(b):
+            return b.get("vectorBucketName", b.get("Name", b.get("name", "")))
+        if not any(_bucket_name(b) == legacy for b in buckets):
             buckets.append({"Name": legacy, "Status": "Active"})
 
         cls._bucket_cache = buckets
@@ -377,7 +379,7 @@ class CosVectorStorage(VectorStorage):
             buckets = []
         client = self._get_client()
         for b in buckets:
-            name = b.get("Name", b.get("name", ""))
+            name = b.get("vectorBucketName", b.get("Name", b.get("name", "")))
             if not name:
                 continue
             try:
@@ -444,7 +446,7 @@ class CosVectorStorage(VectorStorage):
         best_count = float('inf')
 
         for b in buckets:
-            name = b.get("Name", b.get("name", ""))
+            name = b.get("vectorBucketName", b.get("Name", b.get("name", "")))
             if not name:
                 continue
             try:
@@ -474,7 +476,7 @@ class CosVectorStorage(VectorStorage):
         # Find the next available number
         existing_names = set()
         for b in existing_buckets:
-            name = b.get("Name", b.get("name", ""))
+            name = b.get("vectorBucketName", b.get("Name", b.get("name", "")))
             if name:
                 existing_names.add(name)
         existing_names.add("firstentrance-gzvec-1257148458")
