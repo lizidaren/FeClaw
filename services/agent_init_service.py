@@ -456,12 +456,12 @@ class AgentInitService:
         import secrets
         from sqlalchemy import func
 
-        # 检查 Agent 数量限制（最多 10 个）
+        # 检查 Agent 数量限制（最多 20 个）
         agent_count = db.query(func.count(AgentProfile.id)).filter(
             AgentProfile.user_id == user_id
         ).scalar() or 0
-        if agent_count >= 10:
-            raise ValueError("每个用户最多创建 10 个 Agent")
+        if agent_count >= 20:
+            raise ValueError("每个用户最多创建 20 个 Agent")
 
         # 生成唯一的 4 位 hash
         if not hash_value:
