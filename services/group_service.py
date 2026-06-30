@@ -30,6 +30,7 @@ GROUP_TOOL_TOTAL_TIMEOUT = 30.0    # 单轮 reply 工具调用整体超时（秒
 GROUP_TOOL_PER_TIMEOUT = 25.0      # 单个工具执行超时（秒）
 GROUP_SESSION_MEMORY_MAX = 20      # 每个 (group, agent) 最多保留的工具调用轮数
 GROUP_SESSION_TTL = 3600           # 1 小时无活动清理 session
+GROUP_SILENT_WAKE_AFTER = 5       # silent agent 错过 N 条新消息后自动唤醒
 
 # 群聊默认允许的工具（读类、信息获取类），排除写入/破坏性工具
 GROUP_ALLOWED_TOOLS: Set[str] = {
@@ -198,6 +199,28 @@ class GroupDispatchService:
                     self._running_tasks[task_key] = asyncio.create_task(
                         self.agent_reply(member.agent_hash, group_id, round)
                     )
+                elif member.is_silent:
+                    # silent 自动唤醒：如果 silent 后已有足够新消息则清除标志
+                    try:
+                        last_msg = db.query(GroupMessage).filter(
+                            GroupMessage.group_id == group_id,
+                            GroupMessage.sender_type == "agent",
+                            GroupMessage.sender_hash == member.agent_hash,
+                        ).order_by(GroupMessage.created_at.desc()).first()
+                        if last_msg:
+                            new_since = db.query(GroupMessage).filter(
+                                GroupMessage.group_id == group_id,
+                                GroupMessage.created_at > last_msg.created_at
+                            ).count()
+                            if new_since >= GROUP_SILENT_WAKE_AFTER:
+                                member.is_silent = False
+                                db.commit()
+                                logger.info(
+                                    f"[GroupDispatch] Auto-wake agent={member.agent_hash} "
+                                    f"after {new_since} new msgs (threshold={GROUP_SILENT_WAKE_AFTER})"
+                                )
+                    except Exception:
+                        pass
         finally:
             db.close()
 
@@ -428,12 +451,13 @@ class GroupDispatchService:
         lines.append("【回复规则】")
         lines.append("1. 如果你不需要回复（消息不针对你或无实质内容），请回复：NO_REPLY")
         lines.append("2. 对于@类消息，如果你未被@且消息也与你的专业领域关系不大")
-        lines.append("   （包括需要别人先完成前置工作才轮到你），请保持沉默，回复NO_REPLY")
+        lines.append("   （包括需要别人先完成前置工作才轮到你），建议回复NO_REPLY")
         lines.append("3. 可以适当发散，但不要过度偏离用户给出的任务和讨论主线")
         lines.append("   如果讨论进入死胡同（技术细节钻牛角尖、反复纠结同一问题等），")
         lines.append("   请主动将注意力拉回核心目标")
         lines.append("4. 回复NO_REPLY仅跳过本轮，下轮仍可被唤醒")
         lines.append("5. 回复SILENT则标记为静默，后续不再唤醒——除非被 @ 点名")
+        lines.append("   静默后错过 5 条新消息将自动解除沉默，你也可以重新回复SILENT续期")
         lines.append("6. 否则，请以你的角色身份自然回复，不要声明你的思考过程")
 
         return "\n".join(lines)
@@ -674,10 +698,11 @@ class GroupDispatchService:
         lines.append("【回复规则】")
         lines.append("1. 如果你不需要回复（消息不针对你或无实质内容），请回复：NO_REPLY")
         lines.append("2. 对于@类消息，如果你未被@且消息也与你的专业领域关系不大")
-        lines.append("   （包括需要别人先完成前置工作才轮到你），请保持沉默，回复NO_REPLY")
+        lines.append("   （包括需要别人先完成前置工作才轮到你），建议回复NO_REPLY")
         lines.append("3. 可以适当发散，但不要过度偏离用户给出的任务和讨论主线")
         lines.append("4. 回复NO_REPLY仅跳过本轮，下轮仍可被唤醒")
         lines.append("5. 回复SILENT则标记为静默，后续不再唤醒——除非被 @ 点名")
+        lines.append("   静默后错过 5 条新消息将自动解除沉默，你也可以重新回复SILENT续期")
         lines.append("6. 否则，请以你的角色身份自然回复，不要声明你的思考过程")
         lines.append("7. 仅在确实需要实时数据或文件内容时才调用工具；闲聊/问候/已知信息直接回复")
 
