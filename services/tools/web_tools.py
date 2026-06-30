@@ -4,20 +4,25 @@ Agent 工具服务 - 网页搜索工具
 """
 
 import re
+import os
 import json
 import time
+import base64
 import hashlib
 import asyncio
+import tempfile
 import logging
 from typing import List, Dict, Any, Optional
 from urllib.parse import urlparse, quote
 
 import httpx
+import aiohttp
 
 from config import settings
 from services.tool_registry import tool
 from services.tools.base import AgentToolsServiceBase, _ensure_nest_asyncio
 from services.search_service import SearchService
+from services.tools.universal_parser import _vlm_chat, _qwen_chat, VLM_MODEL, QWEN_CHAT_URL
 
 logger = logging.getLogger(__name__)
 
@@ -699,3 +704,351 @@ class WebToolsMixin(AgentToolsServiceBase):
             self._set_cached_search(query, level, result)
 
         return f"{result}\n\n⏱️ 耗时: {elapsed_sec:.1f}s | 级别: {level} ({service_name})"
+
+    # ========== web_fetch: 网页抓取（Playwright + 反检测 + curl 降级） ==========
+
+    # 真实的 Chrome User-Agent，避免被反爬识别
+    _WEB_FETCH_USER_AGENT = (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+    )
+
+    # Playwright 启动参数：禁用自动化特征
+    _WEB_FETCH_LAUNCH_ARGS = [
+        "--disable-blink-features=AutomationControlled",
+        "--disable-automation",
+        "--disable-infobars",
+        "--no-sandbox",
+        "--disable-dev-shm-usage",
+    ]
+
+    @tool(
+        description=(
+            "抓取任意 URL 的内容。支持 4 种 mode：\n"
+            "- 'text'(默认): 渲染后提取纯文本（Playwright + networkidle），最长 100K 字符\n"
+            "- 'image': 截取首屏 1280x720 截图，保存到临时文件并返回路径\n"
+            "- 'llm-text': 提取文本后调用 qwen3.6-flash 回答 prompt\n"
+            "- 'llm-image': 截图后调用 qwen3.6-flash VLM 分析图片并回答 prompt\n\n"
+            "Playwright 失败时自动降级到 httpx（截图类降级为文本提取）。\n"
+            "适用场景：抓取被反爬保护的网页、JS 渲染后才能看到的内容、需要视觉分析的页面。"
+        ),
+        category="web",
+    )
+    async def web_fetch(
+        self,
+        url: str,
+        mode: str = "text",
+        prompt: str = "",
+    ) -> str:
+        """
+        抓取 URL 内容（反爬版）。
+
+        :param url: 目标网址（必须以 http:// 或 https:// 开头）
+        :param mode: 抓取模式 — text / image / llm-text / llm-image
+        :param prompt: llm-text / llm-image 模式下的问题（必填，否则降级为 text/image）
+        """
+        mode = (mode or "text").lower().strip()
+
+        if mode not in ("text", "image", "llm-text", "llm-image"):
+            return f"Error: 不支持的 mode '{mode}'，可选: text, image, llm-text, llm-image"
+
+        if not url or not url.startswith(("http://", "https://")):
+            return f"Error: URL 必须以 http:// 或 https:// 开头，收到: {url!r}"
+
+        # llm-* 模式必须提供 prompt，否则降级
+        if mode.startswith("llm-") and not prompt.strip():
+            logger.warning(f"web_fetch: mode={mode} 但 prompt 为空，自动降级到 {mode.replace('llm-', '')}")
+            mode = mode.replace("llm-", "")
+
+        try:
+            if mode == "text":
+                return await self._web_fetch_text(url)
+            elif mode == "image":
+                return await self._web_fetch_image(url)
+            elif mode == "llm-text":
+                text = await self._web_fetch_text(url)
+                return await self._web_fetch_llm_answer(text, prompt, url, image_mode=False)
+            else:  # llm-image
+                img_path = await self._web_fetch_image_path(url)
+                return await self._web_fetch_llm_answer(img_path, prompt, url, image_mode=True)
+        except Exception as e:
+            logger.exception(f"web_fetch({mode}) failed for {url}: {e}")
+            return f"Error: web_fetch 失败: {e}"
+
+    # ── 主路径：Playwright + 反检测 ───────────────────────────
+
+    async def _web_fetch_text(self, url: str) -> str:
+        """Playwright 抓取 → 渲染 → 提取 innerText。失败则降级 httpx。"""
+        try:
+            text = await self._playwright_fetch_text(url)
+            if text and text.strip():
+                truncated = text[:100_000]
+                note = f"📄 来源: {url}\n"
+                if len(text) > 100_000:
+                    note += f"⚠️ 内容已截断至 100,000 字符（原文 {len(text):,} 字符）\n"
+                return note + "\n" + truncated
+        except Exception as e:
+            logger.warning(f"Playwright text fetch failed for {url}, falling back to httpx: {e}")
+
+        # curl/httpx 降级
+        return await self._httpx_fetch_text(url)
+
+    async def _web_fetch_image(self, url: str) -> str:
+        """Playwright 截图 → 保存 → 返回路径。失败则降级到文本提取。"""
+        try:
+            img_path = await self._playwright_fetch_screenshot(url)
+            size_kb = os.path.getsize(img_path) / 1024
+            return (
+                f"🖼️ 截图已保存: {img_path}\n"
+                f"   大小: {size_kb:.1f} KB | 尺寸: 1280x720\n"
+                f"   来源: {url}\n"
+                f"   （提示：临时文件会在工具调用结束后自动清理）"
+            )
+        except Exception as e:
+            logger.warning(f"Playwright screenshot failed for {url}, falling back to text: {e}")
+            text = await self._httpx_fetch_text(url)
+            return (
+                f"⚠️ 截图失败（{e}），已降级为文本提取：\n\n"
+                + text
+            )
+
+    async def _web_fetch_image_path(self, url: str) -> str:
+        """截图并返回文件路径（供 llm-image 使用）。失败则返回空串。"""
+        try:
+            return await self._playwright_fetch_screenshot(url)
+        except Exception as e:
+            logger.warning(f"Playwright screenshot failed for {url}: {e}")
+            return ""
+
+    # ── Playwright 内部函数 ─────────────────────────────────
+
+    async def _playwright_fetch_text(self, url: str) -> str:
+        """用 Playwright 反检测抓取渲染后的文本。"""
+        from playwright.async_api import async_playwright
+
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(
+                headless=True,
+                args=self._WEB_FETCH_LAUNCH_ARGS,
+            )
+            try:
+                context = await browser.new_context(
+                    viewport={"width": 1280, "height": 720},
+                    user_agent=self._WEB_FETCH_USER_AGENT,
+                    locale="en-US",
+                    timezone_id="America/New_York",
+                )
+
+                # 反检测 init script：在每个新页面加载前注入
+                await context.add_init_script(
+                    """
+                    // 隐藏 webdriver 痕迹
+                    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+                    // 伪造 plugins 数组
+                    Object.defineProperty(navigator, 'plugins', {
+                        get: () => [
+                            { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer' },
+                            { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai' },
+                            { name: 'Native Client', filename: 'internal-nacl-plugin' },
+                        ],
+                    });
+                    // 伪造 languages
+                    Object.defineProperty(navigator, 'languages', {
+                        get: () => ['en-US', 'en'],
+                    });
+                    // 隐藏 chrome runtime automation
+                    window.chrome = window.chrome || { runtime: {} };
+                    // 隐藏 permissions query 自动化特征
+                    const originalQuery = window.navigator.permissions && window.navigator.permissions.query;
+                    if (originalQuery) {
+                        window.navigator.permissions.query = (parameters) =>
+                            parameters.name === 'notifications'
+                                ? Promise.resolve({ state: Notification.permission })
+                                : originalQuery(parameters);
+                    }
+                    """
+                )
+
+                page = await context.new_page()
+                # 再次保险：加载前覆盖 webdriver
+                await page.add_init_script(
+                    "Object.defineProperty(navigator, 'webdriver', { get: () => undefined });"
+                )
+
+                await page.goto(url, wait_until="networkidle", timeout=30_000)
+
+                # 等待一下确保 JS 渲染完成
+                await asyncio.sleep(0.5)
+
+                text = await page.evaluate("() => document.body ? document.body.innerText : ''")
+                return text or ""
+            finally:
+                await browser.close()
+
+    async def _playwright_fetch_screenshot(self, url: str) -> str:
+        """用 Playwright 反检测截图，保存到临时文件，返回路径。"""
+        from playwright.async_api import async_playwright
+
+        # 生成临时文件路径
+        tmp_dir = tempfile.gettempdir()
+        filename = f"webfetch_{int(time.time() * 1000)}_{os.urandom(3).hex()}.png"
+        img_path = os.path.join(tmp_dir, filename)
+
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(
+                headless=True,
+                args=self._WEB_FETCH_LAUNCH_ARGS,
+            )
+            try:
+                context = await browser.new_context(
+                    viewport={"width": 1280, "height": 720},
+                    user_agent=self._WEB_FETCH_USER_AGENT,
+                    locale="en-US",
+                    timezone_id="America/New_York",
+                    device_scale_factor=1,
+                )
+
+                await context.add_init_script(
+                    """
+                    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+                    Object.defineProperty(navigator, 'plugins', {
+                        get: () => [
+                            { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer' },
+                            { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai' },
+                            { name: 'Native Client', filename: 'internal-nacl-plugin' },
+                        ],
+                    });
+                    Object.defineProperty(navigator, 'languages', {
+                        get: () => ['en-US', 'en'],
+                    });
+                    window.chrome = window.chrome || { runtime: {} };
+                    const originalQuery = window.navigator.permissions && window.navigator.permissions.query;
+                    if (originalQuery) {
+                        window.navigator.permissions.query = (parameters) =>
+                            parameters.name === 'notifications'
+                                ? Promise.resolve({ state: Notification.permission })
+                                : originalQuery(parameters);
+                    }
+                    """
+                )
+
+                page = await context.new_page()
+                await page.add_init_script(
+                    "Object.defineProperty(navigator, 'webdriver', { get: () => undefined });"
+                )
+
+                await page.goto(url, wait_until="networkidle", timeout=30_000)
+                await asyncio.sleep(0.5)
+
+                await page.screenshot(path=img_path, type="png", full_page=False)
+                return img_path
+            finally:
+                # 确保浏览器关闭（文件保留给调用者清理）
+                await browser.close()
+
+    # ── httpx 降级 ─────────────────────────────────────────
+
+    async def _httpx_fetch_text(self, url: str) -> str:
+        """curl/httpx 降级：抓 HTML → 去标签 → 纯文本。"""
+        try:
+            async with httpx.AsyncClient(
+                timeout=15.0,
+                follow_redirects=True,
+                headers={
+                    "User-Agent": self._WEB_FETCH_USER_AGENT,
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    "Accept-Language": "en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7",
+                },
+            ) as client:
+                resp = await client.get(url)
+                resp.raise_for_status()
+                html = resp.text
+        except httpx.HTTPError as e:
+            return f"Error: HTTP 抓取失败: {e}"
+        except Exception as e:
+            return f"Error: 抓取 {url} 失败: {e}"
+
+        # 去标签（与 universal_parser._handle_url 同样的策略）
+        html = re.sub(r"<script[^>]*>[\s\S]*?</script>", " ", html, flags=re.IGNORECASE)
+        html = re.sub(r"<style[^>]*>[\s\S]*?</style>", " ", html, flags=re.IGNORECASE)
+        html = re.sub(r"<!--[\s\S]*?-->", " ", html)  # 注释
+        text = re.sub(r"<[^>]+>", " ", html)
+        text = re.sub(r"\s+", " ", text).strip()
+
+        if not text:
+            return f"Error: 页面内容为空或无法提取（URL: {url}）"
+
+        truncated = text[:100_000]
+        note = f"📄 来源: {url}（httpx 降级抓取，未执行 JS）\n"
+        if len(text) > 100_000:
+            note += f"⚠️ 内容已截断至 100,000 字符（原文 {len(text):,} 字符）\n"
+        return note + "\n" + truncated
+
+    # ── LLM/VLM 调用 ────────────────────────────────────────
+
+    async def _web_fetch_llm_answer(
+        self,
+        input_data: str,
+        prompt: str,
+        url: str,
+        image_mode: bool,
+    ) -> str:
+        """调用 qwen3.6-flash 处理文本或图片，返回答案。
+
+        input_data: text 模式下是文本；image 模式下是图片文件路径。
+        """
+        api_key = getattr(settings, "QWEN_API_KEY", None)
+        if not api_key:
+            return "Error: QWEN_API_KEY 未配置，无法调用 LLM/VLM"
+
+        if image_mode:
+            # VLM 图片分析
+            if not input_data or not os.path.isfile(input_data):
+                return f"Error: 截图文件不存在或已清理: {input_data!r}"
+            try:
+                answer = await _vlm_chat([input_data], prompt, api_key, max_tokens=4096)
+            finally:
+                # 清理临时截图
+                try:
+                    os.remove(input_data)
+                except OSError:
+                    pass
+
+            if not answer:
+                return f"Error: VLM 未返回内容（URL: {url}）"
+            return f"🤖 VLM 分析（{VLM_MODEL}）— {url}\n\n{answer}"
+
+        # 文本 LLM
+        if not input_data or input_data.startswith("Error:"):
+            return input_data or "Error: 文本内容为空"
+
+        # 文本可能很长，截断到 16K 字符保留 prompt 余量
+        truncated = input_data[:16_000]
+        if len(input_data) > 16_000:
+            truncated += f"\n\n[... 内容已截断，原文 {len(input_data):,} 字符 ...]"
+
+        messages = [
+            {
+                "role": "system",
+                "content": "你是一个网页内容分析助手。基于提供的网页文本回答用户问题。",
+            },
+            {
+                "role": "user",
+                "content": f"网页内容（来自 {url}）：\n\n{truncated}\n\n问题：{prompt}",
+            },
+        ]
+
+        try:
+            answer = await _qwen_chat(VLM_MODEL, messages, api_key, temperature=0.3, max_tokens=2000)
+        except Exception as e:
+            logger.warning(f"_qwen_chat for web_fetch failed: {e}")
+            answer = None
+
+        if not answer:
+            # 降级：返回原始文本，让用户自己看
+            return (
+                f"⚠️ LLM 调用失败，已返回原始文本（截断至 8K）：\n\n"
+                + input_data[:8_000]
+            )
+
+        return f"🤖 LLM 分析（{VLM_MODEL}）— {url}\n\n{answer}"
