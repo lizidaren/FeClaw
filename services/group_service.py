@@ -41,6 +41,8 @@ GROUP_ALLOWED_TOOLS: Set[str] = {
     "web_search", "web_fetch",
     # 文件读取
     "file_read", "file_list",
+    # 文件写入
+    "file_write", "file_edit",
     # 知识库
     "knowledge_search", "knowledge_get",
     # 文本处理（无副作用）
