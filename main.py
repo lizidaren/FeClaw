@@ -54,7 +54,7 @@ import uvicorn
 from config import settings
 from models.database import init_db, SessionLocal, User, engine
 from utils.auth import generate_salt, hash_password
-from routers import static_site, static_site_public, workspace, wechat, oauth, console, health, vfs_image_dedup, sandbox, share, share_reference, vfs_view, apps_gateway, fehub
+from routers import static_site, static_site_public, workspace, wechat, oauth, console, health, vfs_image_dedup, sandbox, share, share_reference, vfs_view, apps_gateway, fehub, dashboard
 from routers.feclaw_domain import router as feclaw_domain_router
 from routers.feclaw_chat import router as feclaw_chat_router
 from routers.agent_config_ui import router as agent_config_ui_router
@@ -353,6 +353,7 @@ app.include_router(user_router)  # 用户 API (注册、登录)
 app.include_router(group_router)  # Group Chat API
 app.include_router(admin_router)  # 管理后台 API
 app.include_router(agent_config_ui_router)  # Agent 配置界面
+app.include_router(dashboard.router)  # Dashboard 页面
 app.include_router(agent_config_router)  # Agent 配置 API
 app.include_router(agent_config_chat_router)  # Agent 配置聊天 API
 app.include_router(static_site.router)  # 静态网站托管 API
