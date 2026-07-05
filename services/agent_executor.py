@@ -215,6 +215,20 @@ class AgentExecutor:
         from services.model_registry import resolve as _exec_resolve
         actual_provider = provider or _exec_resolve(actual_model)["provider"]
         actual_reasoning = reasoning_effort if reasoning_effort is not None else settings.AGENT_LLM_REASONING_EFFORT
+        # 读取 Agent 的 deep_thinking 配置
+        try:
+            from models.database import SessionLocal, AgentConfig
+            _db = SessionLocal()
+            _dt = _db.query(AgentConfig).filter(
+                AgentConfig.agent_hash == self.agent_hash,
+                AgentConfig.key == f'agents/{self.agent_hash}/deep_thinking'
+            ).first()
+            _db.close()
+            if _dt and _dt.value.strip() == 'True':
+                actual_reasoning = 'high'
+                logger.info(f"[AgentExecutor] deep_thinking=True for {self.agent_hash}")
+        except Exception:
+            pass
 
         # 0. 检查 Agent 状态
         if self.agent_profile.status == "pending":
@@ -527,14 +541,33 @@ class AgentExecutor:
                 assistant_msg["reasoning_content"] = reasoning_content
             working_messages.append(assistant_msg)
 
+            # 预先解析 tool_call 参数（用于日志/前端展示）
+            # Fix: 原代码硬编码 tool_args={}，导致前端工具面板永远看不到参数
+            _parsed_args_list = []
+            for _tc in tool_calls:
+                try:
+                    _parsed_args_list.append(json.loads(_tc["function"]["arguments"]))
+                except (json.JSONDecodeError, TypeError):
+                    _parsed_args_list.append({})
+
             # 发送工具调用步骤（简洁提示）
             if tool_calls:
                 func_names = [tc["function"]["name"] for tc in tool_calls]
+                # 单工具调用：tool_args 是该工具的参数字典
+                # 多工具调用：tool_args 是 {工具名: 参数字典} 的映射
+                _display_args = (
+                    _parsed_args_list[0]
+                    if len(_parsed_args_list) == 1
+                    else {n: a for n, a in zip(func_names, _parsed_args_list)}
+                )
+                # tool_call_id 用于关联 tool_call ↔ tool_result，让 ChatHistory 正确入库
+                _call_id = tool_calls[0].get("id", "") if len(tool_calls) == 1 else None
                 yield Step(
                     step_type="tool_call",
                     content=f"🔧 执行工具: {', '.join(func_names)}",
                     tool_name=func_names[0] if len(func_names) == 1 else None,
-                    tool_args={}
+                    tool_args=_display_args,
+                    tool_call_id=_call_id,
                 )
 
             # 执行每个工具调用，添加工具结果
@@ -604,7 +637,8 @@ class AgentExecutor:
                     step_type="tool_result",
                     content=f"✅ 完成: {result_preview}",
                     tool_name=func_name,
-                    tool_result=tool_result
+                    tool_result=tool_result,
+                    tool_call_id=tc.get("id", ""),
                 )
 
                 # 将工具结果添加为消息
@@ -639,6 +673,34 @@ class AgentExecutor:
 
                 # 不再限制同一工具调用次数——Agent 需要时可自由重复调用
                 same_tool_count[func_name] = same_tool_count.get(func_name, 0) + 1
+
+            # === Fix #2: TOCTOU 中断注入 ===
+            # 工具执行期间可能收到新的 MESSAGE 中断。在把工具结果送回 LLM
+            # 之前把这些新消息注入到最后一条 tool 结果里，让 Agent 当轮就能
+            # 感知，而不必等 work_loop 再起一轮（避免双倍消息）。只消费 MESSAGE
+            # 类型，CRON/FILE_CHANGE 仍留给 work_loop 处理。
+            try:
+                from services.interrupt_controller import InterruptController
+                _ic = InterruptController.instance()
+                _pending = _ic.consume_pending_messages(self.agent_hash)
+                if _pending and working_messages:
+                    _inject_parts = []
+                    for _p in _pending:
+                        _ts = _p.payload.get("trigger_sender", _p.irq_type)
+                        _tc = _p.payload.get("trigger_content", "")
+                        _inject_parts.append(
+                            f"[系统通知] 处理过程中收到了来自 {_ts} 的新消息：{_tc[:200]}"
+                        )
+                    _inject_msg = "\n\n".join(_inject_parts)
+                    working_messages[-1]["content"] = (
+                        (working_messages[-1].get("content") or "") + "\n\n" + _inject_msg
+                    )
+                    logger.info(
+                        f"[AgentExecutor] TOCTOU 注入 {len(_pending)} 条新消息 "
+                        f"agent={self.agent_hash}"
+                    )
+            except Exception as _inject_e:
+                logger.warning(f"[AgentExecutor] TOCTOU 注入失败: {_inject_e}")
 
         # 超过最大轮次，返回提示
         yield Step(step_type="final", content="抱歉，工具调用次数过多，请简化请求。")
@@ -727,10 +789,40 @@ class AgentExecutor:
 
         return compressed
 
+    def _get_enabled_tools(self) -> Optional[set]:
+        """从 AgentConfig 读取启用的工具列表。无配置时返回 None（不过滤）。"""
+        import json
+        from models.database import SessionLocal, AgentConfig
+        db = SessionLocal()
+        try:
+            row = db.query(AgentConfig).filter(
+                AgentConfig.agent_hash == self.agent_hash,
+                AgentConfig.key == f"agents/{self.agent_hash}/tools"
+            ).first()
+            if row:
+                val = json.loads(row.value)
+                return set(val.get("enabled", []))
+            return None
+        except Exception as e:
+            logger.warning(f"[AgentExecutor] _get_enabled_tools failed for {self.agent_hash}: {e}")
+            return None
+        finally:
+            db.close()
+
     def _get_tool_definitions(self) -> List[Dict]:
         """返回工具定义列表（从 TOOL_REGISTRY 自动生成），排除禁用的工具"""
         from services.tool_registry import get_tool_schemas
         schemas = get_tool_schemas()
+
+        # AgentConfig 中配置的启用工具列表（None 表示不过滤）
+        enabled_tools = self._get_enabled_tools()
+        if enabled_tools is not None:
+            schemas = [
+                s for s in schemas
+                if s["function"]["name"] in enabled_tools
+            ]
+
+        # 已有的 blocked_tools 过滤（用于 subagent 安全限制）
         if self.blocked_tools:
             schemas = [
                 s for s in schemas

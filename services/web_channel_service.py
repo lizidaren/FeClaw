@@ -417,7 +417,14 @@ class WebChannelService:
             self.add_message(session, "user", f"{user_input} [图片]")
         else:
             self.add_message(session, "user", user_input)
-        
+
+        # ── IM Agent 路由：直接走 IRQ → WorkLoop（异步处理）──
+        # IM Agent 收到消息后应自主决策（不再一问一答），所以 web 私聊也走 IRQ。
+        # WorkLoop 处理完后通过 WebSocket 把回复 push 回来（前端需要监听 WS）。
+        if self._is_im_agent():
+            yield self._build_queued_sse(actual_user_input, session)
+            return
+
         # 调用统一的 ChatService（不传递 image_url，因为已经保存到 VFS）
         chat_service = ChatService(agent_hash=self.agent_hash, channel=CHANNEL_WEB)
 
@@ -626,3 +633,54 @@ class WebChannelService:
         session.message_count = len(messages)
         session.updated_at = datetime.utcnow()
         self.db.commit()
+
+    # ========== IM Agent IRQ 路由 ==========
+
+    def _is_im_agent(self) -> bool:
+        """检查当前 Agent 是否为 IM 模式（agent_mode='im'）。"""
+        from models.database import AgentProfile
+        agent = self.db.query(AgentProfile).filter(
+            AgentProfile.hash == self.agent_hash
+        ).first()
+        return bool(agent and getattr(agent, "agent_mode", "classic") == "im")
+
+    def _build_queued_sse(self, user_input: str, session) -> str:
+        """构造 IM Agent 占位 SSE 事件并投递 IRQ。
+
+        - 前端 SSE 流立刻以 queued 事件结束
+        - WorkLoop 异步处理 IRQ，处理完后通过 WebSocket push 回前端
+        """
+        from services.interrupt_controller import (
+            InterruptController,
+            Interrupt,
+            InterruptType,
+            Priority,
+        )
+
+        ic = InterruptController.instance()
+        ic.dispatch(Interrupt(
+            irq_type=InterruptType.MESSAGE,
+            agent_hash=self.agent_hash,
+            priority=Priority.HIGH,
+            payload={
+                "channel": "web",
+                "user_id": self.user_id,
+                "agent_hash": self.agent_hash,
+                "session_id": session.session_id,
+                "msg_id": None,
+                "trigger_content": user_input[:1000],
+                "trigger_sender": "用户",
+            },
+        ))
+        logger.info(
+            f"[WebChannel] IM Agent IRQ 投递 agent={self.agent_hash} "
+            f"user={self.user_id} session={session.session_id}"
+        )
+        payload = {
+            "status": "queued",
+            "agent_hash": self.agent_hash,
+            "channel": "web",
+            "session_id": session.session_id,
+            "message": "IM Agent 收到消息，将在 WorkLoop 中异步处理。回复将通过 WebSocket 推送。",
+        }
+        return f"event: queued\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"

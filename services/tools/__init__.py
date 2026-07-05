@@ -21,9 +21,13 @@ from services.tools.fehub_tools import FeHubToolsMixin
 from services.tools.tts_tools import TtsToolsMixin
 from services.tools.universal_parser import ParseFileMixin
 from services.tools.pptx_tools import PptxToolsMixin
+from services.tools.todo_tools import TodoToolsMixin
+from services.tools.reply_buffer_tools import ReplyBufferToolsMixin
 
 
 class AgentToolsService(
+    ReplyBufferToolsMixin,
+    TodoToolsMixin,
     TtsToolsMixin,
     PptxToolsMixin,
     ParseFileMixin,

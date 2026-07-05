@@ -438,7 +438,8 @@ class AgentInitService:
         user_id: int,
         name: str = "",
         description: str = None,
-        hash_value: str = None
+        hash_value: str = None,
+        agent_mode: str = "classic",
     ) -> AgentProfile:
         """
         创建新 Agent
@@ -449,6 +450,7 @@ class AgentInitService:
             name: Agent 名称
             description: Agent 描述
             hash_value: 指定的 4 位 hash（可选）
+            agent_mode: V2 Agent 模式 "classic" | "im"（默认 classic）
 
         Returns:
             AgentProfile 实例
@@ -456,12 +458,12 @@ class AgentInitService:
         import secrets
         from sqlalchemy import func
 
-        # 检查 Agent 数量限制（最多 20 个）
+        # 检查 Agent 数量限制（最多 100 个）
         agent_count = db.query(func.count(AgentProfile.id)).filter(
             AgentProfile.user_id == user_id
         ).scalar() or 0
-        if agent_count >= 20:
-            raise ValueError("每个用户最多创建 20 个 Agent")
+        if agent_count >= 100:
+            raise ValueError("每个用户最多创建 50 个 Agent")
 
         # 生成唯一的 4 位 hash
         if not hash_value:
@@ -490,6 +492,7 @@ class AgentInitService:
             description=description,
             status="pending",
             permissions="chat,upload,session",
+            agent_mode=agent_mode if agent_mode in ("classic", "im") else "classic",
             parallel_sandbox=False,
             lock_behavior="wait_3s",
             created_at=datetime.utcnow()
@@ -499,6 +502,24 @@ class AgentInitService:
         db.refresh(agent)
 
         logger.info(f"Created new agent: hash={agent.hash}, user_id={user_id}")
+
+        # Agent V2: 如果是 IM Agent，自动启动协处理器
+        if agent.agent_mode == "im":
+            try:
+                import asyncio
+                from services.interrupt_controller import CoprocessorService
+                # 创建协处理器（fire-and-forget，create_agent 是同步方法）
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        asyncio.ensure_future(CoprocessorService.start(agent.hash))
+                    else:
+                        loop.run_until_complete(CoprocessorService.start(agent.hash))
+                except RuntimeError:
+                    # 没有事件循环 —— 跳过启动（由 restart_all 在 lifespan 阶段补启）
+                    logger.info(f"[Coprocessor] create_agent 阶段无可用事件循环，Agent {agent.hash} 的协处理器将在 restart_all 时启动")
+            except Exception as e:
+                logger.warning(f"[Coprocessor] 启动失败 agent={agent.hash}: {e}")
 
         return agent
 
@@ -537,13 +558,15 @@ class AgentInitService:
         self._write_config_db(agent_hash, "persona", persona_content)
 
         # 2. 保存 tools 配置到数据库（仅当不存在时写入默认值）
+        # IM Agent 默认启用 get_group_history（IM 模式主要在群聊中工作，需要读群历史）
         default_tools = {
             "enabled": [
                 "file_read", "file_write", "file_list", "file_delete",
                 "bash", "web_search", "spawn_subagent",
                 "create_share_link", "edit", "list_conversations",
                 "load_conversation", "schedule_reminder", "generate_totp",
-                "python_background", "python_task_list", "python_task_output"
+                "python_background", "python_task_list", "python_task_output",
+                "get_group_history",
             ],
             "disabled": []
         }

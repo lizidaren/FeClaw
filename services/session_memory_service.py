@@ -5,13 +5,19 @@ Session Memory Service — 会话记忆后台提取器
 - 阈值判断：消息数 / 工具调用数达到阈值时触发提取
 - 提取执行：用受限工具集调用 LLM，读完现有笔记后写入更新
 - 非阻塞：通过 asyncio.create_task 在后台运行，不影响主对话流
+
+V2 渠道隔离（设计文档 §6 Session Memory 渠道隔离）：
+- Classic Agent: 同文件 (session_memory.md) 不同 Markdown 章节
+  全文件加载不过滤，靠提示词告知当前渠道上下文
+- 当前实现：统一返回 session_memory.md 路径（不做物理章节解析）
+- 完整函数：build_session_memory_path(agent_hash, channel, group_id)
 """
 
 import asyncio
 import json
 import logging
 import time
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 from config import settings
 from services._format_conversation import format_conversation
@@ -20,6 +26,33 @@ from services.virtual_filesystem import VirtualFileSystem
 MEMORY_FILE_PATH = "/workspace/agent/session_memory.md"
 
 logger = logging.getLogger(__name__)
+
+
+# ── V2 渠道路径构建 ─────────────────────────────────────────
+
+def build_session_memory_path(
+    agent_hash: str,
+    channel: Optional[str] = None,
+    group_id: Optional[str] = None,
+) -> str:
+    """
+    V2 渠道隔离：构造 session_memory.md 路径。
+
+    当前实现（简化版）：
+    - 所有渠道统一返回 MEMORY_FILE_PATH（"session_memory.md"）
+    - 文件内容是同一份，章节隔离靠提示词说明当前渠道
+    - IM Agent 模式下不隔离（设计文档 §6）
+
+    Args:
+        agent_hash: Agent 标识
+        channel: "wechat" / "api" / "web" / "group" / None
+        group_id: 群组 ID（仅 channel="group" 时使用）
+
+    Returns:
+        VFS 路径（统一为 session_memory.md）
+    """
+    # V2 P0/P1: 不做物理章节拆分——同文件全读，靠 system prompt 提示
+    return MEMORY_FILE_PATH
 
 
 # ── 阈值配置 ──────────────────────────────────────────────

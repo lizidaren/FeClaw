@@ -14,6 +14,81 @@ from services.file_storage import FileStorage
 logger = logging.getLogger(__name__)
 
 
+# ── V2: DB 劫持路由 ────────────────────────────────────────────
+# 某些高频读写小文件直接走 DB（SQLite/MySQL），绕过 COS 以提升性能。
+# Agent 无感——file_read/file_write 行为完全不变。
+#
+# 路由规则：key 以这些文件名结尾的请求，路由到 agent_config 表
+# （key 命名为 agents/{hash}/system/{filename}）
+_DB_HIJACK_FILES = {
+    "todos.json",
+    "coprocessor_config.json",
+}
+
+
+def _is_db_hijack_key(key: str) -> bool:
+    """检查 key 是否为 DB 劫持路径"""
+    if not key:
+        return False
+    key = key.rstrip("/")
+    basename = key.rsplit("/", 1)[-1] if "/" in key else key
+    return basename in _DB_HIJACK_FILES
+
+
+def _db_hijack_read(key: str) -> Optional[bytes]:
+    """从 agent_config 表读取特殊文件"""
+    try:
+        from models.database import AgentConfig, SessionLocal
+        db = SessionLocal()
+        try:
+            row = db.query(AgentConfig).filter(AgentConfig.key == key).first()
+            if row and row.value is not None:
+                return row.value.encode("utf-8")
+        finally:
+            db.close()
+    except Exception as e:
+        logger.warning(f"[StorageService] DB hijack read failed for {key}: {e}")
+    return None
+
+
+def _db_hijack_write(key: str, data: bytes) -> bool:
+    """写入特殊文件到 agent_config 表（upsert）"""
+    try:
+        from datetime import datetime
+        from models.database import AgentConfig, SessionLocal
+        text = data.decode("utf-8", errors="replace") if isinstance(data, bytes) else str(data)
+        # 解析 agent_hash from key（feclaw/agents/{hash}/system/todos.json）
+        agent_hash = None
+        parts = key.split("/")
+        if "agents" in parts:
+            idx = parts.index("agents")
+            if idx + 1 < len(parts):
+                agent_hash = parts[idx + 1]
+        db = SessionLocal()
+        try:
+            row = db.query(AgentConfig).filter(AgentConfig.key == key).first()
+            if row:
+                row.value = text
+                row.updated_at = datetime.utcnow()
+            else:
+                row = AgentConfig(
+                    key=key,
+                    value=text,
+                    agent_hash=agent_hash,
+                    permission="readwrite",
+                    description="V2 system file (DB-hijacked)",
+                    updated_at=datetime.utcnow(),
+                )
+                db.add(row)
+            db.commit()
+            return True
+        finally:
+            db.close()
+    except Exception as e:
+        logger.warning(f"[StorageService] DB hijack write failed for {key}: {e}")
+    return False
+
+
 class CosStorage(FileStorage):
     """COS 文件存储实现 — 继承 FileStorage，实现 5 个抽象方法"""
 
@@ -35,7 +110,15 @@ class CosStorage(FileStorage):
     # ==================== FileStorage 抽象方法实现 ====================
 
     def get_file_content(self, key: str) -> Optional[bytes]:
-        """获取文件内容"""
+        """获取文件内容（V2：DB 劫持路由）"""
+        # V2 DB 劫持：特定文件走 DB 而非 COS
+        if _is_db_hijack_key(key):
+            data = _db_hijack_read(key)
+            if data is not None:
+                logger.debug(f"[CosStorage] DB-hijack read: {key}, size={len(data)}")
+                return data
+            # 不存在 → 返回 None（与 COS 行为一致）
+            return None
         try:
             response = self.client.get_object(
                 Bucket=settings.TENCENT_COS_BUCKET,
@@ -56,7 +139,15 @@ class CosStorage(FileStorage):
             return None
 
     def put_object(self, key: str, file_bytes: bytes) -> None:
-        """上传文件到 COS"""
+        """上传文件到 COS（V2：DB 劫持路由）"""
+        # V2 DB 劫持：特定文件走 DB 而非 COS
+        if _is_db_hijack_key(key):
+            ok = _db_hijack_write(key, file_bytes)
+            if ok:
+                logger.debug(f"[CosStorage] DB-hijack write: {key}, size={len(file_bytes)}")
+                return
+            # 写失败：降级到 COS（fallback）
+            logger.warning(f"[CosStorage] DB hijack write failed, falling back to COS for {key}")
         self.client.put_object(
             Bucket=settings.TENCENT_COS_BUCKET,
             Body=file_bytes,

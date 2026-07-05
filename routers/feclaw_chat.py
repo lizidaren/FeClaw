@@ -10,7 +10,7 @@ DELETE /api/chat/sessions/{session_id} - 删除会话
 import json
 import asyncio
 import logging
-from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Optional, List
@@ -79,7 +79,8 @@ class SessionDetailResponse(BaseModel):
 async def chat_stream(
     request: ChatRequest,
     user_id: int = Depends(get_current_user_id),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    agent_hash: Optional[str] = Query(None),
 ):
     """
     流式聊天 - 调用统一的 ChatService
@@ -101,8 +102,8 @@ async def chat_stream(
     import logging
     logger = logging.getLogger(__name__)
     logger.info(f"[chat_stream] user_id={user_id}, content={request.content[:50]}..., image_url={request.image_url[:50] if request.image_url else None}...")
-    
-    chat_service = WebChannelService(db, user_id=user_id)
+
+    chat_service = WebChannelService(db, user_id=user_id, agent_hash=agent_hash)
 
     return StreamingResponse(
         chat_service.chat_stream(request.content, request.session_id, request.image_url, request.file_path, request.file_name),

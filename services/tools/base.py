@@ -44,6 +44,7 @@ class Step:
     tool_result: Optional[str] = None  # 工具执行结果
     metadata: Optional[Dict] = None  # 额外元数据（如搜索查询标识符）
     reasoning: Optional[str] = None  # 深度思考的推理过程文本
+    tool_call_id: Optional[str] = None  # 工具调用 ID（用于关联 tool_call ↔ tool_result 写入 ChatHistory）
 
 
 # 默认配置

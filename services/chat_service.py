@@ -17,6 +17,7 @@
 """
 
 import asyncio
+import json
 import logging
 import time
 import warnings
@@ -40,7 +41,7 @@ logger = logging.getLogger(__name__)
 
 # VFS 文件内容缓存 { path: (content, expiry_timestamp) }
 # 避免每次对话都从 COS 重新读取静态文件
-_VFS_FILE_CACHE: Dict[str, tuple] = {}
+_VFS_FILE_CACHE: Dict[str, tuple] = {}  # key="{agent_hash}:{path}"
 _VFS_CACHE_TTL = 60  # 缓存存活秒数
 
 
@@ -86,6 +87,17 @@ def _has_meaningful_content(text: str) -> bool:
     return len(content_lines) > 0
 
 
+class NoReplyError(Exception):
+    """群聊模式专用：Agent 决定本轮不回复（NO_REPLY）
+
+    由 GroupDispatchService 捕获以跳过本轮。
+    """
+    def __init__(self, agent_hash: str, group_id: str):
+        self.agent_hash = agent_hash
+        self.group_id = group_id
+        super().__init__(f"Agent {agent_hash} returned NO_REPLY in group {group_id}")
+
+
 class ChatService:
     """聊天业务服务 - 渠道无关"""
 
@@ -96,6 +108,7 @@ class ChatService:
         session_id: Optional[str] = None,
         session_reset_at: Optional[datetime] = None,
         pre_process_hook: Optional[Callable[[str, Dict, str], Awaitable[Optional[str]]]] = None,
+        group_id: Optional[str] = None,
     ):
         """
         初始化聊天服务
@@ -107,17 +120,22 @@ class ChatService:
             session_reset_at: 会话切割时间（WeChat 新会话用）
             pre_process_hook: 前置钩子 async (channel, meta, text) -> str|None
                               None=继续, ""=静默终止, "文本"=回复并跳过LLM
+            group_id: 群组 ID（V2 群聊模式；设置后从 GroupMessage 拉上下文，回复双写）
         """
         self.agent_hash = agent_hash
         self.channel = channel
         self.session_id = session_id
         self.session_reset_at = session_reset_at
         self.pre_process_hook = pre_process_hook
+        self.group_id = group_id
         self._agent_status = None
         self._user_id = None
 
-        # 内部组件
-        self.tools = AgentToolsService(agent_hash)
+        # 内部组件（group_id 注入到 tools 以支持 /mnt/group/ 路径解析）
+        if group_id:
+            self.tools = AgentToolsService(agent_hash=agent_hash, group_id=group_id)
+        else:
+            self.tools = AgentToolsService(agent_hash=agent_hash)
         self.executor = AgentExecutor(agent_hash, self.tools)
         self.workspace_root = get_agent_workspace_root(agent_hash)
 
@@ -140,6 +158,11 @@ class ChatService:
         self._user_profile_last_extract_idx: int = 0
         self._user_profile_last_extract_time: float = 0
         self._user_profile_tool_calls_since: int = 0
+
+    @property
+    def is_group_mode(self) -> bool:
+        """是否群聊模式（V2）"""
+        return bool(self.group_id)
 
     def _check_agent_status(self) -> str:
         """检查 Agent 状态（懒加载）"""
@@ -274,7 +297,10 @@ class ChatService:
             # ⑧ 调用 AI 进行对话
             _t_ai = time.time()
             full_response = ""
-            async for event in self._stream_ai_response(messages):
+            # 结构化事件列表（用于 ChatHistory 持久化，区分纯文本 vs 工具调用 vs 工具结果）
+            # 每项: {"role": "assistant"|"tool", "content": str, "tool_call_id"?, "tool_name"?, "tool_args"?}
+            structured_events: List[Dict[str, Any]] = []
+            async for event in self._stream_ai_response(messages, structured_events):
                 if event.type == ChatEventType.TEXT:
                     full_response += event.content
                 yield event
@@ -284,13 +310,18 @@ class ChatService:
             _t_save = time.time()
             self._save_conversation(
                 actual.text, full_response,
+                structured_events=structured_events,
                 meta=actual.meta if actual.meta else None,
                 attachments=actual.attachments if actual.attachments else None,
             )
             logger.warning(f"[TIMING] save_conversation: {time.time()-_t_save:.1f}s")
 
             # ⑨ 会话记忆后台提取（非阻塞）
-            if settings.SESSION_MEMORY_ENABLED:
+            # IM Agent 关闭 session memory（会自我强化："辩论已结束"写入后又读到）
+            is_im_agent = (
+                self.channel == "group" and not self.group_id
+            )
+            if not is_im_agent and settings.SESSION_MEMORY_ENABLED:
                 asyncio.create_task(self._maybe_extract_session_memory())
 
             # ⑩ 用户画像后台提取（非阻塞）
@@ -313,7 +344,78 @@ class ChatService:
             )
         finally:
             track_end(_req_id)
-    
+
+    async def chat_to_completion(
+        self,
+        user_input: str = "",
+        input: Optional[ChatInput] = None,
+        no_reply_check: bool = True,
+    ) -> str:
+        """
+        V2 群聊模式专用：消费 chat() 事件流，返回最终纯文本。
+
+        - 在 group_mode 下：检测 NO_REPLY → raise NoReplyError
+        - 否则返回完整回复文本（含 SILENT 由调用方自行判断）
+        - 群聊模式下 user_input 通常是触发本轮的"最新消息"；如果不传，
+          ChatService 会自己从 GroupMessage 拉历史。
+        """
+        from models.chat_input import Attachment as _A
+        if input is None and user_input:
+            input = ChatInput(text=user_input, attachments=[], meta={"group_id": self.group_id} if self.group_id else {})
+        elif input is None and not user_input:
+            # 群聊模式：可能从历史自动取最近一条作为触发输入
+            latest = self._get_latest_group_message()
+            if latest:
+                input = ChatInput(text=latest, attachments=[], meta={"group_id": self.group_id})
+
+        full_text = ""
+        error_msg = None
+        try:
+            async for event in self.chat(input=input):
+                if event.type == ChatEventType.TEXT:
+                    full_text += event.content or ""
+                elif event.type == ChatEventType.ERROR:
+                    error_msg = event.error_message
+                elif event.type == ChatEventType.DONE:
+                    # DONE 事件携带完整文本
+                    if event.content:
+                        full_text = event.content
+        except NoReplyError:
+            raise
+        except Exception as e:
+            logger.warning(f"[ChatService] chat_to_completion error: {e}", exc_info=True)
+            return ""
+
+        if error_msg:
+            logger.warning(f"[ChatService] chat_to_completion got ERROR event: {error_msg}")
+            return ""
+
+        full_text = (full_text or "").strip()
+
+        # 群聊模式：检测 NO_REPLY
+        if no_reply_check and self.is_group_mode:
+            from services.group_service import NO_REPLY_MAGIC
+            if full_text == NO_REPLY_MAGIC:
+                raise NoReplyError(self.agent_hash, self.group_id or "")
+
+        return full_text
+
+    def _get_latest_group_message(self) -> str:
+        """V2 群聊：取最新一条非本 Agent 的群消息作为本轮触发输入"""
+        try:
+            from models.group import GroupMessage
+            with get_session() as db:
+                msg = (
+                    db.query(GroupMessage)
+                    .filter(GroupMessage.group_id == self.group_id)
+                    .order_by(GroupMessage.created_at.desc())
+                    .first()
+                )
+                if msg:
+                    return msg.content or ""
+        except Exception as e:
+            logger.debug(f"[ChatService] _get_latest_group_message failed: {e}")
+        return ""
     async def build_system_prompt(self) -> str:
         """构建系统提示词，优先使用 AgentProfile.system_prompt，否则从 VFS 读取"""
 
@@ -350,6 +452,13 @@ class ChatService:
                 AgentProfile.hash == self.agent_hash
             ).first()
             if profile and profile.system_prompt:
+                # V2 群聊模式：追加渠道上下文说明
+                if self.is_group_mode:
+                    return (
+                        _time_header + "\n\n" + profile.system_prompt
+                        + "\n\n【当前渠道】群组聊天模式（group_id=" + (self.group_id or "") + "）。"
+                        "所有传入消息都来自群聊上下文（用户和其他 Agent），请以群聊身份回复。"
+                    )
                 return _time_header + "\n\n" + profile.system_prompt
 
         # 2. 回退到 VFS 读取 - 所有文件并行读取
@@ -436,7 +545,11 @@ class ChatService:
 
         # 会话笔记（自动记录，按需读取）
         session_note_path = "/workspace/agent/session_memory.md"
-        if self._session_memory_initialized or settings.SESSION_MEMORY_ENABLED:
+        # IM Agent 的 session memory 会自我强化（"辩论已结束"写入后又读到），暂时注释
+        is_im_agent = (
+            self.channel == "group" and not self.group_id
+        )
+        if not is_im_agent and (self._session_memory_initialized or settings.SESSION_MEMORY_ENABLED):
             parts.append(f"【会话笔记】\n当前会话有自动记录的笔记文件，包含近期重要信息。如需了解会话上下文，请使用 file_read 读取 `{session_note_path}`。")
 
         # 平台信息
@@ -542,14 +655,15 @@ class ChatService:
         return None
 
     async def _read_vfs_files_async(self, *paths: str) -> Dict[str, Optional[str]]:
-        """并行读取多个 VFS 文件（带 60s TTL 缓存）"""
+        """并行读取多个 VFS 文件（带 60s TTL 缓存，key 含 agent_hash 防跨 Agent 泄露）"""
         now = time.time()
 
-        # 先检查缓存
+        # 先检查缓存（带 agent_hash 前缀，防止不同 Agent 读到对方的文件）
         result = {}
         uncached = []
         for p in paths:
-            cached = _VFS_FILE_CACHE.get(p)
+            cache_key = f"{self.agent_hash}:{p}"
+            cached = _VFS_FILE_CACHE.get(cache_key)
             if cached and cached[1] > now:
                 result[p] = cached[0]
             else:
@@ -579,7 +693,8 @@ class ChatService:
                     resp.raise_for_status()
                     content = resp.text.strip()
                     if content:
-                        _VFS_FILE_CACHE[path] = (content, now + _VFS_CACHE_TTL)
+                        cache_key = f"{self.agent_hash}:{path}"
+                        _VFS_FILE_CACHE[cache_key] = (content, now + _VFS_CACHE_TTL)
                         return (path, content)
             except Exception as e:
                 logger.debug(f"[ChatService] VFS read error for {path}: {e}")
@@ -594,8 +709,14 @@ class ChatService:
         """从 ChatHistory 表加载对话历史，注入到 ChatContext
 
         WeChat 渠道过渡期：ChatHistory 为空时 fallback 到 WeChatMessage。
+        V2 群聊模式：从 GroupMessage 拉群聊上下文（所有消息标 role=user）。
         """
         try:
+            # V2 群聊模式：从 GroupMessage 加载群聊上下文
+            if self.is_group_mode:
+                await self._load_history_from_group_messages()
+                return
+
             with get_session() as db:
                 query = db.query(ChatHistory).filter(
                     ChatHistory.user_id == int(self.user_id),
@@ -609,15 +730,79 @@ class ChatService:
 
                 records = query.order_by(ChatHistory.created_at.asc()).limit(200).all()
                 if records:
-                    self.context.history = [
-                        {"role": r.role, "content": r.content}
-                        for r in records
-                    ]
+                    history: List[Dict[str, Any]] = []
+                    for r in records:
+                        # 加载 tool 字段（仅在新版（带 tool_call_id 等）记录时使用）
+                        if getattr(r, "tool_call_id", None) or getattr(r, "tool_name", None):
+                            history.append({
+                                "role": r.role,
+                                "content": r.content or "",
+                                "tool_call_id": r.tool_call_id,
+                                "tool_name": r.tool_name,
+                                "tool_args": r.tool_args,
+                            })
+                        else:
+                            history.append({
+                                "role": r.role,
+                                "content": r.content or "",
+                            })
+                    self.context.history = history
                 elif self.channel == "wechat":
                     # 过渡期 fallback：ChatHistory 尚无数据，从 WeChatMessage 读取
                     await self._load_history_from_wechat_messages(db)
         except Exception as e:
             logger.debug(f"[ChatService] Failed to load history: {e}")
+
+    async def _load_history_from_group_messages(self):
+        """V2 群聊模式：从 GroupMessage 加载群聊上下文
+
+        规则：所有群聊消息（用户/Agent）都标 role=user，让模型把它们视为「环境输入」。
+        自己在本群之前的回复通过 session_memory 注入 system prompt。
+        """
+        try:
+            from models.group import GroupMessage
+            with get_session() as db:
+                records = (
+                    db.query(GroupMessage)
+                    .filter(GroupMessage.group_id == self.group_id)
+                    .order_by(GroupMessage.created_at.asc())
+                    .limit(200)
+                    .all()
+                )
+                if not records:
+                    self.context.history = []
+                    return
+
+                # 加载 sender name 用于消息前缀
+                from models.database import AgentProfile as _AP
+                sender_hashes = {m.sender_hash for m in records if m.sender_hash}
+                agent_rows = db.query(_AP.hash, _AP.name).filter(_AP.hash.in_(sender_hashes)).all() if sender_hashes else []
+                hash_to_name = {h: n for h, n in agent_rows if n}
+
+                history = []
+                for m in records:
+                    content = m.content or ""
+                    # 加 sender 前缀便于 Agent 区分
+                    if m.sender_type == "user":
+                        prefix = "[用户]"
+                    elif m.sender_type == "agent":
+                        sname = hash_to_name.get(m.sender_hash, m.sender_hash or "?")
+                        prefix = f"[Agent {sname}]"
+                    else:
+                        prefix = f"[{m.sender_type}]"
+                    history.append({
+                        "role": "user",
+                        "content": f"{prefix} {content}".strip(),
+                        "_sender_type": m.sender_type,
+                        "_sender_hash": m.sender_hash,
+                    })
+                self.context.history = history
+                logger.info(
+                    f"[ChatService] Loaded {len(history)} group messages for group={self.group_id}"
+                )
+        except Exception as e:
+            logger.warning(f"[ChatService] Failed to load group history: {e}")
+            self.context.history = []
 
     async def _load_history_from_wechat_messages(self, db):
         """WeChat 渠道过渡期 fallback：从 WeChatMessage 读取历史并转换为 ChatHistory 格式"""
@@ -715,20 +900,35 @@ class ChatService:
         return text
 
     def _build_messages(
-        self, 
-        system_prompt: str, 
+        self,
+        system_prompt: str,
         user_input: str,
         image_url: Optional[str] = None
     ) -> List[Dict[str, Any]]:
-        """构建消息列表"""
-        messages = [{"role": "system", "content": system_prompt}]
-        
-        # 添加历史消息
-        messages.extend(self.context.history)
-        
-        # 添加用户消息
+        """构建消息列表
+
+        历史消息转换规则：
+        - role="user" → {"role": "user", "content": ...}
+        - role="assistant" + tool_name + tool_call_id → assistant 消息携带 tool_calls（OpenAI 格式）
+        - role="assistant"（无工具字段）→ {"role": "assistant", "content": ...}
+        - role="tool" → {"role": "tool", "tool_call_id": ..., "name": ..., "content": ...}
+        - 旧数据兼容：role="assistant" 且 content 含 "\\n[调用工具: ...]" / "\\n[结果: ...]" 标记时，
+          按行解析并拆分为若干条 LLM 消息（一条 assistant + tool_call、若干条 tool）。
+        """
+        messages: List[Dict[str, Any]] = [{"role": "system", "content": system_prompt}]
+
+        # 添加历史消息（按规则转换）
+        for h in self.context.history:
+            converted = self._convert_history_record(h)
+            if converted is None:
+                continue
+            if isinstance(converted, list):
+                messages.extend(converted)
+            else:
+                messages.append(converted)
+
+        # 添加当前用户消息
         if image_url:
-            # 多模态消息
             messages.append({
                 "role": "user",
                 "content": [
@@ -740,33 +940,217 @@ class ChatService:
             messages.append({"role": "user", "content": user_input})
 
         messages = self._inject_corrections(messages)
+        # 调试：记录完整 LLM 请求体
+        _debug = []
+        for msg in messages:
+            role = msg.get("role", "?")
+            content = msg.get("content", "")
+            if isinstance(content, str):
+                _debug.append(f"[{role}] {content[:500]}")
+            elif isinstance(content, list):
+                texts = [c.get("text","")[:200] for c in content if isinstance(c, dict)]
+                _debug.append(f"[{role}] multimodal: {' | '.join(texts)[:500]}")
+        logger.info(f"[LLM_FULL_REQUEST] agent={self.agent_hash} messages={json.dumps(_debug, ensure_ascii=False)[:3000]}")
         return messages
+
+    def _convert_history_record(self, h: Dict[str, Any]):
+        """把 ChatHistory 一行转换为 LLM 输入消息（可能返回 1 条或多条 LLM 消息，或 None 跳过）。
+
+        支持：
+        1. 新格式：role + (tool_call_id/tool_name/tool_args) 直接转换
+        2. 旧格式：role="assistant" 且 content 含 "[调用工具: ...]" / "[结果: ...]" 标记
+        """
+        role = h.get("role", "")
+        content = h.get("content", "") or ""
+
+        if role == "user":
+            return {"role": "user", "content": content}
+
+        if role == "tool":
+            return {
+                "role": "tool",
+                "tool_call_id": h.get("tool_call_id") or "",
+                "name": h.get("tool_name") or "",
+                "content": content,
+            }
+
+        if role == "assistant":
+            # 新格式：携带 tool_call 元数据 → 转为 tool_call 消息
+            tool_call_id = h.get("tool_call_id")
+            tool_name = h.get("tool_name")
+            tool_args_str = h.get("tool_args")
+            if tool_call_id or (tool_name and tool_args_str is not None):
+                try:
+                    args_obj = json.loads(tool_args_str) if tool_args_str else {}
+                except (json.JSONDecodeError, TypeError):
+                    args_obj = {}
+                msg: Dict[str, Any] = {
+                    "role": "assistant",
+                    "content": content or "",
+                    "tool_calls": [{
+                        "id": tool_call_id or f"call_{int(time.time()*1000)}",
+                        "type": "function",
+                        "function": {
+                            "name": tool_name or "",
+                            "arguments": json.dumps(args_obj, ensure_ascii=False),
+                        },
+                    }],
+                }
+                return msg
+
+            # 旧格式：content 中含 [调用工具: ...] / [结果: ...] 标记，解析拆分
+            if "[调用工具:" in content or "[结果:" in content:
+                return self._parse_legacy_assistant_content(content)
+
+            # 普通 assistant 文本
+            return {"role": "assistant", "content": content}
+
+        # 未知 role：跳过
+        return None
+
+    def _parse_legacy_assistant_content(self, content: str):
+        """解析旧格式的 assistant content（含 [调用工具: ...] / [结果: ...] 标记）
+
+        拆分为若干条 LLM 消息（可能为空数组）。
+        """
+        import re as _re
+        out: List[Dict[str, Any]] = []
+        # 标记模式：
+        #   [调用工具: name({"k": "v"})]
+        #   [结果: <text>]
+        _call_pat = _re.compile(r'\[调用工具:\s*([\w_]+)\((.*?)\)\]', _re.DOTALL)
+        _result_pat = _re.compile(r'\[结果:\s*(.*?)\]', _re.DOTALL)
+        _marker_pat = _re.compile(r'\[调用工具:.*?\]|\[结果:.*?\]', _re.DOTALL)
+
+        # 逐段切分：纯文本 / 工具调用 / 工具结果
+        cursor = 0
+        current_text_parts: List[str] = []
+        for m in _marker_pat.finditer(content):
+            # 段间纯文本先 flush
+            between = content[cursor:m.start()]
+            current_text_parts.append(between)
+            text_so_far = "".join(current_text_parts).strip()
+            chunk = m.group(0)
+            if chunk.startswith("[调用工具:"):
+                cm = _call_pat.match(chunk)
+                if cm:
+                    fn = cm.group(1)
+                    args_str = cm.group(2).strip()
+                    try:
+                        args_obj = json.loads(args_str) if args_str else {}
+                    except json.JSONDecodeError:
+                        args_obj = {"_raw": args_str}
+                    # 累积的纯文本先 flush 为一条 assistant 消息
+                    if text_so_far:
+                        out.append({"role": "assistant", "content": text_so_far})
+                        current_text_parts = []
+                    out.append({
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [{
+                            "id": f"legacy_{m.start()}",
+                            "type": "function",
+                            "function": {
+                                "name": fn,
+                                "arguments": json.dumps(args_obj, ensure_ascii=False),
+                            },
+                        }],
+                    })
+                cursor = m.end()
+            elif chunk.startswith("[结果:"):
+                rm = _result_pat.match(chunk)
+                if rm:
+                    result_text = rm.group(1).strip()
+                    # 工具调用前 flush 过的 assistant 文本不再重复；这里直接续上一条 assistant + tool_call
+                    # 因为旧格式是 assistant-text + tool_call + tool_result 的顺序；
+                    # 如果最后一条是 assistant tool_call 消息，就用它的 tool_call_id 关联
+                    tcid = f"legacy_{m.start()}"
+                    if (out and out[-1].get("role") == "assistant"
+                            and out[-1].get("tool_calls")):
+                        tcid = out[-1]["tool_calls"][0]["id"]
+                    out.append({
+                        "role": "tool",
+                        "tool_call_id": tcid,
+                        "name": (out[-1]["tool_calls"][0]["function"]["name"]
+                                 if (out and out[-1].get("tool_calls")) else ""),
+                        "content": result_text,
+                    })
+                cursor = m.end()
+        # 收尾
+        tail = content[cursor:]
+        if tail.strip():
+            current_text_parts.append(tail)
+        if current_text_parts:
+            tail_text = "".join(current_text_parts).strip()
+            if tail_text:
+                out.append({"role": "assistant", "content": tail_text})
+
+        if not out:
+            # 没有匹配到任何标记，整段当作 assistant 文本
+            return {"role": "assistant", "content": content}
+        return out
     
     async def _stream_ai_response(
-        self, 
-        messages: List[Dict[str, Any]]
+        self,
+        messages: List[Dict[str, Any]],
+        structured_events: Optional[List[Dict[str, Any]]] = None,
     ) -> AsyncGenerator[ChatEvent, None]:
-        """流式调用 AI 并处理工具调用"""
+        """流式调用 AI 并处理工具调用
+
+        Args:
+            messages: LLM 输入消息列表
+            structured_events: 输出参数，按出现顺序记录本轮 AI 输出的结构化事件
+                - {role: "assistant", content: str} — 流式文本片段
+                - {role: "assistant", content: "", tool_name, tool_args, tool_call_id} — 工具调用
+                - {role: "tool", content: str, tool_call_id, tool_name} — 工具结果
+                ChatHistory 持久化会按这些事件逐行入库，避免把工具调用/结果混入 assistant 文本。
+        """
         try:
             # 使用 AgentExecutor 进行对话（支持工具调用）
             response_text = ""
+            # 本地缓冲：当遇到工具调用/结果时，把已累积的纯文本 flush 成一行 assistant 记录
+            _pending_text_buf: List[str] = []
+            if structured_events is None:
+                structured_events = []
+
+            def _flush_text_buf():
+                """把累积的纯文本片段 flush 成一条 assistant 记录"""
+                if _pending_text_buf:
+                    txt = "".join(_pending_text_buf)
+                    _pending_text_buf.clear()
+                    if txt:
+                        structured_events.append({
+                            "role": "assistant",
+                            "content": txt,
+                        })
+
             async for step in self.executor.chat_with_tools(messages=messages):
                 if step.step_type == "token":
                     # 流式输出文本片段（真正的流式）
                     response_text += step.content
+                    _pending_text_buf.append(step.content)
                     yield ChatEvent(
                         type=ChatEventType.TEXT,
                         content=step.content
                     )
                 elif step.step_type == "pre_tool":
-                    # 工具调用前的思考
+                    # 工具调用前的思考（仅前端展示，不入库）
                     yield ChatEvent(
                         type=ChatEventType.PRE_TOOL,
                         content=step.content or ""
                     )
                 elif step.step_type == "tool_call":
-                    # 工具调用
+                    # 工具调用：先把已累积的纯文本 flush，再追加 tool_call 记录
                     self._session_memory_tool_calls_since += 1
+                    _flush_text_buf()
+                    _tc_args = step.tool_args if isinstance(step.tool_args, dict) else {}
+                    structured_events.append({
+                        "role": "assistant",
+                        "content": "",
+                        "tool_name": step.tool_name,
+                        "tool_args": json.dumps(_tc_args, ensure_ascii=False) if _tc_args else "",
+                        "tool_call_id": step.tool_call_id or "",
+                    })
                     yield ChatEvent(
                         type=ChatEventType.TOOL_CALL,
                         tool_name=step.tool_name,
@@ -774,7 +1158,13 @@ class ChatService:
                         content=step.content or ""
                     )
                 elif step.step_type == "tool_result":
-                    # 工具执行结果
+                    # 工具结果：追加 role=tool 记录（不混入 response_text 展示给用户）
+                    structured_events.append({
+                        "role": "tool",
+                        "content": step.tool_result or "",
+                        "tool_name": step.tool_name,
+                        "tool_call_id": step.tool_call_id or "",
+                    })
                     yield ChatEvent(
                         type=ChatEventType.TOOL_RESULT,
                         tool_name=step.tool_name,
@@ -785,6 +1175,7 @@ class ChatService:
                     # 最终响应（可能是工具超限时的提示）
                     if step.content and step.content.strip():
                         response_text += step.content
+                        _pending_text_buf.append(step.content)
                         yield ChatEvent(
                             type=ChatEventType.TEXT,
                             content=step.content
@@ -816,6 +1207,9 @@ class ChatService:
                         content=step.content
                     )
 
+            # 收尾：把最后未 flush 的纯文本追加为一行 assistant 记录
+            _flush_text_buf()
+
             # 注意：DONE 事件由 chat() 方法统一发送，避免重复
 
         except Exception as e:
@@ -826,13 +1220,29 @@ class ChatService:
             )
     
     def _save_conversation(self, user_input: str, response: str,
+                           structured_events: Optional[List[Dict[str, Any]]] = None,
                            meta: Optional[Dict] = None,
                            attachments: Optional[List] = None):
-        """保存对话记录到内存和数据库（单事务双行写入）"""
+        """保存对话记录到内存和数据库（V2：群聊模式双写到 GroupMessage + ChatHistory）
 
-        # 保存到内存
+        Args:
+            user_input: 用户输入文本
+            response: 拼装后的 assistant 纯文本（用于群聊展示 & 兼容老代码）
+            structured_events: AI 本轮的结构化事件列表，每条对应一行 ChatHistory：
+                - {"role": "assistant", "content": "..."} — 纯文本片段
+                - {"role": "assistant", "content": "", "tool_name", "tool_args", "tool_call_id"} — 工具调用
+                - {"role": "tool", "content": "...", "tool_call_id", "tool_name"} — 工具结果
+                若为空，回退到旧逻辑（单条 assistant + 混入工具标记的文本）。
+        """
+
+        # 保存到内存：把 user 消息和 structured_events 全部按顺序追加
         self.context.history.append({"role": "user", "content": user_input})
-        self.context.history.append({"role": "assistant", "content": response})
+        if structured_events:
+            for ev in structured_events:
+                self.context.history.append(dict(ev))
+        else:
+            # 兼容旧调用：回退到单条 assistant + response 文本
+            self.context.history.append({"role": "assistant", "content": response})
 
         # 限制历史长度
         if len(self.context.history) > 200 * 2:
@@ -866,7 +1276,15 @@ class ChatService:
         if attachments:
             _attachments_json = [a.dict() if hasattr(a, 'dict') else a for a in attachments]
 
-        # 保存到数据库（ChatHistory 表，单事务双行写入）
+        # V2 群聊模式：双写 GroupMessage + ChatHistory
+        if self.is_group_mode:
+            self._save_conversation_group_mode(
+                user_input, response, structured_events,
+                meta, attachments, _attachments_json
+            )
+            return
+
+        # 单聊模式：保存到数据库（ChatHistory 表）
         try:
             with get_session() as db:
                 user_msg = ChatHistory(
@@ -882,21 +1300,176 @@ class ChatService:
                 )
                 db.add(user_msg)
 
-                assistant_msg = ChatHistory(
-                    user_id=int(self.user_id),
-                    agent_hash=self.agent_hash,
-                    role="assistant",
-                    content=response,
-                    channel=self.channel,
-                    session_id=self.session_id,
-                    meta=meta,
-                )
-                db.add(assistant_msg)
+                if structured_events:
+                    # 多行写入：每条结构化事件对应一行 ChatHistory
+                    for ev in structured_events:
+                        _role = ev.get("role", "assistant")
+                        db.add(ChatHistory(
+                            user_id=int(self.user_id),
+                            agent_hash=self.agent_hash,
+                            role=_role,
+                            content=ev.get("content", "") or "",
+                            tool_call_id=ev.get("tool_call_id") or None,
+                            tool_name=ev.get("tool_name") or None,
+                            tool_args=ev.get("tool_args") or None,
+                            channel=self.channel,
+                            session_id=self.session_id,
+                            meta=meta,
+                        ))
+                else:
+                    # 兼容旧调用：单条 assistant 行（含工具标记的文本）
+                    db.add(ChatHistory(
+                        user_id=int(self.user_id),
+                        agent_hash=self.agent_hash,
+                        role="assistant",
+                        content=response,
+                        channel=self.channel,
+                        session_id=self.session_id,
+                        meta=meta,
+                    ))
 
                 db.commit()
-                logger.debug(f"[ChatService] Saved conversation: user_id={self.user_id}, agent_hash={self.agent_hash}")
+                logger.debug(
+                    f"[ChatService] Saved conversation: user_id={self.user_id}, "
+                    f"agent_hash={self.agent_hash}, "
+                    f"structured_events={len(structured_events) if structured_events else 0}"
+                )
         except Exception as e:
             logger.warning(f"[ChatService] Failed to save conversation to database: {e}")
+
+    def _save_conversation_group_mode(
+        self,
+        user_input: str,
+        response: str,
+        structured_events: Optional[List[Dict[str, Any]]] = None,
+        meta: Optional[Dict] = None,
+        attachments: Optional[List] = None,
+        _attachments_json: Optional[List] = None,
+    ):
+        """V2 群聊模式双写：GroupMessage（群可见）+ ChatHistory（个人历史）
+
+        注意：
+        - 工具调用结果只写 ChatHistory（个人历史），不写 GroupMessage
+        - Agent 的回复写 GroupMessage 让所有群成员可见
+        """
+        import uuid as _uuid
+        try:
+            from models.group import GroupMessage
+            with get_session() as db:
+                # 1. Agent 回复写入 GroupMessage（群可见）
+                # 注意：user_input 是触发本轮的最新消息——GroupMessage 已由 GroupDispatch 写入，
+                # 这里只追加 Agent 的回复。
+                if response:
+                    reply_mentions = []
+                    try:
+                        import re as _re
+                        at_names = _re.findall(r'@(\S+)', response)
+                        if at_names:
+                            # 查群成员名→hash 映射
+                            from models.group import GroupMember as _GM
+                            from models.database import AgentProfile as _AP
+                            members = db.query(_GM).filter(
+                                _GM.group_id == self.group_id,
+                                _GM.agent_hash != '',
+                            ).all()
+                            agent_hashes = [m.agent_hash for m in members]
+                            agent_rows = db.query(_AP.hash, _AP.name).filter(
+                                _AP.hash.in_(agent_hashes)
+                            ).all() if agent_hashes else []
+                            name_to_hash = {n: h for h, n in agent_rows if n}
+                            for n in at_names:
+                                h = name_to_hash.get(n)
+                                if h and h not in reply_mentions and h != self.agent_hash:
+                                    reply_mentions.append(h)
+                    except Exception:
+                        pass
+
+                    agent_msg = GroupMessage(
+                        id=str(_uuid.uuid4()),
+                        group_id=self.group_id,
+                        sender_type="agent",
+                        sender_hash=self.agent_hash,
+                        content=response,
+                        message_type="text",
+                        attachments=None,
+                        mentions=reply_mentions,
+                        round=0,
+                        created_at=datetime.utcnow(),
+                    )
+                    db.add(agent_msg)
+
+                # 2. 工具调用结果/上下文写入 ChatHistory（个人历史）
+                # user 消息（触发本轮的输入）
+                user_msg = ChatHistory(
+                    user_id=int(self.user_id),
+                    agent_hash=self.agent_hash,
+                    role="user",
+                    content=user_input,
+                    channel=self.channel,
+                    session_id=self.session_id,
+                    meta={**(meta or {}), "group_id": self.group_id},
+                    attachments=_attachments_json,
+                )
+                db.add(user_msg)
+
+                # 3. assistant / tool 消息：按结构化事件逐行写入
+                if structured_events:
+                    for ev in structured_events:
+                        _role = ev.get("role", "assistant")
+                        db.add(ChatHistory(
+                            user_id=int(self.user_id),
+                            agent_hash=self.agent_hash,
+                            role=_role,
+                            content=ev.get("content", "") or "",
+                            tool_call_id=ev.get("tool_call_id") or None,
+                            tool_name=ev.get("tool_name") or None,
+                            tool_args=ev.get("tool_args") or None,
+                            channel=self.channel,
+                            session_id=self.session_id,
+                            meta={**(meta or {}), "group_id": self.group_id},
+                        ))
+                else:
+                    # 兼容旧调用：单条 assistant 行
+                    db.add(ChatHistory(
+                        user_id=int(self.user_id),
+                        agent_hash=self.agent_hash,
+                        role="assistant",
+                        content=response,
+                        channel=self.channel,
+                        session_id=self.session_id,
+                        meta={**(meta or {}), "group_id": self.group_id},
+                    ))
+
+                db.commit()
+                logger.debug(
+                    f"[ChatService] Group-mode dual-write: group={self.group_id} "
+                    f"agent={self.agent_hash} response_len={len(response)} "
+                    f"structured_events={len(structured_events) if structured_events else 0}"
+                )
+
+                # 4. WS push 通知（fire-and-forget）
+                if response:
+                    try:
+                        import asyncio as _aio
+                        from routers.desktop_ws import manager as _ws_manager
+                        push_payload = {
+                            "type": "group_message",
+                            "group_id": self.group_id,
+                            "sender_type": "agent",
+                            "sender_hash": self.agent_hash,
+                            "content": response,
+                            "timestamp": int(__import__('time').time()),
+                        }
+                        # 在事件循环中调度
+                        try:
+                            loop = _aio.get_event_loop()
+                            loop.create_task(_ws_manager.send(push_payload))
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
+        except Exception as e:
+            logger.warning(f"[ChatService] Group-mode save failed: {e}", exc_info=True)
 
     async def _maybe_extract_session_memory(self):
         """后置钩子：会话记忆提取（非阻塞，后台执行）"""

@@ -18,6 +18,11 @@ from models.database import SessionLocal, AgentProfile
 from models.group import Group, GroupMember, GroupMessage
 from config import settings
 from services.message_compactor import estimate_tokens
+# V2 IM Agent dispatch
+try:
+    from services.interrupt_controller import InterruptController, Interrupt, InterruptType, Priority
+except ImportError:
+    InterruptController = Interrupt = InterruptType = Priority = None
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +69,11 @@ GROUP_ALLOWED_TOOLS: Set[str] = {
     "parse_file",
     # TOTP 生成（只读计算）
     "generate_totp",
+    # TODO 管理（Agent 自我跟踪任务进度）
+    "todo_create", "todo_list", "todo_update", "todo_complete",
+    # ReplyBuffer（Agent V2 — IM Agent 必需，群聊 Classic 也支持）
+    "reply_buffer_write", "reply_buffer_flush", "reply_buffer_cancel",
+    "reply_buffer_stash", "reply_buffer_pop", "reply_buffer_edit",
 }
 
 
@@ -119,16 +129,90 @@ class GroupDispatchService:
                 f"content_len={len(content)}, mentions={mentions}"
             )
 
-            # 2. Dispatch to members (fire-and-forget)
-            asyncio.create_task(
-                self.dispatch_to_members(group_id, round=0, exclude=sender_hash)
-            )
+            # 2. Dispatch to members
+            #    - Classic Agents → via async dispatch_to_members
+            #    - IM Agents → await ChatService directly
+            await self._dispatch_after_message(group_id, sender_hash)
 
             return msg_id
         finally:
             db.close()
 
     # ========== Dispatch ==========
+
+    async def _dispatch_after_message(self, group_id: str, sender_hash: str):
+        """消息入队后分发成员。IM Agent await 回复 (create_task bug workaround)。
+        - Classic Agent -> dispatch_to_members (fire-and-forget)
+        - IM Agent -> await ChatService 回复
+        """
+        logger.info(f"[DispatchEnter] group={group_id} sender_hash={sender_hash}")
+        try:
+            from models.database import SessionLocal, AgentProfile
+            from models.group import GroupMember
+            db = SessionLocal()
+            try:
+                members = db.query(GroupMember).filter(
+                    GroupMember.group_id == group_id,
+                    GroupMember.agent_hash != '',
+                    GroupMember.agent_hash != sender_hash,
+                ).all()
+                im_hashes = []
+                classic_hashes = []
+                for m in members:
+                    agent = db.query(AgentProfile).filter(
+                        AgentProfile.hash == m.agent_hash
+                    ).first()
+                    amode = getattr(agent, 'agent_mode', 'classic') if agent else '?'
+                    logger.info(f"[DispatchCheck] member={m.agent_hash} agent_found={agent is not None} mode={amode}")
+                    if agent and amode == 'im':
+                        im_hashes.append(m.agent_hash)
+                    else:
+                        classic_hashes.append(m.agent_hash)
+
+                # 查询最新消息内容（作为 trigger_content）
+                latest_msg = db.query(GroupMessage).filter(
+                    GroupMessage.group_id == group_id
+                ).order_by(GroupMessage.created_at.desc()).first()
+                trigger_content = latest_msg.content[:500] if latest_msg else ""
+
+                # Fix #1: 发送者若为 Agent，用「哈希（昵称）」称呼；用户仍用「用户」
+                if sender_hash:
+                    _sender_profile = db.query(AgentProfile).filter(
+                        AgentProfile.hash == sender_hash
+                    ).first()
+                    trigger_sender = (
+                        f"{sender_hash}（{_sender_profile.name}）"
+                        if _sender_profile and _sender_profile.name else sender_hash
+                    )
+                else:
+                    trigger_sender = "用户"
+            finally:
+                db.close()
+
+            # IM Agents → dispatch IRQ_MESSAGE 给所有 Agent（buffer 原子性保证时序）
+            if im_hashes:
+                ic = InterruptController.instance()
+                for ah in im_hashes:
+                    ic.dispatch(Interrupt(
+                        irq_type=InterruptType.MESSAGE,
+                        agent_hash=ah,
+                        priority="high",
+                        payload={
+                            "group_id": group_id,
+                            "channel": "group",
+                            "trigger_content": trigger_content,
+                            "trigger_sender": trigger_sender,
+                        },
+                    ))
+                logger.info(f"[Dispatch] IM dispatch IRQ: {len(im_hashes)} agents")
+
+            # Classic Agents → async dispatch
+            if classic_hashes:
+                asyncio.create_task(
+                    self.dispatch_to_members(group_id, round=0, exclude=sender_hash)
+                )
+        except Exception as e:
+            logger.error(f"[GroupDispatch] _dispatch_after_message error: {e}")
 
     async def dispatch_to_members(
         self,
@@ -258,135 +342,101 @@ class GroupDispatchService:
     # ========== Agent Reply ==========
 
     async def agent_reply(self, agent_hash: str, group_id: str, round: int):
-        """Generate and save an agent reply for one member."""
+        """V2 重构：GroupDispatch 不做回复逻辑，只做调度编排。
+
+        每个 Agent 的回复走 ChatService.chat_to_completion(group_id=...)：
+        - ChatService 内部处理 system prompt、工具调用、个人历史（ChatHistory）
+        - ChatService 内部完成 GroupMessage + ChatHistory 双写
+        - 检测到 NO_REPLY 时 raise NoReplyError → 跳过本轮
+        - SILENT 仍由本方法检测（写回 GroupMember.is_silent 标志）
+
+        Returns:
+            None（异常向上抛）
+        """
         task_key = f"{group_id}:{agent_hash}:{round}"
         try:
-            logger.info(f"[GroupDispatch] agent_reply agent={agent_hash} group={group_id} round={round}")
+            logger.info(
+                f"[GroupDispatch V2] agent_reply agent={agent_hash} "
+                f"group={group_id} round={round}"
+            )
 
-            db = SessionLocal()
+            # 1. 委托给 ChatService（V2 群聊模式）
             try:
-                # Build context
-                context_messages, persona = self.build_context(agent_hash, group_id)
+                from services.chat_service import ChatService, NoReplyError
+                chat = ChatService(
+                    agent_hash=agent_hash,
+                    channel="group",
+                    group_id=group_id,
+                )
+                response = await chat.chat_to_completion()
+            except NoReplyError:
+                # NO_REPLY：本轮不回复，但继续调度下一轮（防止链条断裂）
+                logger.info(
+                    f"[GroupDispatch V2] agent={agent_hash} returned NO_REPLY, skipping round"
+                )
+                asyncio.create_task(
+                    self.dispatch_to_members(group_id, round=round + 1, exclude=agent_hash)
+                )
+                return
+            except Exception as e:
+                logger.error(
+                    f"[GroupDispatch V2] ChatService failed for agent={agent_hash} "
+                    f"group={group_id}: {e}", exc_info=True
+                )
+                return
 
-                if not context_messages:
-                    logger.warning(f"[GroupDispatch] No context for agent={agent_hash}, skipping")
-                    return
+            if not response:
+                logger.info(
+                    f"[GroupDispatch V2] agent={agent_hash} got empty response, skipping"
+                )
+                asyncio.create_task(
+                    self.dispatch_to_members(group_id, round=round + 1, exclude=agent_hash)
+                )
+                return
 
-                # 先尝试走 chat_with_tools（带 session memory）；失败/超时则降级到纯文本
-                response: Optional[str] = None
-                used_tools = False
+            # 2. SILENT 信号检测（ChatService 已写入 GroupMessage，此处只需更新 member 标志）
+            if response.strip() == SILENT_MAGIC:
+                db = SessionLocal()
                 try:
-                    response, used_tools = await self._call_llm_with_tools(
-                        agent_hash, group_id, context_messages, persona
-                    )
-                except Exception as e:
-                    logger.warning(
-                        f"[GroupDispatch] tool path failed for agent={agent_hash}, "
-                        f"falling back to plain text: {e}"
-                    )
-                    response = None
-
-                if response is None:
-                    # Fallback: 原纯文本路径
-                    prompt = self._build_group_prompt(agent_hash, group_id, context_messages, persona)
-                    response = await self._call_llm(prompt, agent_hash)
-
-                if not response:
-                    logger.info(f"[GroupDispatch] agent={agent_hash} got empty response, skipping")
-                    asyncio.create_task(
-                        self.dispatch_to_members(group_id, round=round + 1, exclude=agent_hash)
-                    )
-                    return
-
-                # 记录使用了工具（用于后续扩展如统计）
-                if used_tools:
-                    logger.info(f"[GroupDispatch] agent={agent_hash} replied with tool assistance")
-
-                # Check NO_REPLY / SILENT signal
-                if response.strip() == SILENT_MAGIC:
-                    # SILENT: 保持沉默，本轮不回复，标记 silent，但继续调度下一轮
                     member = (
                         db.query(GroupMember)
-                        .filter(GroupMember.group_id == group_id, GroupMember.agent_hash == agent_hash)
+                        .filter(
+                            GroupMember.group_id == group_id,
+                            GroupMember.agent_hash == agent_hash,
+                        )
                         .first()
                     )
                     if member:
                         member.is_silent = True
                         db.commit()
-                    logger.info(f"[GroupDispatch] agent={agent_hash} returned SILENT, marked silent")
-                    asyncio.create_task(
-                        self.dispatch_to_members(group_id, round=round + 1, exclude=agent_hash)
-                    )
-                    return
-
-                if response.strip() == NO_REPLY_MAGIC:
-                    # NO_REPLY: 本轮不回复，但继续调度下一轮（防止链条断裂）
-                    logger.info(f"[GroupDispatch] agent={agent_hash} returned NO_REPLY, skipping round")
-                    asyncio.create_task(
-                        self.dispatch_to_members(group_id, round=round + 1, exclude=agent_hash)
-                    )
-                    return
-
-                # 从回复中提取 @{name} 自动转为 mentions
-                reply_mentions: List[str] = []
-                try:
-                    import re as _re
-                    at_names = _re.findall(r'@(\S+)', response)
-                    if at_names:
-                        # 查群成员名→hash 映射
-                        name_to_hash = {}
-                        member_list = db.query(GroupMember).filter(
-                            GroupMember.group_id == group_id,
-                            GroupMember.agent_hash != '',
-                        ).all()
-                        agent_hashes = [m.agent_hash for m in member_list]
-                        agent_rows = db.query(AgentProfile.hash, AgentProfile.name).filter(
-                            AgentProfile.hash.in_(agent_hashes)
-                        ).all()
-                        for h, n in agent_rows:
-                            if n:
-                                name_to_hash[n] = h
-                        for n in at_names:
-                            h = name_to_hash.get(n)
-                            if h and h not in reply_mentions and h != agent_hash:
-                                reply_mentions.append(h)
-                except Exception:
-                    pass
-
-                # Save reply as GroupMessage
-                msg_id = str(_uuid.uuid4())
-                reply_msg = GroupMessage(
-                    id=msg_id,
-                    group_id=group_id,
-                    sender_type="agent",
-                    sender_hash=agent_hash,
-                    content=response,
-                    message_type="text",
-                    attachments=None,
-                    mentions=reply_mentions,
-                    round=round,
-                    created_at=datetime.utcnow(),
+                finally:
+                    db.close()
+                logger.info(
+                    f"[GroupDispatch V2] agent={agent_hash} returned SILENT, marked silent"
                 )
-                db.add(reply_msg)
-                db.commit()
-
-                logger.info(f"[GroupDispatch] agent={agent_hash} replied in group={group_id}, msg_id={msg_id}")
-
-                # WS push to clients (fire-and-forget)
-                asyncio.create_task(self._push_to_clients(group_id, msg_id, agent_hash, response))
-
-                # Continue dispatch chain
                 asyncio.create_task(
                     self.dispatch_to_members(group_id, round=round + 1, exclude=agent_hash)
                 )
-            finally:
-                db.close()
+                return
+
+            # 3. 正常回复（ChatService 已完成双写：GroupMessage + ChatHistory）
+            # 此处只需调度下一轮
+            logger.info(
+                f"[GroupDispatch V2] agent={agent_hash} replied in group={group_id}, "
+                f"response_len={len(response)}"
+            )
+            asyncio.create_task(
+                self.dispatch_to_members(group_id, round=round + 1, exclude=agent_hash)
+            )
 
         except asyncio.CancelledError:
-            logger.info(f"[GroupDispatch] Task {task_key} cancelled")
+            logger.info(f"[GroupDispatch V2] Task {task_key} cancelled")
             raise
         except Exception as e:
-            logger.error(f"[GroupDispatch] agent_reply error: agent={agent_hash} group={group_id} {e}", exc_info=True)
+            logger.error(
+                f"[GroupDispatch V2] agent_reply error: agent={agent_hash} "
+                f"group={group_id} {e}", exc_info=True
+            )
         finally:
             self._running_tasks.pop(task_key, None)
 
@@ -501,10 +551,18 @@ class GroupDispatchService:
         lines.append("3. 可以适当发散，但不要过度偏离用户给出的任务和讨论主线")
         lines.append("   如果讨论进入死胡同（技术细节钻牛角尖、反复纠结同一问题等），")
         lines.append("   请主动将注意力拉回核心目标")
-        lines.append("4. 回复NO_REPLY仅跳过本轮，下轮仍可被唤醒")
-        lines.append("5. 回复SILENT则标记为静默，后续不再唤醒——除非被 @ 点名")
-        lines.append("   静默后错过若干条新消息将自动解除沉默，你也可以重新回复SILENT续期")
-        lines.append("6. 否则，请以你的角色身份自然回复，不要声明你的思考过程")
+        lines.append("4. 群聊中保持简洁——几句话说明重点即可")
+        lines.append("   如果要说的话超过 100 字，优先用 file_write 写到文件里")
+        lines.append("   不需要在群里重复确认共识，说一句\"已确认\"就够了")
+        lines.append("5. 回复 SILENT = 你的工作已经完成并通过 file_write 保存到了 VFS")
+        lines.append("   必须先调用 file_write 把稿件写入 VFS，再回复 SILENT")
+        lines.append("   如果还在工作中，回复 NO_REPLY 跳过本轮")
+        lines.append("   已经 SILENT 后如果被 @ 点名，必须回复")
+        lines.append("6. 不要对纯确认/总结类消息额外回复")
+        lines.append("   如果上一条消息只是某人同意共识或重复已有结论，你不需要回复")
+        lines.append("   讨论中有新进展或新议题时才发言")
+        lines.append("   你可以在后台通过 todo_list 工具管理自己的进度")
+        lines.append("7. 否则，请以你的角色身份自然回复，不要声明你的思考过程")
 
         return "\n".join(lines)
 
@@ -749,11 +807,19 @@ class GroupDispatchService:
         lines.append("2. 对于@类消息，如果你未被@且消息也与你的专业领域关系不大")
         lines.append("   （包括需要别人先完成前置工作才轮到你），建议回复NO_REPLY")
         lines.append("3. 可以适当发散，但不要过度偏离用户给出的任务和讨论主线")
-        lines.append("4. 回复NO_REPLY仅跳过本轮，下轮仍可被唤醒")
-        lines.append("5. 回复SILENT则标记为静默，后续不再唤醒——除非被 @ 点名")
-        lines.append("   静默后错过若干条新消息将自动解除沉默，你也可以重新回复SILENT续期")
-        lines.append("6. 否则，请以你的角色身份自然回复，不要声明你的思考过程")
-        lines.append("7. 仅在确实需要实时数据或文件内容时才调用工具；闲聊/问候/已知信息直接回复")
+        lines.append("4. 群聊中保持简洁——几句话说明重点即可")
+        lines.append("   如果要说的话超过 100 字，优先用 file_write 写到文件里")
+        lines.append("   不需要在群里重复确认共识，说一句\"已确认\"就够了")
+        lines.append("5. 回复 SILENT = 你的工作已经完成并通过 file_write 保存到了 VFS")
+        lines.append("   必须先调用 file_write 把稿件写入 VFS，再回复 SILENT")
+        lines.append("   如果还在工作中，回复 NO_REPLY 跳过本轮")
+        lines.append("   已经 SILENT 后如果被 @ 点名，必须回复")
+        lines.append("6. 不要对纯确认/总结类消息额外回复")
+        lines.append("   如果上一条消息只是某人同意共识或重复已有结论，你不需要回复")
+        lines.append("   讨论中有新进展或新议题时才发言")
+        lines.append("   你可以在后台通过 todo_list 工具管理自己的进度")
+        lines.append("7. 否则，请以你的角色身份自然回复，不要声明你的思考过程")
+        lines.append("8. 仅在确实需要实时数据或文件内容时才调用工具；闲聊/问候/已知信息直接回复")
         lines.append("")
         return "\n".join(lines)
     # ========== Tool Execution (group-scoped) ==========

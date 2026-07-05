@@ -366,13 +366,24 @@ class ChatHistory(Base):
     __tablename__ = "chat_history"
     __table_args__ = (
         Index("idx_chat_history_agent_hash", "agent_hash"),
+        # 复合索引：按 (agent_hash, channel, session_id, created_at) 加速历史加载
+        Index("idx_chat_history_load", "agent_hash", "channel", "session_id", "created_at"),
     )
 
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"), index=True)  # 所属用户（从 AgentProfile 获取）
     agent_hash = Column(String(4), nullable=False, index=True)  # Agent hash
-    role = Column(String(16), nullable=False)  # user/assistant
+    # role: "user" | "assistant" | "tool"
+    # - "user": 用户消息
+    # - "assistant": LLM 输出的纯文本回复；如有 tool_call，会在同一行的 content+tool_name+tool_args+tool_call_id 字段中体现
+    # - "tool": 工具执行结果；通过 tool_call_id 关联回上一条 assistant 中的 tool_call
+    role = Column(String(16), nullable=False)  # user/assistant/tool
     content = Column(Text, nullable=False)
+    # === 工具调用相关字段（仅 role="assistant" 带 tool_call 或 role="tool" 时使用） ===
+    tool_call_id = Column(String(64), nullable=True, index=True)  # 工具调用 ID（关联 tool_call ↔ tool_result）
+    tool_name = Column(String(64), nullable=True)  # 工具名称（仅 assistant/tool 行有值）
+    tool_args = Column(Text, nullable=True)  # 工具参数 JSON 字符串（仅 assistant 行有值）
+    # === 其它字段 ===
     channel = Column(String(16), nullable=True, default=None)  # web/wechat/feishu 消息来源
     session_id = Column(String(32), nullable=True, index=True)  # wechat_main / web_sess_abc
     attachments = Column(JSON, nullable=True)  # [{type, url, mime_type, description}]

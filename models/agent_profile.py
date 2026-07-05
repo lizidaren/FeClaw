@@ -23,7 +23,8 @@ class AgentProfile(Base):
     status = Column(String(20), default="pending")  # pending | initialized | suspended
     is_default = Column(Boolean, default=False)  # 是否为用户的默认 Agent
     permissions = Column(String(255), default="chat,upload,session")  # 权限列表（逗号分隔）
-    agent_type = Column(String(20), default="classic")  # "classic" | "im"
+    agent_type = Column(String(20), default="classic")  # "classic" | "im"（旧字段，保留兼容）
+    agent_mode = Column(String(20), default="classic")  # V2: "classic" | "im" — Agent 自驱自主模式
     avatar_url = Column(String(512), nullable=True)  # Agent 头像 URL
     system_prompt = Column(Text, nullable=True)  # 自定义系统提示词模板
     parallel_sandbox = Column(Boolean, default=False)  # 是否允许多个并行 sandbox

@@ -189,6 +189,60 @@ class AgentCleanupService:
         if deleted_history > 0:
             logger.info(f"Deleted {deleted_history} chat history records for agent {agent_hash}")
 
+        # 10. AgentBuffer (reply buffer)
+        from models.agent_buffer import AgentBuffer
+        buffer_count = db.query(AgentBuffer).filter(
+            AgentBuffer.agent_hash == agent_hash
+        ).delete(synchronize_session=False)
+        results["agent_buffers"] = buffer_count
+        if buffer_count > 0:
+            logger.info(f"Deleted {buffer_count} agent buffers for agent {agent_hash}")
+
+        # 11. FePublish
+        from models.fehub import FePublish
+        pub_count = db.query(FePublish).filter(
+            FePublish.agent_hash == agent_hash
+        ).delete(synchronize_session=False)
+        results["fe_publishes"] = pub_count
+        if pub_count > 0:
+            logger.info(f"Deleted {pub_count} FePublish records for agent {agent_hash}")
+
+        # 12. ShareReference
+        from models.database import ShareReference
+        ref_count = db.query(ShareReference).filter(
+            ShareReference.agent_hash == agent_hash
+        ).delete(synchronize_session=False)
+        results["share_references"] = ref_count
+        if ref_count > 0:
+            logger.info(f"Deleted {ref_count} share references for agent {agent_hash}")
+
+        # 13. GroupMember
+        from models.group import GroupMember
+        gm_count = db.query(GroupMember).filter(
+            GroupMember.agent_hash == agent_hash
+        ).delete(synchronize_session=False)
+        results["group_members"] = gm_count
+        if gm_count > 0:
+            logger.info(f"Deleted {gm_count} group members for agent {agent_hash}")
+
+        # 14. GroupMoments
+        from models.group import GroupMoments
+        gmo_count = db.query(GroupMoments).filter(
+            GroupMoments.agent_hash == agent_hash
+        ).delete(synchronize_session=False)
+        results["group_moments"] = gmo_count
+        if gmo_count > 0:
+            logger.info(f"Deleted {gmo_count} group moments for agent {agent_hash}")
+
+        # 15. GroupMessage (sender_hash)
+        from models.group import GroupMessage
+        gmsg_count = db.query(GroupMessage).filter(
+            GroupMessage.sender_hash == agent_hash
+        ).delete(synchronize_session=False)
+        results["group_messages"] = gmsg_count
+        if gmsg_count > 0:
+            logger.info(f"Deleted {gmsg_count} group messages for agent {agent_hash}")
+
         return results
 
     def _cleanup_vfs_storage(

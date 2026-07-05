@@ -112,9 +112,12 @@ async def create_agent(
     """
     body = await request.json()
     name = body.get("name", "")
+    agent_mode = body.get("agent_mode", "classic")
+    if agent_mode not in ("classic", "im"):
+        raise HTTPException(status_code=400, detail={"message": "agent_mode must be 'classic' or 'im'"})
 
     try:
-        agent = agent_init_service.create_agent(db, user.id, name=name)
+        agent = agent_init_service.create_agent(db, user.id, name=name, agent_mode=agent_mode)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -374,50 +377,68 @@ async def delete_agent(
 ):
     """
     删除 Agent
-    
+
     完整清理流程：
-    1. 清理数据库相关记录（会话、消息、权限等）
+    1. 清理数据库相关记录（会话、消息、权限、群聊、buffer、发布等）
     2. 清理 VFS 存储数据（COS）
     3. 清理本地配置文件
     4. 删除 Agent 记录本身
-    
-    使用事务确保数据一致性
+    5. 关闭 WorkSession / 停止协处理器
+
+    仅允许删除当前用户拥有的 Agent（user_id 校验）。
+    使用事务确保数据一致性。
     """
     from services.agent_cleanup_service import agent_cleanup_service
-    
+
     agent = db.query(AgentProfile).filter(
         AgentProfile.id == agent_id,
         AgentProfile.user_id == user.id
     ).first()
 
     if agent is None:
-        raise HTTPException(status_code=404, detail="Agent not found")
-    
+        # 不区分"不存在"和"无权访问"，统一 403 避免越权探测
+        raise HTTPException(status_code=403, detail="Agent not found or access denied")
+
     agent_hash = agent.hash
-    logger.info(f"Starting agent deletion: id={agent_id}, hash={agent_hash}, user_id={user.id}")
+    agent_name = agent.name
+    logger.info(f"Starting agent deletion: id={agent_id}, hash={agent_hash}, name={agent_name}, user_id={user.id}")
 
     try:
         # 1. 清理所有资源（数据库记录、VFS、本地文件）
         cleanup_results = agent_cleanup_service.cleanup_agent(db, agent)
-        
+
         # 2. 删除 Agent 记录本身
         db.delete(agent)
         db.commit()
-        
-        logger.info(f"Agent deleted successfully: id={agent_id}, hash={agent_hash}, cleanup={cleanup_results}")
-        
+
+        # 3. 关闭该 Agent 的 WorkSession（如果存在）+ 停止协处理器（如果是 IM Agent）
+        try:
+            from services.interrupt_controller import (
+                get_work_session_manager, CoprocessorService,
+            )
+            get_work_session_manager().close(agent_hash)
+            await CoprocessorService.stop(agent_hash)
+        except Exception as e:
+            logger.warning(f"Agent V2 cleanup (WorkSession/Coprocessor) failed: {e}")
+
+        # 4. 扁平化所有清理计数到一个 cleaned 字典
+        db_records = cleanup_results.get("database_records", {})
+        vfs_files = cleanup_results.get("vfs_files", {})
+        cleaned = {
+            **db_records,
+            "vfs_files": vfs_files.get("deleted_files", 0),
+            "errors": cleanup_results.get("errors", []),
+        }
+
+        logger.info(f"Agent deleted successfully: id={agent_id}, hash={agent_hash}, cleaned={cleaned}")
+
         return JSONResponse(content={
-            "status": "success",
-            "message": "Agent deleted successfully",
+            "status": "ok",
             "agent_hash": agent_hash,
-            "cleanup_summary": {
-                "database_records": cleanup_results.get("database_records", {}),
-                "vfs_files_deleted": cleanup_results.get("vfs_files", {}).get("deleted_files", 0),
-                "local_files_deleted": len(cleanup_results.get("local_files", {}).get("deleted_files", [])),
-                "errors": cleanup_results.get("errors", [])
-            }
+            "agent_name": agent_name,
+            "cleaned": cleaned,
         })
-        
+
     except Exception as e:
         # 回滚事务
         db.rollback()

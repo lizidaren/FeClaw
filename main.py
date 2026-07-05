@@ -87,6 +87,7 @@ async def lifespan(app: FastAPI):
     # 初始化数据库（导入 Group 模型以确保 create_all 覆盖新表）
     from models.group import Group, GroupMember, GroupMessage, GroupMoments  # noqa: F401
     from models.fehub import FePublish, AppData  # noqa: F401
+    from models.agent_buffer import AgentBuffer  # noqa: F401  (Agent V2 ReplyBuffer)
     init_db()
     logger.info("Database initialized")
 
@@ -137,6 +138,25 @@ async def lifespan(app: FastAPI):
             conn.commit()
             logger.info("Added sr_enabled column to agent_profiles table")
 
+        # 数据库迁移：检查 agent_profiles 表是否有 agent_mode 列
+        if DATABASE_URL.startswith("mysql"):
+            result = conn.execute(text(
+                "SELECT COLUMN_NAME FROM information_schema.COLUMNS "
+                "WHERE TABLE_NAME = 'agent_profiles' AND COLUMN_NAME = 'agent_mode' AND TABLE_SCHEMA = DATABASE()"
+            ))
+        else:
+            result = conn.execute(text("PRAGMA table_info(agent_profiles)"))
+        columns_raw = result.fetchall()
+        # MySQL: row[0] = COLUMN_NAME; SQLite PRAGMA: row[1] = name
+        columns = [row[0] for row in columns_raw] if columns_raw and isinstance(columns_raw[0][0], str) else [row[1] for row in columns_raw]
+        if 'agent_mode' not in columns:
+            if DATABASE_URL.startswith("mysql"):
+                conn.execute(text("ALTER TABLE agent_profiles ADD COLUMN agent_mode VARCHAR(20) DEFAULT 'classic'"))
+            else:
+                conn.execute(text("ALTER TABLE agent_profiles ADD COLUMN agent_mode TEXT DEFAULT 'classic'"))
+            conn.commit()
+            logger.info("Added agent_mode column to agent_profiles table (V2 self-driven mode)")
+
     # 创建默认管理员用户（如果不存在）
     db = SessionLocal()
     try:
@@ -182,6 +202,14 @@ async def lifespan(app: FastAPI):
             logger.info("Agent 5178 creation skipped")
     except Exception as e:
         logger.error(f"Failed to create Agent 5178: {e}")
+
+    # Agent V2: 启动所有 IM Agent 的协处理器（cron / file_watch）
+    try:
+        from services.interrupt_controller import CoprocessorService
+        started = await CoprocessorService.restart_all()
+        logger.info(f"[Coprocessor] lifespan 启动了 {started} 个 IM Agent 协处理器")
+    except Exception as e:
+        logger.warning(f"[Coprocessor] restart_all 启动失败: {e}")
 
     # 设置消息处理器并恢复微信 polling
     try:
@@ -261,6 +289,15 @@ async def lifespan(app: FastAPI):
             await cleanup_task
         except asyncio.CancelledError:
             pass
+
+        # Agent V2: 停止所有协处理器
+        try:
+            from services.interrupt_controller import CoprocessorService
+            for agent_hash in list(CoprocessorService._agents.keys()):
+                await CoprocessorService.stop(agent_hash)
+            logger.info("[Coprocessor] 全部停止")
+        except Exception as e:
+            logger.warning(f"[Coprocessor] shutdown stop error: {e}")
         # 关闭时（无论启动是否成功，已挂载的资源都尝试清理）
         logger.info("Shutting down FeClaw Gateway...")
 

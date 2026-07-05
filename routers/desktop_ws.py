@@ -228,10 +228,44 @@ async def _handle_chat_message(user_id: int, agent_hash: str, text: str, msg_id:
     """后台处理 Desktop 聊天消息并回复"""
     try:
         from services.web_channel_service import WebChannelService
-        from models.database import SessionLocal
+        from models.database import SessionLocal, AgentProfile
 
         db = SessionLocal()
         try:
+            # ── IM Agent 路由：投递 IRQ 后立刻返回 ──
+            agent = db.query(AgentProfile).filter(
+                AgentProfile.hash == agent_hash
+            ).first()
+            if agent and getattr(agent, "agent_mode", "classic") == "im":
+                try:
+                    from services.interrupt_controller import (
+                        InterruptController,
+                        Interrupt,
+                        InterruptType,
+                        Priority,
+                    )
+                    ic = InterruptController.instance()
+                    ic.dispatch(Interrupt(
+                        irq_type=InterruptType.MESSAGE,
+                        agent_hash=agent_hash,
+                        priority=Priority.HIGH,
+                        payload={
+                            "channel": "desktop",
+                            "user_id": user_id,
+                            "agent_hash": agent_hash,
+                            "msg_id": msg_id,
+                            "trigger_content": text[:1000],
+                            "trigger_sender": "用户",
+                        },
+                    ))
+                    logger.info(
+                        f"[Desktop] IM Agent IRQ 投递 agent={agent_hash} "
+                        f"user={user_id} msg_id={msg_id}"
+                    )
+                except Exception as e:
+                    logger.warning(f"[Desktop] IM Agent IRQ 投递失败: {e}")
+                return
+
             chat_service = WebChannelService(db, user_id=user_id, agent_hash=agent_hash)
             full_response = ""
             async for sse_str in chat_service.chat_stream(text):

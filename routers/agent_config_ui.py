@@ -8,7 +8,7 @@ GET /console/agents/{agent_id}/config - 配置 Agent
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse
 
-router = APIRouter(tags=["Agent Config UI"])
+router = APIRouter(tags=["Agent Config UI", "Dashboard"])
 
 
 @router.get("/console/", response_class=HTMLResponse)

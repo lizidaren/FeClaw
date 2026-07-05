@@ -249,6 +249,9 @@ class WeChatChannelService:
         try:
             logger.info(f"[WeChat] stream_response: starting for user {self.user_id}")
 
+            # 记录原始 user_input，供 IM Agent IRQ 使用
+            self._last_user_input = user_input
+
             # 积分检查和扣减
             try:
                 points_ok = PointService.try_deduct(str(self.user_id))
@@ -261,6 +264,11 @@ class WeChatChannelService:
                     return
             except Exception as e:
                 logger.warning(f"[WeChat] Points check failed: {e}, allowing request")
+
+            # ── IM Agent 路由：直接走 IRQ → WorkLoop（异步处理）──
+            # IM Agent 的回复会通过 wechat_service.send_message 推回微信用户。
+            if self._is_im_agent(msg_id, client_id):
+                return
 
             # 创建 ChatService（渠道无关的聊天服务）
             from services.wechat_service import wechat_service as _global_wechat
@@ -527,6 +535,59 @@ class WeChatChannelService:
                     db.close()
             except Exception as e:
                 logger.debug(f"db.close() failed in stream_response cleanup: {e}")
+
+    # ========== IM Agent IRQ 路由 ==========
+
+    def _is_im_agent(self, msg_id: Optional[str], client_id: Optional[str]) -> bool:
+        """检查 Agent 是否为 IM 模式，是则投递 IRQ 后返回 True。
+
+        - IM Agent 收到微信私聊后不入 LLM 同步流程
+        - WorkLoop 处理完 IRQ 后通过 wechat_service.send_message 把回复推回用户
+        """
+        from models.database import AgentProfile, SessionLocal
+
+        _db = SessionLocal()
+        try:
+            agent = _db.query(AgentProfile).filter(
+                AgentProfile.hash == self.agent_hash
+            ).first()
+            is_im = bool(agent and getattr(agent, "agent_mode", "classic") == "im")
+        finally:
+            _db.close()
+
+        if not is_im:
+            return False
+
+        try:
+            from services.interrupt_controller import (
+                InterruptController,
+                Interrupt,
+                InterruptType,
+                Priority,
+            )
+            ic = InterruptController.instance()
+            ic.dispatch(Interrupt(
+                irq_type=InterruptType.MESSAGE,
+                agent_hash=self.agent_hash,
+                priority=Priority.HIGH,
+                payload={
+                    "channel": "wechat",
+                    "user_id": self.user_id,
+                    "to_user_id": self.to_user_id,
+                    "msg_id": msg_id,
+                    "client_id": client_id,
+                    "trigger_content": (self._last_user_input or "")[:1000],
+                    "trigger_sender": "微信用户",
+                },
+            ))
+            logger.info(
+                f"[WeChat] IM Agent IRQ 投递 agent={self.agent_hash} "
+                f"to={self.to_user_id[:20]}"
+            )
+        except Exception as e:
+            logger.warning(f"[WeChat] IM Agent IRQ 投递失败: {e}")
+
+        return True
 
 
 async def _generate_greeting_message(user_id: str, agent_hash: str = None) -> str:
