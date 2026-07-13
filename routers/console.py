@@ -372,6 +372,7 @@ async def update_agent(
 @router.delete("/agents/{agent_id}")
 async def delete_agent(
     agent_id: int,
+    delete_chat: bool = Query(False, description="是否同时清理 ChatHistory（私聊记录）"),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user)
 ):
@@ -387,6 +388,17 @@ async def delete_agent(
 
     仅允许删除当前用户拥有的 Agent（user_id 校验）。
     使用事务确保数据一致性。
+
+    两级删除（delete_chat 查询参数）：
+    - delete_chat=False（默认）：
+        清理 — AgentProfile, VFS/COS, Session Memory, AgentConfig, AgentBuffer,
+              GroupMember, FePublish, ShareMapping, ShareReference, ScheduledTask,
+              FilePermission, UsageLog, ConversationSession, WeChatBinding
+        保留 — ChatHistory（私聊记录）、GroupMessage、GroupMoments
+    - delete_chat=True：
+        上述全部 + ChatHistory（私聊记录一并删除）
+
+    GroupMessage / GroupMoments 始终保留（群聊留痕，UI 显示"已注销用户"）。
     """
     from services.agent_cleanup_service import agent_cleanup_service
 
@@ -401,11 +413,14 @@ async def delete_agent(
 
     agent_hash = agent.hash
     agent_name = agent.name
-    logger.info(f"Starting agent deletion: id={agent_id}, hash={agent_hash}, name={agent_name}, user_id={user.id}")
+    logger.info(
+        f"Starting agent deletion: id={agent_id}, hash={agent_hash}, "
+        f"name={agent_name}, user_id={user.id}, delete_chat={delete_chat}"
+    )
 
     try:
         # 1. 清理所有资源（数据库记录、VFS、本地文件）
-        cleanup_results = agent_cleanup_service.cleanup_agent(db, agent)
+        cleanup_results = agent_cleanup_service.cleanup_agent(db, agent, delete_chat=delete_chat)
 
         # 2. 删除 Agent 记录本身
         db.delete(agent)
@@ -436,6 +451,7 @@ async def delete_agent(
             "status": "ok",
             "agent_hash": agent_hash,
             "agent_name": agent_name,
+            "chat_preserved": not delete_chat,
             "cleaned": cleaned,
         })
 

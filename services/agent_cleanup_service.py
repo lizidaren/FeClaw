@@ -43,13 +43,20 @@ class AgentCleanupService:
                 self._storage = None
         return self._storage
 
-    def cleanup_agent(self, db: Session, agent: AgentProfile) -> Dict[str, Any]:
+    def cleanup_agent(
+        self,
+        db: Session,
+        agent: AgentProfile,
+        delete_chat: bool = False,
+    ) -> Dict[str, Any]:
         """
         清理 Agent 的所有资源
 
         Args:
             db: 数据库会话
             agent: AgentProfile 实例
+            delete_chat: 是否同时清理 ChatHistory（私聊记录）。
+                          False（默认）= 保留聊天记录；True = 一并删除。
 
         Returns:
             清理结果摘要
@@ -59,6 +66,7 @@ class AgentCleanupService:
 
         results = {
             "agent_hash": agent_hash,
+            "delete_chat": delete_chat,
             "database_records": {},
             "vfs_files": {},
             "local_files": {},
@@ -67,7 +75,7 @@ class AgentCleanupService:
 
         # 1. 清理数据库记录
         try:
-            db_results = self._cleanup_database_records(db, agent_hash)
+            db_results = self._cleanup_database_records(db, agent_hash, delete_chat=delete_chat)
             results["database_records"] = db_results
         except Exception as e:
             error_msg = f"Database cleanup failed: {str(e)}"
@@ -99,6 +107,7 @@ class AgentCleanupService:
         self,
         db: Session,
         agent_hash: str,
+        delete_chat: bool = False,
     ) -> Dict[str, int]:
         """
         清理数据库中的 Agent 相关记录
@@ -106,9 +115,15 @@ class AgentCleanupService:
         Args:
             db: 数据库会话
             agent_hash: Agent hash
+            delete_chat: 是否一并删除 ChatHistory（私聊记录）。
+                          False（默认）= 保留聊天记录供历史查询。
 
         Returns:
             各表删除的记录数量
+
+        注意：
+            - GroupMessage / GroupMoments 始终保留（留痕，显示"已注销用户"）。
+            - ChatHistory 仅在 delete_chat=True 时清理。
         """
         results = {}
 
@@ -181,13 +196,18 @@ class AgentCleanupService:
         if deleted_shares > 0:
             logger.info(f"Deleted {deleted_shares} share mappings for agent {agent_hash}")
 
-        # 9. 聊天历史
-        deleted_history = db.query(ChatHistory).filter(
-            ChatHistory.agent_hash == agent_hash
-        ).delete(synchronize_session=False)
-        results["chat_history"] = deleted_history
-        if deleted_history > 0:
-            logger.info(f"Deleted {deleted_history} chat history records for agent {agent_hash}")
+        # 9. 聊天历史（仅在 delete_chat=True 时清理；默认保留供历史查询）
+        if delete_chat:
+            deleted_history = db.query(ChatHistory).filter(
+                ChatHistory.agent_hash == agent_hash
+            ).delete(synchronize_session=False)
+            results["chat_history"] = deleted_history
+            if deleted_history > 0:
+                logger.info(f"Deleted {deleted_history} chat history records for agent {agent_hash}")
+        else:
+            logger.info(
+                f"Preserving ChatHistory for agent {agent_hash} (delete_chat=False)"
+            )
 
         # 10. AgentBuffer (reply buffer)
         from models.agent_buffer import AgentBuffer
@@ -225,23 +245,8 @@ class AgentCleanupService:
         if gm_count > 0:
             logger.info(f"Deleted {gm_count} group members for agent {agent_hash}")
 
-        # 14. GroupMoments
-        from models.group import GroupMoments
-        gmo_count = db.query(GroupMoments).filter(
-            GroupMoments.agent_hash == agent_hash
-        ).delete(synchronize_session=False)
-        results["group_moments"] = gmo_count
-        if gmo_count > 0:
-            logger.info(f"Deleted {gmo_count} group moments for agent {agent_hash}")
-
-        # 15. GroupMessage (sender_hash)
-        from models.group import GroupMessage
-        gmsg_count = db.query(GroupMessage).filter(
-            GroupMessage.sender_hash == agent_hash
-        ).delete(synchronize_session=False)
-        results["group_messages"] = gmsg_count
-        if gmsg_count > 0:
-            logger.info(f"Deleted {gmsg_count} group messages for agent {agent_hash}")
+        # 14. GroupMoments —— 保留（Agent 关键产出，留痕；UI 显示"已注销用户"）
+        # 15. GroupMessage —— 保留（群聊历史；UI 显示"已注销用户"）
 
         return results
 
