@@ -1,4 +1,4 @@
-"""导入高考 3500 词汇到 SQLite"""
+"""导入高考 3500 词汇到 MySQL"""
 import json, sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 

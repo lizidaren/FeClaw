@@ -978,12 +978,15 @@ class ChatService:
             # 新格式：携带 tool_call 元数据 → 转为 tool_call 消息
             tool_call_id = h.get("tool_call_id")
             tool_name = h.get("tool_name")
-            tool_args_str = h.get("tool_args")
-            if tool_call_id or (tool_name and tool_args_str is not None):
-                try:
-                    args_obj = json.loads(tool_args_str) if tool_args_str else {}
-                except (json.JSONDecodeError, TypeError):
-                    args_obj = {}
+            tool_args = h.get("tool_args")
+            if tool_call_id or (tool_name and tool_args is not None):
+                if isinstance(tool_args, dict):
+                    args_obj = tool_args
+                else:
+                    try:
+                        args_obj = json.loads(tool_args) if tool_args else {}
+                    except (json.JSONDecodeError, TypeError):
+                        args_obj = {}
                 msg: Dict[str, Any] = {
                     "role": "assistant",
                     "content": content or "",
@@ -1148,7 +1151,7 @@ class ChatService:
                         "role": "assistant",
                         "content": "",
                         "tool_name": step.tool_name,
-                        "tool_args": json.dumps(_tc_args, ensure_ascii=False) if _tc_args else "",
+                        "tool_args": _tc_args,
                         "tool_call_id": step.tool_call_id or "",
                     })
                     yield ChatEvent(

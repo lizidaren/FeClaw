@@ -1,6 +1,6 @@
 """
 FeClaw 数据库模型定义
-使用 SQLAlchemy ORM，支持 MySQL 和 SQLite
+使用 SQLAlchemy ORM，仅支持 MySQL
 """
 
 import logging
@@ -13,21 +13,13 @@ logger = logging.getLogger(__name__)
 
 from config import settings, DATABASE_URL
 
-# 创建引擎（根据数据库类型配置）
-if DATABASE_URL.startswith("mysql"):
-    engine = create_engine(
-        DATABASE_URL,
-        pool_pre_ping=True,  # MySQL 连接池健康检查
-        pool_recycle=3600,   # MySQL 连接回收时间
-        echo=settings.DEBUG
-    )
-else:
-    # SQLite 配置
-    engine = create_engine(
-        DATABASE_URL,
-        connect_args={"check_same_thread": False},
-        echo=settings.DEBUG
-    )
+# 创建 MySQL 引擎
+engine = create_engine(
+    DATABASE_URL,
+    pool_pre_ping=True,  # MySQL 连接池健康检查
+    pool_recycle=3600,   # MySQL 连接回收时间
+    echo=settings.DEBUG,
+)
 
 # 创建会话工厂
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -382,7 +374,7 @@ class ChatHistory(Base):
     # === 工具调用相关字段（仅 role="assistant" 带 tool_call 或 role="tool" 时使用） ===
     tool_call_id = Column(String(64), nullable=True, index=True)  # 工具调用 ID（关联 tool_call ↔ tool_result）
     tool_name = Column(String(64), nullable=True)  # 工具名称（仅 assistant/tool 行有值）
-    tool_args = Column(Text, nullable=True)  # 工具参数 JSON 字符串（仅 assistant 行有值）
+    tool_args = Column(JSON, nullable=True)  # 工具参数 JSON 对象（仅 assistant 行有值）
     # === 其它字段 ===
     channel = Column(String(16), nullable=True, default=None)  # web/wechat/feishu 消息来源
     session_id = Column(String(32), nullable=True, index=True)  # wechat_main / web_sess_abc
@@ -417,6 +409,15 @@ class SystemConfig(Base):
     value = Column(Text)
     description = Column(Text)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+# Sandbox token table for cross-process authentication
+class SandboxToken(Base):
+    """Sandbox token shared across application instances."""
+    __tablename__ = 'sandbox_tokens'
+
+    token = Column(String(64), primary_key=True)
+    agent_hash = Column(String(64), nullable=False, index=True)
 
 
 # 创建所有表

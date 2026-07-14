@@ -1,7 +1,7 @@
 """
 向量搜索服务
 - Embedding: Qwen3 text-embedding-v4 (1024d) via DashScope OpenAI 兼容接口
-- 存储: 可切换后端 — COS 向量存储桶 或 SQLite + sqlite-vec
+- 存储: COS 向量存储桶，NumpyVecStorage 作为本地回退
 """
 
 import asyncio
@@ -13,9 +13,6 @@ import fcntl
 import os
 import re
 import socket
-import sqlite3
-import struct
-import threading
 import time
 from abc import ABC, abstractmethod
 from datetime import datetime
@@ -509,16 +506,11 @@ class CosVectorStorage(VectorStorage):
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# SqliteVecStorage — SQLite + sqlite-vec 本地后端
+# NumpyVecStorage local fallback helpers
 # ═══════════════════════════════════════════════════════════════════════
 
-# Module-level connection (shared across all SqliteVecStorage instances)
-_sqlite_connection: Optional[sqlite3.Connection] = None
-_sqlite_lock = threading.Lock()
-
-# Index name validation
+# Index name validation（保留供 NumpyVecStorage 使用）
 _INDEX_NAME_RE = re.compile(r'^[a-zA-Z0-9_-]+$')
-INDEX_TABLE_PREFIX = "v0_"
 
 
 def _validate_index(index: str):
@@ -527,129 +519,6 @@ def _validate_index(index: str):
         raise ValueError(f"Invalid index name: {index!r} (empty or too long, max 100)")
     if not _INDEX_NAME_RE.match(index):
         raise ValueError(f"Invalid index name: {index!r} (only a-zA-Z0-9_- allowed)")
-
-
-def _index_to_table(index: str) -> str:
-    """idx-abc123-kb → v0_idx_abc123_kb"""
-    _validate_index(index)
-    safe = index.replace('-', '_').replace('.', '_')
-    return f"{INDEX_TABLE_PREFIX}{safe}"
-
-
-def _escape_table(table: str) -> str:
-    """SQLite 表名转义：]] → ]]]（双写右方括号）"""
-    return table.replace(']', ']]')
-
-
-def _init_schema(conn: sqlite3.Connection):
-    """初始化 SQLite schema（vec_indexes + vec_entries + triggers）"""
-    conn.executescript("""
-        CREATE TABLE IF NOT EXISTS vec_indexes (
-            index_name TEXT PRIMARY KEY,
-            table_name TEXT NOT NULL,
-            created_at TEXT DEFAULT (datetime('now')),
-            vector_count INTEGER DEFAULT 0
-        );
-
-        CREATE TABLE IF NOT EXISTS vec_entries (
-            rowid INTEGER PRIMARY KEY AUTOINCREMENT,
-            index_name TEXT NOT NULL
-                REFERENCES vec_indexes(index_name) ON DELETE CASCADE,
-            vec_key TEXT NOT NULL,
-            metadata TEXT DEFAULT '{}',
-            created_at TEXT DEFAULT (datetime('now')),
-            UNIQUE(index_name, vec_key)
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_entries_index ON vec_entries(index_name);
-
-        CREATE TRIGGER IF NOT EXISTS tr_entries_insert
-        AFTER INSERT ON vec_entries
-        BEGIN
-            UPDATE vec_indexes SET vector_count = vector_count + 1
-            WHERE index_name = NEW.index_name;
-        END;
-
-        CREATE TRIGGER IF NOT EXISTS tr_entries_delete
-        AFTER DELETE ON vec_entries
-        BEGIN
-            UPDATE vec_indexes SET vector_count = vector_count - 1
-            WHERE index_name = OLD.index_name;
-        END;
-    """)
-
-
-def _get_sqlite_conn() -> sqlite3.Connection:
-    """模块级单例连接
-    
-    优先使用 pysqlite3-binary（支持 extension loading），
-    回退到 stdlib sqlite3。
-    完整初始化在锁内完成，避免双线程竞态。
-    """
-    global _sqlite_connection
-    if _sqlite_connection is not None:
-        return _sqlite_connection
-
-    with _sqlite_lock:
-        # Double-checked locking
-        if _sqlite_connection is not None:
-            return _sqlite_connection
-
-        # 优先使用 pysqlite3-binary（带 extension loading 支持）
-        try:
-            import pysqlite3
-            _sqlite_mod = pysqlite3
-            logger.debug("Using pysqlite3-binary (supports extensions)")
-        except ImportError:
-            _sqlite_mod = sqlite3
-            logger.debug("Using stdlib sqlite3")
-
-        db_path = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            "data",
-            os.path.basename(settings.VECTOR_SQLITE_PATH),
-        )
-        os.makedirs(os.path.dirname(db_path), exist_ok=True)
-
-        conn = _sqlite_mod.connect(db_path, check_same_thread=False)
-        conn.row_factory = _sqlite_mod.Row
-
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=5000")
-
-        # 加载 sqlite-vec 扩展
-        try:
-            import sqlite_vec
-            conn.enable_load_extension(True)
-            sqlite_vec.load(conn)
-            conn.enable_load_extension(False)
-            logger.info("sqlite-vec extension loaded successfully")
-        except (AttributeError, Exception) as e:
-            logger.error(
-                "Cannot load sqlite-vec extension: %s. "
-                "Try: pip install pysqlite3-binary",
-                e
-            )
-            raise RuntimeError(
-                f"sqlite-vec extension unavailable: {e}. "
-                f"VECTOR_STORAGE_BACKEND=sqlite requires extension loading support. "
-                f"Install pysqlite3-binary: pip install pysqlite3-binary"
-            )
-
-        _init_schema(conn)
-        _sqlite_connection = conn
-        return conn
-
-
-def _get_table_by_index(conn: sqlite3.Connection, index: str) -> str:
-    """从 vec_indexes 表查 table_name，不依赖字符串逆向映射"""
-    cur = conn.execute(
-        "SELECT table_name FROM vec_indexes WHERE index_name = ?", (index,)
-    )
-    row = cur.fetchone()
-    if row:
-        return row[0]
-    raise KeyError(f"Index {index!r} not registered")
 
 
 def _match_filter(metadata: dict, filter: dict) -> bool:
@@ -663,190 +532,6 @@ def _match_filter(metadata: dict, filter: dict) -> bool:
             if metadata.get(field) != condition:
                 return False
     return True
-
-
-class SqliteVecStorage(VectorStorage):
-    """SQLite + sqlite-vec 本地向量存储后端"""
-
-    def __init__(self):
-        self._conn = _get_sqlite_conn()
-
-    # ----- ensure_index -----
-
-    def ensure_index(self, index: str) -> None:
-        """创建 index：vec0 表 + 元数据注册。幂等。
-        
-        注意：不使用 with self._conn 以避免嵌套事务。
-        当被 put() 调用时，外层 with self._conn 统一管理事务边界。
-        """
-        table = _index_to_table(index)
-        escaped_table = _escape_table(table)
-
-        # 检查是否已注册
-        if self._conn.execute(
-            "SELECT 1 FROM vec_indexes WHERE index_name = ?", (index,)
-        ).fetchone():
-            return
-
-        # 创建 vec0 表
-        try:
-            self._conn.execute(f"""
-                CREATE VIRTUAL TABLE IF NOT EXISTS [{escaped_table}]
-                USING vec0(embedding float[1024] distance_metric=cosine)
-            """)
-        except sqlite3.OperationalError as e:
-            err = str(e).lower()
-            if "already exists" in err:
-                pass  # 并发安全：另一线程刚建好
-            else:
-                logger.error("Failed to create vec0 table %s: %s", table, e)
-                raise
-
-        # 注册到 vec_indexes（幂等）
-        self._conn.execute(
-            "INSERT OR IGNORE INTO vec_indexes (index_name, table_name) VALUES (?, ?)",
-            (index, table)
-        )
-
-    # ----- query -----
-
-    def query(self, index: str, query_vec: List[float], top_k: int,
-              filter: dict = None) -> List[Dict]:
-        """拆表搜索：直接在对应 index 的 vec0 表上 MATCH"""
-        try:
-            table = _get_table_by_index(self._conn, index)
-        except KeyError:
-            logger.debug("query on unregistered index %s, returning []", index)
-            return []
-
-        escaped = _escape_table(table)
-        query_bytes = struct.pack(f'{VECTOR_DIMENSION}f', *query_vec)
-        fetch_k = top_k * 3
-
-        try:
-            cur = self._conn.execute(
-                f"SELECT v.rowid, v.distance FROM [{escaped}] v "
-                f"WHERE v.embedding MATCH ? AND k = ?",
-                (query_bytes, fetch_k)
-            )
-            candidates = cur.fetchall()
-        except Exception as e:
-            logger.warning("MATCH on %s failed: %s", table, e)
-            return []
-
-        if not candidates:
-            return []
-
-        # 从 vec_entries 获取元数据
-        rowids = [r[0] for r in candidates]
-        placeholders = ','.join('?' * len(rowids))
-
-        cur = self._conn.execute(
-            f"SELECT rowid, vec_key, metadata FROM vec_entries "
-            f"WHERE rowid IN ({placeholders})",
-            rowids
-        )
-        meta_map = {r[0]: (r[1], r[2]) for r in cur.fetchall()}
-
-        results = []
-        for rowid, distance in candidates:
-            if rowid not in meta_map:
-                continue
-            vec_key, metadata_str = meta_map[rowid]
-
-            # 应用 filter
-            if filter:
-                metadata = json.loads(metadata_str) if metadata_str else {}
-                if not _match_filter(metadata, filter):
-                    continue
-
-            score = max(0.0, min(1.0, 1.0 - distance))
-            results.append({
-                "key": vec_key,
-                "score": score,
-                "metadata": json.loads(metadata_str) if metadata_str else {},
-            })
-
-        return results
-
-    # ----- put -----
-
-    def put(self, index: str, vectors: List[Dict]) -> None:
-        """写入向量到 SQLite。每个向量：unified metadata + dedicated vec0 entry，同一事务。"""
-        if not vectors:
-            return
-
-        table = _index_to_table(index)
-        escaped = _escape_table(table)
-
-        with self._conn:
-            self.ensure_index(index)
-
-            for v in vectors:
-                vec_bytes = struct.pack(f'{VECTOR_DIMENSION}f', *v["data"]["float32"])
-
-                # 处理重复 key：先删旧的
-                cur = self._conn.execute(
-                    "SELECT rowid FROM vec_entries WHERE index_name = ? AND vec_key = ?",
-                    (index, v["key"])
-                )
-                existing = cur.fetchone()
-                if existing:
-                    self._conn.execute(
-                        f"DELETE FROM [{escaped}] WHERE rowid = ?", (existing[0],)
-                    )
-                    self._conn.execute(
-                        "DELETE FROM vec_entries WHERE rowid = ?", (existing[0],)
-                    )
-
-                # 插入新元数据（触发器自动更新 vec_indexes.vector_count）
-                cur = self._conn.execute(
-                    "INSERT INTO vec_entries (index_name, vec_key, metadata) VALUES (?, ?, ?)",
-                    (index, v["key"], json.dumps(v.get("metadata", {}), ensure_ascii=False))
-                )
-                new_id = cur.lastrowid
-
-                # 插入向量到专用的 vec0 表
-                self._conn.execute(
-                    f"INSERT INTO [{escaped}] (rowid, embedding) VALUES (?, ?)",
-                    (new_id, vec_bytes)
-                )
-
-    # ----- delete -----
-
-    def delete(self, index: str, keys: List[str]) -> None:
-        """从 SQLite 删除向量"""
-        if not keys:
-            return
-
-        table = _index_to_table(index)
-        escaped = _escape_table(table)
-
-        with self._conn:
-            for key in keys:
-                cur = self._conn.execute(
-                    "SELECT rowid FROM vec_entries WHERE index_name = ? AND vec_key = ?",
-                    (index, key)
-                )
-                row = cur.fetchone()
-                if not row:
-                    continue
-                entry_id = row[0]
-
-                self._conn.execute(f"DELETE FROM [{escaped}] WHERE rowid = ?", (entry_id,))
-                self._conn.execute("DELETE FROM vec_entries WHERE rowid = ?", (entry_id,))
-
-    # ----- list_keys_by_prefix -----
-
-    def list_keys_by_prefix(self, index: str, prefix: str) -> List[str]:
-        """列出 index 中指定前缀的所有 key"""
-        escaped = prefix.replace('%', '\\%').replace('_', '\\_')
-        cur = self._conn.execute(
-            "SELECT vec_key FROM vec_entries "
-            "WHERE index_name = ? AND vec_key LIKE ? ESCAPE '\\'",
-            (index, escaped + '%')
-        )
-        return [row[0] for row in cur.fetchall()]
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -1085,27 +770,16 @@ class NumpyVecStorage(VectorStorage):
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 自动降级
+# Local storage fallback
 # ═══════════════════════════════════════════════════════════════════════
 
-def _get_sqlite_or_numpy_storage() -> VectorStorage:
-    """自动选择：SqliteVecStorage → 失败 → NumpyVecStorage"""
-    try:
-        return SqliteVecStorage()
-    except Exception as e:
-        logger.warning("SqliteVecStorage init failed: %s", e)
-        logger.info("Falling back to NumpyVecStorage (zero C extension dependency)")
 
+def _get_local_storage() -> VectorStorage:
+    """创建本地 Numpy 向量存储。"""
     try:
-        import numpy as np
-        np.zeros(1)
         return NumpyVecStorage()
-    except Exception:
-        raise RuntimeError(
-            "No local vector storage backend available. "
-            "Install: pip install sqlite-vec pysqlite3-binary  (recommended)\n"
-            "Or ensure numpy is available: pip install numpy"
-        )
+    except Exception as e:
+        raise RuntimeError(f"Local vector storage unavailable: {e}") from e
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -1113,7 +787,7 @@ def _get_sqlite_or_numpy_storage() -> VectorStorage:
 # ═══════════════════════════════════════════════════════════════════════
 
 class VectorSearchService:
-    """向量搜索服务（对外 API 层，底层存储可切换）"""
+    """向量搜索服务（对外 API 层）。"""
 
     __slots__ = ('agent_hash', 'storage')
 
@@ -1122,10 +796,10 @@ class VectorSearchService:
         self.storage = self._create_storage()
 
     def _create_storage(self) -> VectorStorage:
-        """根据配置创建存储后端"""
+        """根据配置创建存储后端。"""
         backend = settings.VECTOR_STORAGE_BACKEND or "cos"
-        if backend == "sqlite":
-            return _get_sqlite_or_numpy_storage()
+        if backend == "numpy":
+            return _get_local_storage()
         return CosVectorStorage(agent_hash=self.agent_hash)
 
     # ----- Index Management -----
@@ -1431,10 +1105,11 @@ class VectorSearchService:
                         "source": r.get("source", ""),
                     })
 
-        # 3. SQLite kaoxiang kaodian 结构化数据查询
+        # 3. kaoxiang 考向结构化数据查询（独立 SQLite，不依赖主数据库）
         try:
             kd_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data', 'kaoxiang.db')
             if os.path.exists(kd_path):
+                import sqlite3
                 conn = sqlite3.connect(kd_path)
                 cursor = conn.cursor()
                 like = f'%{query}%'

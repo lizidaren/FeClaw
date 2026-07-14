@@ -14,6 +14,4 @@ Pillow>=10.0.0  # Image processing
 qrcode[pil]     # QR code generation
 
 pyfuse3>=1.4.0  # FUSE 3 filesystem in userspace
-sqlite-vec>=0.1.0
-pysqlite3-binary>=0.4.0
 numpy>=1.26.0

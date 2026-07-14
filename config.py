@@ -21,22 +21,15 @@ class Settings(BaseSettings):
     JWT_ALGORITHM: str = "HS256"
     JWT_EXPIRE_HOURS: int = 24 * 7  # 7天过期
 
-    # MySQL 数据库配置（预留连接信息）
-    # 注意：MySQL 可能未安装，需要确保 MySQL 服务已启动
+    # MySQL 数据库配置
     MYSQL_HOST: str = "localhost"
     MYSQL_PORT: int = 3306
     MYSQL_USER: str = "root"
-    MYSQL_PASSWORD: str = ""  # 预留，生产环境需配置
+    MYSQL_PASSWORD: str = ""
     MYSQL_DATABASE: str = "FeClaw"
 
-    # 数据库 URL（MySQL 格式，需要安装 pymysql）
-    # 如果 MySQL 未安装，可以临时使用 SQLite
+    # 数据库 URL
     DATABASE_URL: str = "mysql+pymysql://root:@localhost:3306/FeClaw"
-    # SQLite 备用配置（开发环境）
-    DATABASE_URL_FALLBACK: str = "sqlite:///data/feclaw.db"
-
-    # 使用 MySQL 还是 SQLite（生产环境建议 MySQL）
-    USE_MYSQL: bool = False  # 默认使用 SQLite，MySQL 安装后改为 True
 
     # LLM 配置
     ZHIPU_API_KEY: str = ""
@@ -103,9 +96,8 @@ class Settings(BaseSettings):
     LOCAL_STORAGE_ROOT: str = "./feclaw-storage"
     PUBLIC_STORAGE_ROOT: str = "./feclaw-public"
 
-    # 向量存储后端: "cos"（腾讯云）或 "sqlite"（本地 sqlite-vec）
+    # 向量存储后端: "cos"（腾讯云）或 "numpy"（本地回退）
     VECTOR_STORAGE_BACKEND: str = "cos"
-    VECTOR_SQLITE_PATH: str = "data/vectors.db"
 
     # TOTP 安全策略
     TOTP_STRICT_OWNERSHIP: bool = True  # TOTP 登录时严格检查 Agent 归属，True=仅能访问自己的 Agent；False=可以通过 TOTP 访问任何 Agent
@@ -209,15 +201,5 @@ settings = Settings()
 # 获取当前目录
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# 确保数据目录存在
-data_dir = os.path.join(BASE_DIR, "data")
-os.makedirs(data_dir, exist_ok=True)
-
-# 最终数据库 URL（根据配置选择）
-if settings.USE_MYSQL:
-    DATABASE_URL = settings.DATABASE_URL
-else:
-    DATABASE_URL = settings.DATABASE_URL_FALLBACK
-    # 确保 SQLite 数据目录存在
-    db_path = DATABASE_URL.replace("sqlite:///", "")
-    os.makedirs(os.path.dirname(db_path), exist_ok=True)
+# 最终数据库 URL 直接来自配置
+DATABASE_URL = settings.DATABASE_URL

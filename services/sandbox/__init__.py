@@ -15,7 +15,6 @@ from .concurrency import (
     unregister_sandbox_token,
     validate_sandbox_token,
     _cleanup_expired_tokens,
-    _ensure_token_db,
 )
 from .base import (
     SYS_READ, SYS_WRITE, SYS_OPEN, SYS_CLOSE, SYS_STAT, SYS_FSTAT, SYS_LSTAT,
@@ -64,7 +63,7 @@ __all__ = [
     "SandboxConfig", "ExecResult", "BackgroundTask",
     "SandboxConcurrencyLimiter", "_global_concurrency_limiter",
     "register_sandbox_token", "unregister_sandbox_token",
-    "validate_sandbox_token", "_cleanup_expired_tokens", "_ensure_token_db",
+    "validate_sandbox_token", "_cleanup_expired_tokens",
     "VFSBootstrap",
     "_check_fuse_cached", "_FUSE_AVAILABLE_CACHE",
     "_SECCOMP_BPF", "_SECCOMP_BPF_B64", "_SECCOMP_SETUP_CODE",

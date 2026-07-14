@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 
 # ── V2: DB 劫持路由 ────────────────────────────────────────────
-# 某些高频读写小文件直接走 DB（SQLite/MySQL），绕过 COS 以提升性能。
+# 某些高频读写小文件直接走 DB（MySQL），绕过 COS 以提升性能。
 # Agent 无感——file_read/file_write 行为完全不变。
 #
 # 路由规则：key 以这些文件名结尾的请求，路由到 agent_config 表

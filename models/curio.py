@@ -34,7 +34,7 @@ class CurioEntry(Base):
         Index("idx_curio_entries_user_created", "user_id", "created_at"),
         Index("idx_curio_entries_user_type", "user_id", "type"),
         Index("idx_curio_entries_status", "user_id", "status"),
-        # fix(P2-2): DB 层 CHECK 约束（SQLite/MySQL 兼容），防止脏数据写入
+        # fix(P2-2): DB 层 CHECK 约束（MySQL 兼容），防止脏数据写入
         CheckConstraint(
             "type IN ('note', 'photo', 'recording', 'link', 'canvas')",
             name="ck_curio_entries_type",

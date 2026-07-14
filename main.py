@@ -109,53 +109,35 @@ async def lifespan(app: FastAPI):
     from sqlalchemy import text
     with engine.connect() as conn:
         # 检查 users 表是否有 email 列
-        from config import DATABASE_URL
-        if DATABASE_URL.startswith("mysql"):
-            result = conn.execute(text(
-                "SELECT COLUMN_NAME FROM information_schema.COLUMNS "
-                "WHERE TABLE_NAME = 'users' AND TABLE_SCHEMA = DATABASE()"
-            ))
-        else:
-            result = conn.execute(text("PRAGMA table_info(users)"))
-        columns_raw = result.fetchall()
-        # MySQL: row[0] = COLUMN_NAME (string); SQLite PRAGMA: row[1] = name
-        columns = [row[0] for row in columns_raw] if columns_raw and isinstance(columns_raw[0][0], str) else [row[1] for row in columns_raw]
+        result = conn.execute(text(
+            "SELECT COLUMN_NAME FROM information_schema.COLUMNS "
+            "WHERE TABLE_NAME = 'users' AND TABLE_SCHEMA = DATABASE()"
+        ))
+        columns = [row[0] for row in result.fetchall()]
         if 'email' not in columns:
             conn.execute(text("ALTER TABLE users ADD COLUMN email VARCHAR(128)"))
             conn.commit()
             logger.info("Added email column to users table")
 
-        # 数据库迁移：检查 agent_profiles 表是否有 sr_enabled 列
-        if DATABASE_URL.startswith("mysql"):
-            result = conn.execute(text(
-                "SELECT COLUMN_NAME FROM information_schema.COLUMNS "
-                "WHERE TABLE_NAME = 'agent_profiles' AND TABLE_SCHEMA = DATABASE()"
-            ))
-        else:
-            result = conn.execute(text("PRAGMA table_info(agent_profiles)"))
-        columns_raw = result.fetchall()
-        columns = [row[0] for row in columns_raw] if columns_raw and isinstance(columns_raw[0][0], str) else [row[1] for row in columns_raw]
+        # 检查 agent_profiles 表是否有 sr_enabled 列
+        result = conn.execute(text(
+            "SELECT COLUMN_NAME FROM information_schema.COLUMNS "
+            "WHERE TABLE_NAME = 'agent_profiles' AND TABLE_SCHEMA = DATABASE()"
+        ))
+        columns = [row[0] for row in result.fetchall()]
         if 'sr_enabled' not in columns:
             conn.execute(text("ALTER TABLE agent_profiles ADD COLUMN sr_enabled BOOLEAN DEFAULT 0"))
             conn.commit()
             logger.info("Added sr_enabled column to agent_profiles table")
 
-        # 数据库迁移：检查 agent_profiles 表是否有 agent_mode 列
-        if DATABASE_URL.startswith("mysql"):
-            result = conn.execute(text(
-                "SELECT COLUMN_NAME FROM information_schema.COLUMNS "
-                "WHERE TABLE_NAME = 'agent_profiles' AND COLUMN_NAME = 'agent_mode' AND TABLE_SCHEMA = DATABASE()"
-            ))
-        else:
-            result = conn.execute(text("PRAGMA table_info(agent_profiles)"))
-        columns_raw = result.fetchall()
-        # MySQL: row[0] = COLUMN_NAME; SQLite PRAGMA: row[1] = name
-        columns = [row[0] for row in columns_raw] if columns_raw and isinstance(columns_raw[0][0], str) else [row[1] for row in columns_raw]
+        # 检查 agent_profiles 表是否有 agent_mode 列
+        result = conn.execute(text(
+            "SELECT COLUMN_NAME FROM information_schema.COLUMNS "
+            "WHERE TABLE_NAME = 'agent_profiles' AND COLUMN_NAME = 'agent_mode' AND TABLE_SCHEMA = DATABASE()"
+        ))
+        columns = [row[0] for row in result.fetchall()]
         if 'agent_mode' not in columns:
-            if DATABASE_URL.startswith("mysql"):
-                conn.execute(text("ALTER TABLE agent_profiles ADD COLUMN agent_mode VARCHAR(20) DEFAULT 'classic'"))
-            else:
-                conn.execute(text("ALTER TABLE agent_profiles ADD COLUMN agent_mode TEXT DEFAULT 'classic'"))
+            conn.execute(text("ALTER TABLE agent_profiles ADD COLUMN agent_mode VARCHAR(20) DEFAULT 'classic'"))
             conn.commit()
             logger.info("Added agent_mode column to agent_profiles table (V2 self-driven mode)")
 

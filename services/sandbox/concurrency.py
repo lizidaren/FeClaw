@@ -4,13 +4,12 @@
 - SandboxConcurrencyLimiter: 全局并发限制器（in-memory 回退）
 - RedisSandboxConcurrencyLimiter: Redis-backed 全局并发限制器
 - _global_concurrency_limiter: 默认实例（自动选择 Redis 或 in-memory）
-- Token 管理: register/unregister/validate sandbox token (SQLite 跨进程共享)
+- Token 管理: register/unregister/validate sandbox token（MySQL 跨进程共享）
 """
 import asyncio
 import concurrent.futures
 import logging
 import secrets
-import sqlite3
 import threading
 import subprocess
 import time
@@ -19,6 +18,7 @@ from dataclasses import dataclass, field
 from typing import Dict, Optional
 
 from config import settings
+from models.database import SandboxToken, SessionLocal
 
 logger = logging.getLogger(__name__)
 
@@ -264,29 +264,19 @@ _global_concurrency_limiter = _create_global_limiter()
 
 
 # ============================================================================
-# Sandbox Token Management (UDS auth, SQLite-backed for cross-process sharing)
+# Sandbox Token Management (MySQL-backed cross-process sharing)
 # ============================================================================
 
-_TOKEN_DB_PATH = "/tmp/feclaw_sandbox_tokens.db"
-
-
-def _ensure_token_db():
-    """确保 token 数据库表存在"""
-    conn = sqlite3.connect(_TOKEN_DB_PATH)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("CREATE TABLE IF NOT EXISTS sandbox_tokens (token TEXT PRIMARY KEY, agent_hash TEXT)")
-    conn.commit()
-    conn.close()
-
-
 def register_sandbox_token(agent_hash: str) -> str:
-    """注册 sandbox token（SQLite 存储，跨进程共享）"""
+    """注册 sandbox token（MySQL 存储，跨进程/跨实例共享）"""
     token = secrets.token_hex(16)
     key = agent_hash if agent_hash else "default"
-    conn = sqlite3.connect(_TOKEN_DB_PATH)
-    conn.execute("INSERT OR REPLACE INTO sandbox_tokens (token, agent_hash) VALUES (?, ?)", (token, key))
-    conn.commit()
-    conn.close()
+    db = SessionLocal()
+    try:
+        db.add(SandboxToken(token=token, agent_hash=key))
+        db.commit()
+    finally:
+        db.close()
     return token
 
 
@@ -294,30 +284,33 @@ def unregister_sandbox_token(token: str):
     """注销 sandbox token"""
     if not token:
         return
-    conn = sqlite3.connect(_TOKEN_DB_PATH)
-    conn.execute("DELETE FROM sandbox_tokens WHERE token = ?", (token,))
-    conn.commit()
-    conn.close()
+    db = SessionLocal()
+    try:
+        db.query(SandboxToken).filter(SandboxToken.token == token).delete()
+        db.commit()
+    finally:
+        db.close()
 
 
 def validate_sandbox_token(agent_hash: str, token: str) -> bool:
     """验证 token 是否匹配 agent_hash"""
     if not agent_hash or not token:
         return False
-    conn = sqlite3.connect(_TOKEN_DB_PATH)
-    cursor = conn.execute("SELECT agent_hash FROM sandbox_tokens WHERE token = ?", (token,))
-    row = cursor.fetchone()
-    conn.close()
-    return row is not None and row[0] == agent_hash
+    db = SessionLocal()
+    try:
+        return db.query(SandboxToken).filter(
+            SandboxToken.token == token,
+            SandboxToken.agent_hash == agent_hash,
+        ).first() is not None
+    finally:
+        db.close()
 
 
 def _cleanup_expired_tokens():
-    """清理所有过期 token（sandbox 完成后如有残留）"""
-    conn = sqlite3.connect(_TOKEN_DB_PATH)
-    conn.execute("DELETE FROM sandbox_tokens")
-    conn.commit()
-    conn.close()
-
-
-# 确保 token 数据库在模块加载时已初始化
-_ensure_token_db()
+    """清理所有 token（sandbox 完成后清理残留）"""
+    db = SessionLocal()
+    try:
+        db.query(SandboxToken).delete()
+        db.commit()
+    finally:
+        db.close()

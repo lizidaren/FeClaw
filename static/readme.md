@@ -70,7 +70,7 @@
 | 层 | 技术 |
 |---|---|
 | Web 框架 | FastAPI (Python 3.12+) |
-| 数据库 | SQLite（默认）/ MySQL（可选），SQLAlchemy ORM |
+| 数据库 | MySQL（强制，统一 SQLAlchemy ORM；不再支持 SQLite） |
 | 文件存储 | 腾讯云 COS（通过 VFS 抽象层访问） |
 | 消息协议 | SSE（流式对话）、WebSocket |
 | 多模型兼容 | DeepSeek / 千问 / 智谱 GLM / 豆包 / 小米 MiMo / Kimi（OpenAI 兼容协议） |
@@ -129,7 +129,7 @@ MAIN_TEXT_MODEL=deepseek-v4-flash       # 主模型切到 DeepSeek
 python -m uvicorn main:app --host 0.0.0.0 --port 8080 --reload
 ```
 
-首次启动时系统自动创建 SQLite 数据库和默认管理员账号（默认密码 `admin`，**强烈建议部署后立即修改**）。
+首次启动时系统自动创建 MySQL 数据库表和默认管理员账号（默认密码 `admin`，**强烈建议部署后立即修改**）。
 
 打开 http://localhost:8080 ，用默认账号登录控制台，创建 Agent 后即可使用。系统会自动创建一个示例 Agent。
 
