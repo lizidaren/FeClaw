@@ -1,9 +1,9 @@
-# Curio 画布实现方案（RN Skia）
+# Zentrim 画布实现方案（RN Skia）
 
 > 版本：v1.0.0
 > 最后更新：2026-07-10
 > 状态：工程实现 spec
-> 设计文档：`docs/v1/02-curio.md` §7
+> 设计文档：`docs/v1/02-zentrim.md` §7
 
 ---
 
@@ -362,8 +362,8 @@ interface CanvasImage {
 ## 8. 组件接口
 
 ```typescript
-// RN 侧暴露的 CurioCanvas 组件
-interface CurioCanvasProps {
+// RN 侧暴露的 ZentrimCanvas 组件
+interface ZentrimCanvasProps {
   pageId: string;
   strokes: Stroke[];
   images: CanvasImage[];

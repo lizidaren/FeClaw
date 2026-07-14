@@ -1,8 +1,8 @@
 """
-Curio（格物所）业务服务
+Zentrim（格物所）业务服务
 
 提供条目 CRUD、文件上传、搜索、时间线、@引用 等操作。
-符合 `docs/v1/02-curio.md` 中的设计。
+符合 `docs/v1/02-zentrim.md` 中的设计。
 """
 import json
 import logging
@@ -35,11 +35,11 @@ from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
 
 from config import settings
-from models.curio import (
-    CurioEntry,
-    CurioReference,
-    CurioTimeline,
-    CurioTimelineEntry,
+from models.zentrim import (
+    ZentrimEntry,
+    ZentrimReference,
+    ZentrimTimeline,
+    ZentrimTimelineEntry,
 )
 
 logger = logging.getLogger(__name__)
@@ -115,10 +115,10 @@ def _ext_from_mime(mime: str) -> str:
 
 
 # ────────────────────────────────────────────────────────────────────
-# CurioService
+# ZentrimService
 # ────────────────────────────────────────────────────────────────────
-class CurioService:
-    """Curio 业务服务 — 所有 DB 操作走注入的 Session"""
+class ZentrimService:
+    """Zentrim 业务服务 — 所有 DB 操作走注入的 Session"""
 
     def __init__(self, db: Session):
         self.db = db
@@ -139,12 +139,12 @@ class CurioService:
         metadata: Optional[Dict[str, Any]] = None,
         bbox: Optional[Dict[str, Any]] = None,
         source_url: Optional[str] = None,
-    ) -> CurioEntry:
+    ) -> ZentrimEntry:
         """创建条目，自动生成 ULID"""
         if type not in ("note", "photo", "recording", "link", "canvas"):
             raise ValueError(f"Invalid entry type: {type}")
 
-        entry = CurioEntry(
+        entry = ZentrimEntry(
             id=_generate_ulid(),
             user_id=user_id,
             type=type,
@@ -171,29 +171,29 @@ class CurioService:
         limit: int = 20,
         before: Optional[datetime] = None,
         include_archived: bool = False,
-    ) -> List[CurioEntry]:
+    ) -> List[ZentrimEntry]:
         """获取时间线（按 created_at 倒序，仅 active 条目默认）"""
         # fix(P2-3): Service 层硬性 limit 上限（1-100），防止内部/测试调用传超大值
         limit = max(1, min(limit, 100))
-        query = self.db.query(CurioEntry).filter(CurioEntry.user_id == user_id)
+        query = self.db.query(ZentrimEntry).filter(ZentrimEntry.user_id == user_id)
         if type:
-            query = query.filter(CurioEntry.type == type)
+            query = query.filter(ZentrimEntry.type == type)
         if not include_archived:
-            query = query.filter(CurioEntry.status != "archived")
+            query = query.filter(ZentrimEntry.status != "archived")
         if before:
-            query = query.filter(CurioEntry.created_at < before)
-        return query.order_by(CurioEntry.created_at.desc()).limit(limit).all()
+            query = query.filter(ZentrimEntry.created_at < before)
+        return query.order_by(ZentrimEntry.created_at.desc()).limit(limit).all()
 
     def get_entry(
         self, entry_id: str, user_id: Optional[int] = None
-    ) -> Optional[CurioEntry]:
+    ) -> Optional[ZentrimEntry]:
         """条目详情；可选校验 user_id 防越权"""
-        query = self.db.query(CurioEntry).filter(CurioEntry.id == entry_id)
+        query = self.db.query(ZentrimEntry).filter(ZentrimEntry.id == entry_id)
         if user_id is not None:
-            query = query.filter(CurioEntry.user_id == user_id)
+            query = query.filter(ZentrimEntry.user_id == user_id)
         return query.first()
 
-    def archive_entry(self, entry_id: str, user_id: Optional[int] = None) -> Optional[CurioEntry]:
+    def archive_entry(self, entry_id: str, user_id: Optional[int] = None) -> Optional[ZentrimEntry]:
         # fix(P1-10): 状态更新走统一的 update_entry_status 入口，避免路径重复
         """归档条目（软删） — 委托内部 update_entry_status 实现"""
         entry = self.get_entry(entry_id, user_id=user_id)
@@ -214,7 +214,7 @@ class CurioService:
         self.db.refresh(entry)
         return entry
 
-    def unarchive_entry(self, entry_id: str, user_id: Optional[int] = None) -> Optional[CurioEntry]:
+    def unarchive_entry(self, entry_id: str, user_id: Optional[int] = None) -> Optional[ZentrimEntry]:
         # fix(P1-10): 状态更新走统一的 update_entry_status 入口，避免路径重复
         """取消归档 — 委托内部 update_entry_status 实现"""
         entry = self.get_entry(entry_id, user_id=user_id)
@@ -235,20 +235,20 @@ class CurioService:
 
         # fix(P0-3): DB 操作必须放在单个事务里，失败整体 rollback 避免状态错乱
         try:
-            self.db.query(CurioTimelineEntry).filter(
-                CurioTimelineEntry.entry_id == entry_id
+            self.db.query(ZentrimTimelineEntry).filter(
+                ZentrimTimelineEntry.entry_id == entry_id
             ).delete(synchronize_session=False)
-            self.db.query(CurioReference).filter(
+            self.db.query(ZentrimReference).filter(
                 or_(
-                    CurioReference.source_id == entry_id,
-                    CurioReference.target_id == entry_id,
+                    ZentrimReference.source_id == entry_id,
+                    ZentrimReference.target_id == entry_id,
                 )
             ).delete(synchronize_session=False)
             self.db.delete(entry)
             self.db.commit()
         except Exception as e:
             self.db.rollback()
-            logger.exception(f"[CurioService] delete_entry({entry_id}) failed; rolled back: {e}")
+            logger.exception(f"[ZentrimService] delete_entry({entry_id}) failed; rolled back: {e}")
             raise
 
         # fix(P0-3): COS 删除放事务外（IO 操作不应阻塞 DB 事务）
@@ -260,7 +260,7 @@ class CurioService:
                 self._delete_storage_object(att["key"])
             except Exception as e:
                 logger.error(
-                    f"[CurioService] ORPHAN COS FILE: user={user_id} entry={entry_id} "
+                    f"[ZentrimService] ORPHAN COS FILE: user={user_id} entry={entry_id} "
                     f"key={att['key']} err={e}",
                     exc_info=True,
                 )
@@ -274,7 +274,7 @@ class CurioService:
                 from services.vector_search_service import VectorSearchService
 
                 vs = VectorSearchService(agent_hash=None)
-                index_name = f"idx-curio-{user_id}" if user_id else "idx-curio"
+                index_name = f"idx-zentrim-{user_id}" if user_id else "idx-zentrim"
                 try:
                     loop = asyncio.get_event_loop()
                     if loop.is_running():
@@ -288,7 +288,7 @@ class CurioService:
             except Exception as e:
                 # 向量清理失败只警告，不阻塞 DB 删除（DB 是真相之源）
                 logger.warning(
-                    f"[CurioService] vector cleanup failed (non-fatal): user={user_id} "
+                    f"[ZentrimService] vector cleanup failed (non-fatal): user={user_id} "
                     f"entry={entry_id} vector_id={vector_id} err={e}"
                 )
         return True
@@ -300,7 +300,7 @@ class CurioService:
         content: str,
         attachments: Optional[List[Dict[str, Any]]] = None,
         user_id: Optional[int] = None,
-    ) -> Optional[CurioEntry]:
+    ) -> Optional[ZentrimEntry]:
         """添加附录到计算层 metadata_.appendices（不改原始层）"""
         entry = self.get_entry(entry_id, user_id=user_id)
         if not entry:
@@ -350,7 +350,7 @@ class CurioService:
         entry_id: str,
         user_id: Optional[int] = None,
         **fields: Any,
-    ) -> Optional[CurioEntry]:
+    ) -> Optional[ZentrimEntry]:
         """通用 update（支持 title/content/tags/summary 等）"""
         entry = self.get_entry(entry_id, user_id=user_id)
         if not entry:
@@ -382,7 +382,7 @@ class CurioService:
             storage = self._storage()
             return bool(storage.delete_file_by_key(key))
         except Exception as e:
-            logger.warning(f"[CurioService] delete_file_by_key({key}) failed: {e}")
+            logger.warning(f"[ZentrimService] delete_file_by_key({key}) failed: {e}")
             return False
 
     def upload_attachment(
@@ -395,7 +395,7 @@ class CurioService:
         original_filename: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        上传附件到 `curio/user_{uid}/attachments/{entry_id}_{file_type}.{ext}`
+        上传附件到 `zentrim/user_{uid}/attachments/{entry_id}_{file_type}.{ext}`
 
         Args:
             user_id: 所属用户
@@ -423,7 +423,7 @@ class CurioService:
             if ext_from_name and len(ext_from_name) <= 5:
                 ext = ext_from_name
 
-        key = f"{settings.TENCENT_COS_PREFIX}curio/user_{user_id}/attachments/{entry_id}_{file_type}.{ext}"
+        key = f"{settings.TENCENT_COS_PREFIX}zentrim/user_{user_id}/attachments/{entry_id}_{file_type}.{ext}"
 
         storage = self._storage()
         storage.put_object(key, file_bytes)
@@ -438,23 +438,23 @@ class CurioService:
     # ════════════════════════════════════════
     # 搜索
     # ════════════════════════════════════════
-    def search_curio(
+    def search_zentrim(
         self,
         user_id: int,
         query: str,
         limit: int = 20,
         include_archived: bool = False,
-    ) -> List[CurioEntry]:
+    ) -> List[ZentrimEntry]:
         """
         混合搜索：
-        1. 向量搜索 idx-curio-{uid}（如有向量服务）
+        1. 向量搜索 idx-zentrim-{uid}（如有向量服务）
         2. FULLTEXT / LIKE 搜索
         3. 合并去重，按相关性排序
         """
         if not query or not query.strip():
             return []
 
-        results: Dict[str, CurioEntry] = {}
+        results: Dict[str, ZentrimEntry] = {}
 
         # 1. 向量搜索（可选）
         try:
@@ -462,29 +462,29 @@ class CurioService:
             for entry, score in vector_hits:
                 results[entry.id] = entry  # 向量结果按命中度已排序
         except Exception as e:
-            logger.debug(f"[CurioService] vector search skipped: {e}")
+            logger.debug(f"[ZentrimService] vector search skipped: {e}")
 
         # 2. 字面匹配（title/content/summary LIKE）
         try:
             # fix(P1-1): 先转义 %/_，避免用户输入作为通配符导致全表扫描或绕过匹配
             safe_query = _escape_like(query)
             pat = f"%{safe_query}%"
-            like_query = self.db.query(CurioEntry).filter(
-                CurioEntry.user_id == user_id,
+            like_query = self.db.query(ZentrimEntry).filter(
+                ZentrimEntry.user_id == user_id,
                 or_(
-                    CurioEntry.title.like(pat, escape="\\"),
-                    CurioEntry.content.like(pat, escape="\\"),
-                    CurioEntry.summary.like(pat, escape="\\"),
+                    ZentrimEntry.title.like(pat, escape="\\"),
+                    ZentrimEntry.content.like(pat, escape="\\"),
+                    ZentrimEntry.summary.like(pat, escape="\\"),
                 ),
             )
             if not include_archived:
-                like_query = like_query.filter(CurioEntry.status != "archived")
-            like_hits = like_query.order_by(CurioEntry.created_at.desc()).limit(limit).all()
+                like_query = like_query.filter(ZentrimEntry.status != "archived")
+            like_hits = like_query.order_by(ZentrimEntry.created_at.desc()).limit(limit).all()
             for entry in like_hits:
                 if entry.id not in results:
                     results[entry.id] = entry
         except Exception as e:
-            logger.debug(f"[CurioService] fulltext search skipped: {e}")
+            logger.debug(f"[ZentrimService] fulltext search skipped: {e}")
 
         # 合并结果，向量优先（已按顺序插入），字面命中按时间倒序追加
         combined = list(results.values())
@@ -497,7 +497,7 @@ class CurioService:
         """
         尝试向量搜索；如不可用返回空列表。
 
-        返回 [(CurioEntry, score), ...]。
+        返回 [(ZentrimEntry, score), ...]。
         """
         # fix(P2-4): VectorSearchService 单例缓存（避免每次搜索重新实例化）
         global _VS_SINGLETON
@@ -512,8 +512,8 @@ class CurioService:
             if _VS_SINGLETON is None:
                 _VS_SINGLETON = VectorSearchService(agent_hash=None)
             vs = _VS_SINGLETON
-            # idx-curio-{uid} 索引命名约定
-            index_name = f"idx-curio-{user_id}"
+            # idx-zentrim-{uid} 索引命名约定
+            index_name = f"idx-zentrim-{user_id}"
             raw = vs.search(query, top_k=top_k * 2) if hasattr(vs, "search") else []
 
             entries_with_score = []
@@ -538,11 +538,11 @@ class CurioService:
         except ImportError as e:
             # fix(P1-2): 首次加载失败静默 — VectorSearchService 模块缺失是常见降级场景
             _VS_SINGLETON = True  # 用 True 标记 "已尝试但不可用"，避免反复 import
-            logger.warning(f"[CurioService] vector search degraded (ImportError): {e}")
+            logger.warning(f"[ZentrimService] vector search degraded (ImportError): {e}")
             return []
         except Exception as e:
             # fix(P1-2): 运行时错误 — 打 warning 而非 debug，便于监控告警
-            logger.warning(f"[CurioService] vector search degraded: {e}")
+            logger.warning(f"[ZentrimService] vector search degraded: {e}")
             return []
 
     # ════════════════════════════════════════
@@ -550,11 +550,11 @@ class CurioService:
     # ════════════════════════════════════════
     def create_timeline(
         self, user_id: int, name: str, description: Optional[str] = None, type: str = "custom"
-    ) -> CurioTimeline:
+    ) -> ZentrimTimeline:
         """创建时间线"""
         if type not in ("auto", "custom"):
             type = "custom"
-        tl = CurioTimeline(
+        tl = ZentrimTimeline(
             id=_generate_ulid(),
             user_id=user_id,
             name=name,
@@ -566,20 +566,20 @@ class CurioService:
         self.db.refresh(tl)
         return tl
 
-    def get_timelines(self, user_id: int) -> List[CurioTimeline]:
+    def get_timelines(self, user_id: int) -> List[ZentrimTimeline]:
         """获取用户所有时间线"""
         return (
-            self.db.query(CurioTimeline)
-            .filter(CurioTimeline.user_id == user_id)
-            .order_by(CurioTimeline.created_at.desc())
+            self.db.query(ZentrimTimeline)
+            .filter(ZentrimTimeline.user_id == user_id)
+            .order_by(ZentrimTimeline.created_at.desc())
             .all()
         )
 
-    def get_timeline(self, timeline_id: str, user_id: Optional[int] = None) -> Optional[CurioTimeline]:
+    def get_timeline(self, timeline_id: str, user_id: Optional[int] = None) -> Optional[ZentrimTimeline]:
         """时间线详情"""
-        query = self.db.query(CurioTimeline).filter(CurioTimeline.id == timeline_id)
+        query = self.db.query(ZentrimTimeline).filter(ZentrimTimeline.id == timeline_id)
         if user_id is not None:
-            query = query.filter(CurioTimeline.user_id == user_id)
+            query = query.filter(ZentrimTimeline.user_id == user_id)
         return query.first()
 
     def add_to_timeline(
@@ -596,17 +596,17 @@ class CurioService:
 
         # 已存在则跳过（保证 idempotent）
         exists = (
-            self.db.query(CurioTimelineEntry)
+            self.db.query(ZentrimTimelineEntry)
             .filter(
-                CurioTimelineEntry.timeline_id == timeline_id,
-                CurioTimelineEntry.entry_id == entry_id,
+                ZentrimTimelineEntry.timeline_id == timeline_id,
+                ZentrimTimelineEntry.entry_id == entry_id,
             )
             .first()
         )
         if exists:
             return True
 
-        link = CurioTimelineEntry(
+        link = ZentrimTimelineEntry(
             timeline_id=timeline_id,
             entry_id=entry_id,
             sort_order=sort_order,
@@ -624,10 +624,10 @@ class CurioService:
             return False
 
         deleted = (
-            self.db.query(CurioTimelineEntry)
+            self.db.query(ZentrimTimelineEntry)
             .filter(
-                CurioTimelineEntry.timeline_id == timeline_id,
-                CurioTimelineEntry.entry_id == entry_id,
+                ZentrimTimelineEntry.timeline_id == timeline_id,
+                ZentrimTimelineEntry.entry_id == entry_id,
             )
             .delete(synchronize_session=False)
         )
@@ -636,16 +636,16 @@ class CurioService:
 
     def get_timeline_entries(
         self, timeline_id: str, user_id: Optional[int] = None
-    ) -> List[CurioEntry]:
+    ) -> List[ZentrimEntry]:
         """获取时间线下的所有条目"""
         tl = self.get_timeline(timeline_id, user_id=user_id)
         if not tl:
             return []
         rows = (
-            self.db.query(CurioTimelineEntry, CurioEntry)
-            .join(CurioEntry, CurioEntry.id == CurioTimelineEntry.entry_id)
-            .filter(CurioTimelineEntry.timeline_id == timeline_id)
-            .order_by(CurioTimelineEntry.sort_order.asc(), CurioTimelineEntry.added_at.asc())
+            self.db.query(ZentrimTimelineEntry, ZentrimEntry)
+            .join(ZentrimEntry, ZentrimEntry.id == ZentrimTimelineEntry.entry_id)
+            .filter(ZentrimTimelineEntry.timeline_id == timeline_id)
+            .order_by(ZentrimTimelineEntry.sort_order.asc(), ZentrimTimelineEntry.added_at.asc())
             .all()
         )
         return [entry for _link, entry in rows]
@@ -655,8 +655,8 @@ class CurioService:
         tl = self.get_timeline(timeline_id, user_id=user_id)
         if not tl:
             return False
-        self.db.query(CurioTimelineEntry).filter(
-            CurioTimelineEntry.timeline_id == timeline_id
+        self.db.query(ZentrimTimelineEntry).filter(
+            ZentrimTimelineEntry.timeline_id == timeline_id
         ).delete(synchronize_session=False)
         self.db.delete(tl)
         self.db.commit()
@@ -667,7 +667,7 @@ class CurioService:
     # ════════════════════════════════════════
     def create_reference(
         self, source_id: str, target_id: str, user_id: Optional[int] = None
-    ) -> Optional[CurioReference]:
+    ) -> Optional[ZentrimReference]:
         """创建 @引用（source → target）"""
         if source_id == target_id:
             return None  # 不允许自引用
@@ -679,17 +679,17 @@ class CurioService:
 
         # fix(P1-7): 去重 — 已存在同 source+target 的引用则直接返回
         existing = (
-            self.db.query(CurioReference)
+            self.db.query(ZentrimReference)
             .filter(
-                CurioReference.source_id == source_id,
-                CurioReference.target_id == target_id,
+                ZentrimReference.source_id == source_id,
+                ZentrimReference.target_id == target_id,
             )
             .first()
         )
         if existing:
             return existing
 
-        ref = CurioReference(
+        ref = ZentrimReference(
             id=_generate_ulid(),
             source_id=source_id,
             target_id=target_id,
@@ -701,7 +701,7 @@ class CurioService:
 
     def get_references(
         self, entry_id: str, direction: str = "target", user_id: Optional[int] = None
-    ) -> List[CurioReference]:
+    ) -> List[ZentrimReference]:
         """
         获取引用关系
         - direction="target"：返回哪些条目 @引用了 entry_id（即 entry 是被引用方）
@@ -712,14 +712,14 @@ class CurioService:
             return []
 
         if direction == "target":
-            query = self.db.query(CurioReference).filter(CurioReference.target_id == entry_id)
+            query = self.db.query(ZentrimReference).filter(ZentrimReference.target_id == entry_id)
         else:
-            query = self.db.query(CurioReference).filter(CurioReference.source_id == entry_id)
-        return query.order_by(CurioReference.created_at.desc()).all()
+            query = self.db.query(ZentrimReference).filter(ZentrimReference.source_id == entry_id)
+        return query.order_by(ZentrimReference.created_at.desc()).all()
 
     def delete_reference(self, ref_id: str, user_id: Optional[int] = None) -> bool:
         """删除引用关系；校验 user_id 必须同时拥有 source 和 target"""
-        ref = self.db.query(CurioReference).filter(CurioReference.id == ref_id).first()
+        ref = self.db.query(ZentrimReference).filter(ZentrimReference.id == ref_id).first()
         if not ref:
             return False
 
@@ -741,7 +741,7 @@ class CurioService:
         entry_id: str,
         status: str,
         user_id: Optional[int] = None,
-    ) -> Optional[CurioEntry]:
+    ) -> Optional[ZentrimEntry]:
         """更新条目状态（active/processing/archived）"""
         if status not in ("active", "archived", "processing"):
             raise ValueError(f"Invalid status: {status}")
@@ -764,7 +764,7 @@ class CurioService:
     # 序列化辅助
     # ════════════════════════════════════════
     @staticmethod
-    def serialize_entry(entry: CurioEntry) -> Dict[str, Any]:
+    def serialize_entry(entry: ZentrimEntry) -> Dict[str, Any]:
         """统一序列化（供 router JSON 响应使用）"""
         if entry is None:
             return {}
@@ -793,7 +793,7 @@ class CurioService:
         }
 
     @staticmethod
-    def serialize_timeline(tl: CurioTimeline) -> Dict[str, Any]:
+    def serialize_timeline(tl: ZentrimTimeline) -> Dict[str, Any]:
         if tl is None:
             return {}
         return {
@@ -806,7 +806,7 @@ class CurioService:
         }
 
     @staticmethod
-    def serialize_reference(ref: CurioReference) -> Dict[str, Any]:
+    def serialize_reference(ref: ZentrimReference) -> Dict[str, Any]:
         if ref is None:
             return {}
         return {

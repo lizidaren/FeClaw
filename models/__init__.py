@@ -30,10 +30,10 @@ from models.database import (  # noqa: F401
     AgentProfile,
 )
 
-# Curio（格物所）models
-from models.curio import (  # noqa: F401
-    CurioEntry,
-    CurioTimeline,
-    CurioTimelineEntry,
-    CurioReference,
+# Zentrim（格物所）models
+from models.zentrim import (  # noqa: F401
+    ZentrimEntry,
+    ZentrimTimeline,
+    ZentrimTimelineEntry,
+    ZentrimReference,
 )

@@ -1,5 +1,5 @@
 """
-Curio（格物所）数据模型
+Zentrim（格物所）数据模型
 
 四层统一结构（每层 = { content, attachments[], metadata }）：
 - 原始层：用户原始产出
@@ -7,7 +7,7 @@ Curio（格物所）数据模型
 - 关联层：@引用关系
 - 批注层：Agent/用户补充
 
-对应 PRD/TDD 参考 `docs/v1/02-curio.md`。
+对应 PRD/TDD 参考 `docs/v1/02-zentrim.md`。
 """
 import logging
 from sqlalchemy import (
@@ -27,21 +27,21 @@ from models.database import Base
 logger = logging.getLogger(__name__)
 
 
-class CurioEntry(Base):
-    """Curio 条目表（note/photo/recording/link/canvas）"""
-    __tablename__ = "curio_entries"
+class ZentrimEntry(Base):
+    """Zentrim 条目表（note/photo/recording/link/canvas）"""
+    __tablename__ = "zentrim_entries"
     __table_args__ = (
-        Index("idx_curio_entries_user_created", "user_id", "created_at"),
-        Index("idx_curio_entries_user_type", "user_id", "type"),
-        Index("idx_curio_entries_status", "user_id", "status"),
+        Index("idx_zentrim_entries_user_created", "user_id", "created_at"),
+        Index("idx_zentrim_entries_user_type", "user_id", "type"),
+        Index("idx_zentrim_entries_status", "user_id", "status"),
         # fix(P2-2): DB 层 CHECK 约束（MySQL 兼容），防止脏数据写入
         CheckConstraint(
             "type IN ('note', 'photo', 'recording', 'link', 'canvas')",
-            name="ck_curio_entries_type",
+            name="ck_zentrim_entries_type",
         ),
         CheckConstraint(
             "status IN ('active', 'archived', 'processing')",
-            name="ck_curio_entries_status",
+            name="ck_zentrim_entries_status",
         ),
     )
 
@@ -64,11 +64,11 @@ class CurioEntry(Base):
     archived_at = Column(DateTime, nullable=True)
 
 
-class CurioTimeline(Base):
-    """Curio 子时间线表"""
-    __tablename__ = "curio_timelines"
+class ZentrimTimeline(Base):
+    """Zentrim 子时间线表"""
+    __tablename__ = "zentrim_timelines"
     __table_args__ = (
-        Index("idx_curio_timelines_user", "user_id"),
+        Index("idx_zentrim_timelines_user", "user_id"),
     )
 
     id = Column(String(26), primary_key=True)  # ULID
@@ -79,12 +79,12 @@ class CurioTimeline(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
-class CurioTimelineEntry(Base):
-    """Curio 时间线-条目多对多关联表"""
-    __tablename__ = "curio_timeline_entries"
+class ZentrimTimelineEntry(Base):
+    """Zentrim 时间线-条目多对多关联表"""
+    __tablename__ = "zentrim_timeline_entries"
     __table_args__ = (
-        Index("idx_curio_timeline_entries_timeline", "timeline_id"),
-        Index("idx_curio_timeline_entries_entry", "entry_id"),
+        Index("idx_zentrim_timeline_entries_timeline", "timeline_id"),
+        Index("idx_zentrim_timeline_entries_entry", "entry_id"),
     )
 
     timeline_id = Column(String(26), primary_key=True)
@@ -93,12 +93,12 @@ class CurioTimelineEntry(Base):
     added_at = Column(DateTime, default=datetime.utcnow)
 
 
-class CurioReference(Base):
-    """Curio @引用关系表（entry↔entry）"""
-    __tablename__ = "curio_references"
+class ZentrimReference(Base):
+    """Zentrim @引用关系表（entry↔entry）"""
+    __tablename__ = "zentrim_references"
     __table_args__ = (
-        Index("idx_curio_references_source", "source_id"),
-        Index("idx_curio_references_target", "target_id"),
+        Index("idx_zentrim_references_source", "source_id"),
+        Index("idx_zentrim_references_target", "target_id"),
     )
 
     id = Column(String(26), primary_key=True)  # ULID

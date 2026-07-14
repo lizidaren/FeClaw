@@ -1,29 +1,29 @@
 """
-Curio（格物所）API 路由
+Zentrim（格物所）API 路由
 
 所有端点通过 JWT 认证获取 user_id：
-- POST   /api/curio/entries              创建条目（支持 multipart 文件上传）
-- GET    /api/curio/entries              时间线分页
-- GET    /api/curio/entries/{entry_id}   条目详情
-- PATCH  /api/curio/entries/{entry_id}   更新条目（title/content/tags 等）
-- POST   /api/curio/entries/{entry_id}/archive    归档
-- POST   /api/curio/entries/{entry_id}/unarchive  取消归档
-- DELETE /api/curio/entries/{entry_id}   硬删除
-- POST   /api/curio/entries/{entry_id}/appendix   添加附录（计算层）
+- POST   /api/zentrim/entries              创建条目（支持 multipart 文件上传）
+- GET    /api/zentrim/entries              时间线分页
+- GET    /api/zentrim/entries/{entry_id}   条目详情
+- PATCH  /api/zentrim/entries/{entry_id}   更新条目（title/content/tags 等）
+- POST   /api/zentrim/entries/{entry_id}/archive    归档
+- POST   /api/zentrim/entries/{entry_id}/unarchive  取消归档
+- DELETE /api/zentrim/entries/{entry_id}   硬删除
+- POST   /api/zentrim/entries/{entry_id}/appendix   添加附录（计算层）
 
-- POST   /api/curio/timelines                       创建时间线
-- GET    /api/curio/timelines                       时间线列表
-- GET    /api/curio/timelines/{timeline_id}         时间线详情（含条目）
-- DELETE /api/curio/timelines/{timeline_id}         删除时间线
-- POST   /api/curio/timelines/{timeline_id}/entries     加入条目
-- DELETE /api/curio/timelines/{timeline_id}/entries/{entry_id}  从时间线移除
+- POST   /api/zentrim/timelines                       创建时间线
+- GET    /api/zentrim/timelines                       时间线列表
+- GET    /api/zentrim/timelines/{timeline_id}         时间线详情（含条目）
+- DELETE /api/zentrim/timelines/{timeline_id}         删除时间线
+- POST   /api/zentrim/timelines/{timeline_id}/entries     加入条目
+- DELETE /api/zentrim/timelines/{timeline_id}/entries/{entry_id}  从时间线移除
 
-- POST   /api/curio/references                       创建 @引用
-- GET    /api/curio/references?entry_id=&direction=  查询引用
-- DELETE /api/curio/references/{ref_id}              删除引用
+- POST   /api/zentrim/references                       创建 @引用
+- GET    /api/zentrim/references?entry_id=&direction=  查询引用
+- DELETE /api/zentrim/references/{ref_id}              删除引用
 
-- GET    /api/curio/search?q=...                     搜索
-- POST   /api/curio/attachments                      通用附件上传（用户先创建条目 → 再上传）
+- GET    /api/zentrim/search?q=...                     搜索
+- POST   /api/zentrim/attachments                      通用附件上传（用户先创建条目 → 再上传）
 
 约定：
 - 所有 endpoint 返回 JSON
@@ -48,11 +48,11 @@ from sqlalchemy.orm import Session
 
 from config import settings
 from models.database import SessionLocal
-from services.curio_service import CurioService, _generate_ulid
+from services.zentrim_service import ZentrimService, _generate_ulid
 from utils.auth import get_current_user_id
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/api/curio", tags=["Curio"])
+router = APIRouter(prefix="/api/zentrim", tags=["Zentrim"])
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -174,7 +174,7 @@ async def create_entry(
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Invalid bbox JSON: {e}")
 
-    svc = CurioService(db)
+    svc = ZentrimService(db)
 
     # 先创建条目，拿到 id
     entry = svc.create_entry(
@@ -215,12 +215,12 @@ async def create_entry(
                 original_filename=file.filename,
             )
         except Exception as e:
-            logger.exception(f"[Curio] upload_attachment failed; rolling back entry {entry.id}: {e}")
+            logger.exception(f"[Zentrim] upload_attachment failed; rolling back entry {entry.id}: {e}")
             # COS 上传失败 → 删 entry（补偿）
             try:
                 svc.delete_entry(entry.id, user_id=user_id)
             except Exception:
-                logger.exception(f"[Curio] rollback delete_entry({entry.id}) also failed")
+                logger.exception(f"[Zentrim] rollback delete_entry({entry.id}) also failed")
             raise HTTPException(status_code=502, detail="Upload to COS failed")
 
         # 回写 attachment 到条目
@@ -230,18 +230,18 @@ async def create_entry(
         try:
             db.commit()
         except Exception as e:
-            logger.exception(f"[Curio] db.commit failed after COS upload; compensating: {e}")
+            logger.exception(f"[Zentrim] db.commit failed after COS upload; compensating: {e}")
             db.rollback()
             try:
                 svc._delete_storage_object(attachment["key"])
             except Exception:
-                logger.exception(f"[Curio] compensating delete of {attachment['key']} failed")
+                logger.exception(f"[Zentrim] compensating delete of {attachment['key']} failed")
             raise HTTPException(status_code=500, detail="DB commit failed after upload")
         db.refresh(entry)
 
     # fix(P1-3): 写操作审计日志
-    logger.info(f"[audit] curio.create_entry user={user_id} entry={entry.id} type={type}")
-    return CurioService.serialize_entry(entry)
+    logger.info(f"[audit] zentrim.create_entry user={user_id} entry={entry.id} type={type}")
+    return ZentrimService.serialize_entry(entry)
 
 
 @router.get("/entries")
@@ -261,7 +261,7 @@ async def list_entries(
         except Exception:
             raise HTTPException(status_code=400, detail="Invalid 'before' datetime")
 
-    svc = CurioService(db)
+    svc = ZentrimService(db)
     entries = svc.get_entries(
         user_id=user_id,
         type=type,
@@ -269,7 +269,7 @@ async def list_entries(
         before=before_dt,
         include_archived=include_archived,
     )
-    return [CurioService.serialize_entry(e) for e in entries]
+    return [ZentrimService.serialize_entry(e) for e in entries]
 
 
 @router.get("/entries/{entry_id}")
@@ -279,11 +279,11 @@ async def get_entry(
     db: Session = Depends(get_db),
 ):
     """条目详情"""
-    svc = CurioService(db)
+    svc = ZentrimService(db)
     entry = svc.get_entry(entry_id, user_id=user_id)
     if not entry:
         raise HTTPException(status_code=404, detail="Entry not found")
-    return CurioService.serialize_entry(entry)
+    return ZentrimService.serialize_entry(entry)
 
 
 @router.patch("/entries/{entry_id}")
@@ -294,7 +294,7 @@ async def patch_entry(
     db: Session = Depends(get_db),
 ):
     """更新条目（title/content/tags/summary/metadata/bbox）"""
-    svc = CurioService(db)
+    svc = ZentrimService(db)
     fields = body.dict(exclude_unset=True)
     if not fields:
         raise HTTPException(status_code=400, detail="No fields to update")
@@ -303,8 +303,8 @@ async def patch_entry(
     if not entry:
         raise HTTPException(status_code=404, detail="Entry not found")
     # fix(P1-3): 写操作审计日志（便于事后追溯 / 合规审查）
-    logger.info(f"[audit] curio.update_entry user={user_id} entry={entry_id} fields={sorted(fields.keys())}")
-    return CurioService.serialize_entry(entry)
+    logger.info(f"[audit] zentrim.update_entry user={user_id} entry={entry_id} fields={sorted(fields.keys())}")
+    return ZentrimService.serialize_entry(entry)
 
 
 @router.post("/entries/{entry_id}/archive")
@@ -314,13 +314,13 @@ async def archive_entry(
     db: Session = Depends(get_db),
 ):
     """归档条目（软删）"""
-    svc = CurioService(db)
+    svc = ZentrimService(db)
     entry = svc.archive_entry(entry_id, user_id=user_id)
     if not entry:
         raise HTTPException(status_code=404, detail="Entry not found")
     # fix(P1-3): 写操作审计日志
-    logger.info(f"[audit] curio.archive_entry user={user_id} entry={entry_id}")
-    return {"status": "ok", "entry": CurioService.serialize_entry(entry)}
+    logger.info(f"[audit] zentrim.archive_entry user={user_id} entry={entry_id}")
+    return {"status": "ok", "entry": ZentrimService.serialize_entry(entry)}
 
 
 @router.post("/entries/{entry_id}/unarchive")
@@ -330,13 +330,13 @@ async def unarchive_entry(
     db: Session = Depends(get_db),
 ):
     """取消归档"""
-    svc = CurioService(db)
+    svc = ZentrimService(db)
     entry = svc.unarchive_entry(entry_id, user_id=user_id)
     if not entry:
         raise HTTPException(status_code=404, detail="Entry not found")
     # fix(P1-3): 写操作审计日志
-    logger.info(f"[audit] curio.unarchive_entry user={user_id} entry={entry_id}")
-    return {"status": "ok", "entry": CurioService.serialize_entry(entry)}
+    logger.info(f"[audit] zentrim.unarchive_entry user={user_id} entry={entry_id}")
+    return {"status": "ok", "entry": ZentrimService.serialize_entry(entry)}
 
 
 @router.delete("/entries/{entry_id}")
@@ -346,12 +346,12 @@ async def delete_entry(
     db: Session = Depends(get_db),
 ):
     """硬删除（同时清理 references / timeline links）"""
-    svc = CurioService(db)
+    svc = ZentrimService(db)
     success = svc.delete_entry(entry_id, user_id=user_id)
     if not success:
         raise HTTPException(status_code=404, detail="Entry not found")
     # fix(P1-3): 写操作审计日志（硬删是高敏感操作，必须留痕）
-    logger.info(f"[audit] curio.delete_entry user={user_id} entry={entry_id}")
+    logger.info(f"[audit] zentrim.delete_entry user={user_id} entry={entry_id}")
     return {"status": "ok"}
 
 
@@ -363,7 +363,7 @@ async def add_appendix(
     db: Session = Depends(get_db),
 ):
     """添加附录到 metadata.annotation.appendices（不改原始层）"""
-    svc = CurioService(db)
+    svc = ZentrimService(db)
     entry = svc.add_appendix(
         entry_id=entry_id,
         title=body.title,
@@ -373,7 +373,7 @@ async def add_appendix(
     )
     if not entry:
         raise HTTPException(status_code=404, detail="Entry not found")
-    return CurioService.serialize_entry(entry)
+    return ZentrimService.serialize_entry(entry)
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -387,8 +387,8 @@ async def upload_attachment(
     user_id: int = Depends(get_current_user_id),
     db: Session = Depends(get_db),
 ):
-    """把附件上传到 `curio/user_{uid}/attachments/{entry_id}_{file_type}.{ext}`，并回写到 entry.attachment"""
-    svc = CurioService(db)
+    """把附件上传到 `zentrim/user_{uid}/attachments/{entry_id}_{file_type}.{ext}`，并回写到 entry.attachment"""
+    svc = ZentrimService(db)
     entry = svc.get_entry(entry_id, user_id=user_id)
     if not entry:
         raise HTTPException(status_code=404, detail="Entry not found")
@@ -431,7 +431,7 @@ async def create_timeline(
     db: Session = Depends(get_db),
 ):
     """创建时间线"""
-    svc = CurioService(db)
+    svc = ZentrimService(db)
     tl = svc.create_timeline(
         user_id=user_id,
         name=body.name,
@@ -439,8 +439,8 @@ async def create_timeline(
         type=body.type,
     )
     # fix(P1-3): 写操作审计日志
-    logger.info(f"[audit] curio.create_timeline user={user_id} timeline={tl.id} name={body.name!r}")
-    return CurioService.serialize_timeline(tl)
+    logger.info(f"[audit] zentrim.create_timeline user={user_id} timeline={tl.id} name={body.name!r}")
+    return ZentrimService.serialize_timeline(tl)
 
 
 @router.get("/timelines")
@@ -449,9 +449,9 @@ async def list_timelines(
     db: Session = Depends(get_db),
 ):
     """时间线列表"""
-    svc = CurioService(db)
+    svc = ZentrimService(db)
     tls = svc.get_timelines(user_id=user_id)
-    return [CurioService.serialize_timeline(t) for t in tls]
+    return [ZentrimService.serialize_timeline(t) for t in tls]
 
 
 @router.get("/timelines/{timeline_id}")
@@ -461,14 +461,14 @@ async def get_timeline(
     db: Session = Depends(get_db),
 ):
     """时间线详情（含条目）"""
-    svc = CurioService(db)
+    svc = ZentrimService(db)
     tl = svc.get_timeline(timeline_id, user_id=user_id)
     if not tl:
         raise HTTPException(status_code=404, detail="Timeline not found")
     entries = svc.get_timeline_entries(timeline_id, user_id=user_id)
     return {
-        **CurioService.serialize_timeline(tl),
-        "entries": [CurioService.serialize_entry(e) for e in entries],
+        **ZentrimService.serialize_timeline(tl),
+        "entries": [ZentrimService.serialize_entry(e) for e in entries],
         "entry_count": len(entries),
     }
 
@@ -480,12 +480,12 @@ async def delete_timeline(
     db: Session = Depends(get_db),
 ):
     """删除时间线（不影响条目本身）"""
-    svc = CurioService(db)
+    svc = ZentrimService(db)
     ok = svc.delete_timeline(timeline_id, user_id=user_id)
     if not ok:
         raise HTTPException(status_code=404, detail="Timeline not found")
     # fix(P1-3): 写操作审计日志
-    logger.info(f"[audit] curio.delete_timeline user={user_id} timeline={timeline_id}")
+    logger.info(f"[audit] zentrim.delete_timeline user={user_id} timeline={timeline_id}")
     return {"status": "ok"}
 
 
@@ -497,7 +497,7 @@ async def add_to_timeline(
     db: Session = Depends(get_db),
 ):
     """将条目加入时间线"""
-    svc = CurioService(db)
+    svc = ZentrimService(db)
     ok = svc.add_to_timeline(
         timeline_id=timeline_id,
         entry_id=body.entry_id,
@@ -507,7 +507,7 @@ async def add_to_timeline(
     if not ok:
         raise HTTPException(status_code=404, detail="Timeline or entry not found")
     # fix(P1-3): 写操作审计日志
-    logger.info(f"[audit] curio.add_to_timeline user={user_id} timeline={timeline_id} entry={body.entry_id}")
+    logger.info(f"[audit] zentrim.add_to_timeline user={user_id} timeline={timeline_id} entry={body.entry_id}")
     return {"status": "ok"}
 
 
@@ -519,12 +519,12 @@ async def remove_from_timeline(
     db: Session = Depends(get_db),
 ):
     """从时间线移除条目"""
-    svc = CurioService(db)
+    svc = ZentrimService(db)
     ok = svc.remove_from_timeline(timeline_id, entry_id, user_id=user_id)
     if not ok:
         raise HTTPException(status_code=404, detail="Timeline not found")
     # fix(P1-3): 写操作审计日志
-    logger.info(f"[audit] curio.remove_from_timeline user={user_id} timeline={timeline_id} entry={entry_id}")
+    logger.info(f"[audit] zentrim.remove_from_timeline user={user_id} timeline={timeline_id} entry={entry_id}")
     return {"status": "ok"}
 
 
@@ -538,7 +538,7 @@ async def create_reference(
     db: Session = Depends(get_db),
 ):
     """创建 @引用"""
-    svc = CurioService(db)
+    svc = ZentrimService(db)
     ref = svc.create_reference(
         source_id=body.source_id,
         target_id=body.target_id,
@@ -550,8 +550,8 @@ async def create_reference(
             detail="Cannot create reference (self-reference or entry not found)",
         )
     # fix(P1-3): 写操作审计日志
-    logger.info(f"[audit] curio.create_reference user={user_id} ref={ref.id} source={body.source_id} target={body.target_id}")
-    return CurioService.serialize_reference(ref)
+    logger.info(f"[audit] zentrim.create_reference user={user_id} ref={ref.id} source={body.source_id} target={body.target_id}")
+    return ZentrimService.serialize_reference(ref)
 
 
 @router.get("/references")
@@ -566,9 +566,9 @@ async def list_references(
     - direction=target：返回哪些条目 @引用了 entry_id（被引用方）
     - direction=source：返回 entry_id @引用了哪些条目（引用方）
     """
-    svc = CurioService(db)
+    svc = ZentrimService(db)
     refs = svc.get_references(entry_id, direction=direction, user_id=user_id)
-    return [CurioService.serialize_reference(r) for r in refs]
+    return [ZentrimService.serialize_reference(r) for r in refs]
 
 
 @router.delete("/references/{ref_id}")
@@ -578,16 +578,16 @@ async def delete_reference(
     db: Session = Depends(get_db),
 ):
     """删除 @引用"""
-    svc = CurioService(db)
+    svc = ZentrimService(db)
     ok = svc.delete_reference(ref_id, user_id=user_id)
     if not ok:
         raise HTTPException(status_code=404, detail="Reference not found")
     # fix(P1-3): 写操作审计日志
-    logger.info(f"[audit] curio.delete_reference user={user_id} ref={ref_id}")
+    logger.info(f"[audit] zentrim.delete_reference user={user_id} ref={ref_id}")
     return {"status": "ok"}
 
 
-# ─────────────────────────────────══════════════════════════════════
+# ────────────────────────────────────────────────────────────────────
 # 搜索
 # ────────────────────────────────────────────────────────────────────
 @router.get("/search")
@@ -599,8 +599,8 @@ async def search_entries(
     db: Session = Depends(get_db),
 ):
     """混合搜索（向量优先 + LIKE 兜底合并）"""
-    svc = CurioService(db)
-    entries = svc.search_curio(
+    svc = ZentrimService(db)
+    entries = svc.search_zentrim(
         user_id=user_id,
         query=q,
         limit=limit,
@@ -609,5 +609,5 @@ async def search_entries(
     return {
         "query": q,
         "count": len(entries),
-        "results": [CurioService.serialize_entry(e) for e in entries],
+        "results": [ZentrimService.serialize_entry(e) for e in entries],
     }

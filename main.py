@@ -69,7 +69,7 @@ from routers.desktop_ws import router as desktop_ws_router
 from routers.well_known import router as well_known_router
 from routers.upload import router as upload_router
 from routers.desktop_api import router as desktop_api_router
-from routers.curio import router as curio_router
+from routers.zentrim import router as zentrim_router
 
 
 @asynccontextmanager
@@ -89,7 +89,7 @@ async def lifespan(app: FastAPI):
     from models.group import Group, GroupMember, GroupMessage, GroupMoments  # noqa: F401
     from models.fehub import FePublish, AppData  # noqa: F401
     from models.agent_buffer import AgentBuffer  # noqa: F401  (Agent V2 ReplyBuffer)
-    from models.curio import CurioEntry, CurioTimeline, CurioTimelineEntry, CurioReference  # noqa: F401  (Curio 格物所)
+    from models.zentrim import ZentrimEntry, ZentrimTimeline, ZentrimTimelineEntry, ZentrimReference  # noqa: F401  (Zentrim 格物所)
     init_db()
     logger.info("Database initialized")
 
@@ -391,7 +391,7 @@ if settings.DESKTOP_ENABLED:
     app.include_router(desktop_ws_router)
     logger.info("Desktop WS relay enabled")
 app.include_router(static_site_public.router)  # 静态网站公开访问
-app.include_router(curio_router)  # Curio（格物所）API
+app.include_router(zentrim_router)  # Zentrim（格物所）API
 logger.info("Upload session router registered")
 
 
