@@ -82,3 +82,7 @@ code_review_result.md
 .agent_executor_fixes.md
 AUDIT_REPORT.md
 history/
+
+# LLM work files
+claude-work/
+v3-progress/
