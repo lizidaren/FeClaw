@@ -930,7 +930,11 @@ async def files_page(request: Request, path: str = ""):
     if agent_hash:
         if not await get_user_for_page(request):
             return RedirectResponse(url="/login", status_code=302)
-        rendered = templates.TemplateResponse(request, "agent_files.html", {"request": request, "agent_hash": agent_hash})
+        rendered = templates.TemplateResponse(request, "agent_files.html", {
+            "request": request,
+            "agent_hash": agent_hash,
+            "home_url": "/",
+        })
         # CDN 不要缓存动态页面
         rendered.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0"
         rendered.headers["Pragma"] = "no-cache"

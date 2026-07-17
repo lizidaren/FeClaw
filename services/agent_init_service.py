@@ -248,10 +248,10 @@ class AgentInitService:
         if agent_count >= 100:
             raise ValueError("每个用户最多创建 50 个 Agent")
 
-        # 生成唯一的 4 位 hash
+        # 生成唯一的 8 位 hash
         if not hash_value:
             def generate_hash():
-                return secrets.token_hex(2)  # 4 位十六进制，匹配 DB String(4)
+                return secrets.token_hex(4)  # 8 位十六进制，匹配 DB String(8)
 
             hash_value = generate_hash()
             max_attempts = 100

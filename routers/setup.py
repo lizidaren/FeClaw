@@ -344,6 +344,8 @@ async def complete(
 ):
     """标记 SETUP_COMPLETE=true，同时把模型选择写入 .env。"""
     updates: Dict[str, str] = {"SETUP_COMPLETE": "true"}
+    if payload.feclaw_domain:
+        updates["FECLAW_DOMAIN"] = payload.feclaw_domain.strip()
     if payload.default_llm_model:
         updates["MAIN_TEXT_MODEL"] = payload.default_llm_model.strip()
     if payload.default_vision_model:
