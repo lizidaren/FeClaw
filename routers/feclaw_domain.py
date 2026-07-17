@@ -1058,7 +1058,9 @@ async def agent_files(agent_hash: str, request: Request):
     sub = _redirect_to_subdomain(agent_hash, "/files")
     if sub:
         return sub
-    return templates.TemplateResponse(request, "agent_files.html", {"request": request, "agent_hash": agent_hash})
+    domain = settings.FECLAW_DOMAIN
+    home_url = f"https://{agent_hash}.{domain}" if domain else f"/agent/{agent_hash}"
+    return templates.TemplateResponse(request, "agent_files.html", {"request": request, "agent_hash": agent_hash, "home_url": home_url})
 
 
 @router.get("/agent/{agent_hash}/settings", response_class=HTMLResponse)

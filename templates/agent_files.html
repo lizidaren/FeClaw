@@ -277,7 +277,7 @@
         </div>
         <button onclick="logout()">🚪 退出</button>
     </div>
-    <a href="/" class="back-link">← 返回主页</a>
+    <a href="{{ home_url }}" class="back-link">← 返回主页</a>
     <div class="breadcrumb" id="breadcrumb"></div>
     <div class="toolbar">
         <button class="primary" onclick="newFile()" id="btnNewFile">📝 新建</button>
@@ -389,6 +389,16 @@
                 }
 
                 const data = await res.json();
+
+                // 无 COS 配置时（本地存储模式），显示提示
+                if (res.status !== 200 || !data.credentials) {
+                    document.getElementById('fileList').innerHTML =
+                        '<div class="empty-state"><div class="icon">📁</div><p>本地存储模式下文件管理不可用</p>'
+                        + '<p style="font-size:13px;color:#888;margin-top:8px;">'
+                        + '文件存储在服务器本地: <code>' + (data.prefix || './feclaw-storage') + '</code></p></div>';
+                    return;
+                }
+
                 stsCredential = data.credentials;
                 bucket = data.bucket;
                 region = data.region;
@@ -404,8 +414,16 @@
                 loadFiles();
             } catch (e) {
                 console.error('[File] Failed to init COS client:', e);
-                document.getElementById('fileList').innerHTML =
-                    '<div class="empty-state"><div class="icon">❌</div><p>初始化失败: ' + e.message + '</p></div>';
+                // 检测到 COS 未配置，显示友好提示
+                if (e.message && (e.message.includes('secret_id') || e.message.includes('undefined'))) {
+                    document.getElementById('fileList').innerHTML =
+                        '<div class="empty-state"><div class="icon">📁</div><p>本地存储模式下文件管理不可用</p>'
+                        + '<p style="font-size:13px;color:#888;margin-top:8px;">'
+                        + '请通过 SSH 或系统文件管理器访问存储目录</p></div>';
+                } else {
+                    document.getElementById('fileList').innerHTML =
+                        '<div class="empty-state"><div class="icon">❌</div><p>初始化失败: ' + e.message + '</p></div>';
+                }
             }
         }
 

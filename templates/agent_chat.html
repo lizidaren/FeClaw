@@ -905,6 +905,7 @@
         // ======== 配置 ========
         const USE_WEBSOCKET = true;  // WebSocket 模式（绕过 CDN 缓冲）
         const WS_URL = (location.protocol === 'https:' ? 'wss://' : 'ws://') + window.location.host + '/api/chat/ws';
+        const AGENT_HASH = '{{ agent_hash }}';
 
         // 状态
         let jwt = null;
@@ -965,7 +966,7 @@ let selectedFilePath = null;     // 上传后的 VFS 路径
                 const token = (typeof Auth !== 'undefined' && Auth.getToken) ? Auth.getToken() : localStorage.getItem('feclaw_jwt');
                 if (token) jwt = token;
 
-                const url = WS_URL + '?token=' + encodeURIComponent(jwt);
+                const url = WS_URL + '?token=' + encodeURIComponent(jwt) + '&agent_hash=' + encodeURIComponent(AGENT_HASH);
                 const self = this;
                 const ws = new WebSocket(url);
 

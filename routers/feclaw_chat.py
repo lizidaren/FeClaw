@@ -176,6 +176,9 @@ async def chat_websocket(websocket: WebSocket):
     # 从 Host header 提取子域名 agent_hash（必须显式指定）
     host = websocket.headers.get("host", "")
     agent_hash = extract_hash_from_host(host) if host else None
+    # 主域名 / 纯 IP 下从 query param 获取 agent_hash
+    if not agent_hash:
+        agent_hash = websocket.query_params.get("agent_hash") or None
     db = SessionLocal()
 
     # 🔒 安全校验：验证 user 是否拥有该 agent（防止 subdomain 劫持）
