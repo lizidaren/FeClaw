@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from typing import List
 from datetime import datetime
+import asyncio
 import logging
 
 from models.database import get_db, User, AgentProfile
@@ -199,14 +200,19 @@ async def initialize_agent_by_hash(
     persona = body.get("persona", None)
     tools_config = body.get("tools", None)
     agent_config = body.get("config", None)
+    template_id = body.get("template_id", None)
 
-    # 初始化 Agent
-    result = agent_init_service.initialize_agent(
-        db=db,
-        agent=agent,
-        persona=persona,
-        tools_config=tools_config,
-        agent_config=agent_config
+    # 初始化 Agent（放到线程池执行，避免阻塞 uvicorn event loop）
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(
+        None,
+        agent_init_service.initialize_agent,
+        db,
+        agent,
+        persona,
+        tools_config,
+        agent_config,
+        template_id,
     )
 
     return JSONResponse(content={
@@ -259,12 +265,15 @@ async def get_agent_status_by_hash(
 
 
 @router.get("/vfs-templates")
-async def get_vfs_templates():
+async def get_vfs_templates(db: Session = Depends(get_db)):
     """
     获取 VFS 模板列表
 
     返回可用的 VFS 目录结构和配置模板
     """
+    from services.template_manager import TemplateManager
+    default_persona = TemplateManager.get_persona(db, "internal::default") or ""
+
     templates = {
         "directories": {
             "workspace": "用户工作区，存放文件和项目",
@@ -280,7 +289,7 @@ async def get_vfs_templates():
         },
         "examples": {
             "memory_example": "memory/YYYY-MM-DD.md 格式，记录每日重要信息",
-            "persona_example": agent_init_service.PERSONA_TEMPLATES.get("default", {}).get("persona", "")
+            "persona_example": default_persona
         }
     }
 
@@ -528,14 +537,19 @@ async def initialize_agent(
     persona = body.get("persona", None)
     tools_config = body.get("tools", None)
     agent_config = body.get("config", None)
+    template_id = body.get("template_id", None)
 
-    # 初始化 Agent
-    result = agent_init_service.initialize_agent(
-        db=db,
-        agent=agent,
-        persona=persona,
-        tools_config=tools_config,
-        agent_config=agent_config
+    # 初始化 Agent（放到线程池执行，避免阻塞 uvicorn event loop）
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(
+        None,
+        agent_init_service.initialize_agent,
+        db,
+        agent,
+        persona,
+        tools_config,
+        agent_config,
+        template_id,
     )
 
     return JSONResponse(content={
@@ -876,26 +890,16 @@ async def get_console_user(
 # ==========================================
 
 @router.get("/templates")
-async def get_persona_templates():
+async def get_persona_templates(db: Session = Depends(get_db)):
     """
     获取 persona 预设模板列表
     """
-    templates = agent_init_service.get_persona_templates()
-
-    # 转换为前端友好的格式
-    template_list = [
-        {
-            "id": key,
-            "name": template["name"],
-            "description": template["description"],
-            "persona": template["persona"]
-        }
-        for key, template in templates.items()
-    ]
+    from services.template_manager import TemplateManager
+    templates = TemplateManager.list_templates(db)
 
     return JSONResponse(content={
         "status": "success",
-        "templates": template_list
+        "templates": templates
     })
 
 

@@ -11,12 +11,14 @@ from routers.static_site import router as static_site_router
 from routers.user import router as user_router
 from routers.wechat import router as wechat_router
 from routers.workspace import router as workspace_router
+from routers.metrics_internal import router as metrics_internal_router  # P1.5
 
 
 __all__ = [
     "console_router",
     "feclaw_chat_router",
     "health_router",
+    "metrics_internal_router",  # P1.5
     "oauth_router",
     "sandbox_router",
     "share_router",

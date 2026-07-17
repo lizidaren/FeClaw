@@ -37,7 +37,8 @@ class User(Base):
     email = Column(String(128), unique=True, index=True, nullable=True)  # 可选邮箱
     platform_user_id = Column(String(64), nullable=True, unique=True)  # Platform OAuth 用户 ID
     password_hash = Column(String(128), nullable=False)
-    salt = Column(String(64), nullable=False)
+    salt = Column(String(64), nullable=True)  # 仅 SHA-256 legacy 用户需要；bcrypt 用户为 NULL
+    password_version = Column(Integer, default=1)  # 1=SHA-256+salt, 2=bcrypt；详见 utils.auth
     is_admin = Column(Boolean, default=False)
     tier = Column(String(20), default="pro")  # "pro" | "enterprise"
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -67,7 +68,7 @@ class WeChatBinding(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)  # 所属用户（从 AgentProfile 获取）
-    agent_hash = Column(String(4), nullable=False, index=True)  # 绑定的 Agent hash
+    agent_hash = Column(String(8), nullable=False, index=True)  # 绑定的 Agent hash
     wx_openid = Column(String(64), nullable=False)
     bot_token = Column(String(128), nullable=False)
     ilink_bot_id = Column(String(64), nullable=True)
@@ -90,7 +91,7 @@ class WeChatMessage(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     binding_id = Column(Integer, ForeignKey("wechat_binding.id"), nullable=False)
-    agent_hash = Column(String(4), nullable=False, index=True)  # Agent hash（便于查询）
+    agent_hash = Column(String(8), nullable=False, index=True)  # Agent hash（便于查询）
     wx_openid = Column(String(64), nullable=False)
     direction = Column(String(16), nullable=False)  # "sent" 或 "received"
     content = Column(Text, nullable=False)
@@ -124,7 +125,7 @@ class FilePermission(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(String(32), nullable=False, index=True)  # 所属用户（从 AgentProfile 获取）
-    agent_hash = Column(String(4), nullable=False, index=True)  # Agent hash
+    agent_hash = Column(String(8), nullable=False, index=True)  # Agent hash
     file_path = Column(String(512), nullable=False)
     permission = Column(String(16), nullable=False)  # "read", "write", "readwrite", "none"
     created_at = Column(DateTime, nullable=True)
@@ -143,7 +144,7 @@ class AgentConfig(Base):
     id = Column(Integer, primary_key=True, index=True)
     key = Column(String(128), nullable=False)  # 不再 unique，与 agent_hash 联合唯一
     value = Column(Text, nullable=True)
-    agent_hash = Column(String(16), nullable=True)  # NULL = 全局配置
+    agent_hash = Column(String(8), nullable=True)  # NULL = 全局配置
     channel = Column(String(32), nullable=True)
     permission = Column(String(16), default="readwrite")  # "none" | "read" | "readwrite"
     description = Column(String(255))
@@ -159,7 +160,7 @@ class AgentUsageLog(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(String(32), nullable=False, index=True)  # 所属用户（从 AgentProfile 获取）
-    agent_hash = Column(String(4), nullable=False, index=True)  # Agent hash
+    agent_hash = Column(String(8), nullable=False, index=True)  # Agent hash
     provider = Column(String(32), nullable=True)
     model = Column(String(64), nullable=True)
     input_tokens = Column(Integer, nullable=True)
@@ -179,7 +180,7 @@ class ConversationSession(Base):
     id = Column(Integer, primary_key=True, index=True)
     session_id = Column(String(64), nullable=False, unique=True, index=True)
     user_id = Column(Integer, nullable=False, index=True)  # 所属用户（从 AgentProfile 获取）
-    agent_hash = Column(String(4), nullable=False, index=True)  # Agent hash
+    agent_hash = Column(String(8), nullable=False, index=True)  # Agent hash
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     messages = Column(Text, nullable=False)
@@ -200,7 +201,7 @@ class ScheduledTask(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(String(32), nullable=False, index=True)  # 所属用户（从 AgentProfile 获取）
-    agent_hash = Column(String(16), default="")
+    agent_hash = Column(String(8), default="")
     task_type = Column(String(16))  # "reminder" | "task"
     content = Column(Text)
     scheduled_at = Column(DateTime)
@@ -253,7 +254,7 @@ class ShareMapping(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     user_id = Column(String(32), nullable=False)  # 所属用户（从 AgentProfile 获取）
-    agent_hash = Column(String(4), nullable=False, index=True)  # Agent hash
+    agent_hash = Column(String(8), nullable=False, index=True)  # Agent hash
     vfs_path = Column(String(512), nullable=False)
     share_hash = Column(String(16), nullable=False, index=True)
     slug = Column(String(64), nullable=True, index=True)  # 友好短链（如"春风-明月-星辰"），代码层保证唯一
@@ -286,7 +287,7 @@ class ShareReference(Base):
     id = Column(Integer, primary_key=True)
     ref_hash = Column(String(8), unique=True, index=True, nullable=False)
     share_hash = Column(String(16), nullable=False, index=True)
-    agent_hash = Column(String(4), nullable=True)  # nullable 兼容老数据
+    agent_hash = Column(String(8), nullable=True)  # nullable 兼容老数据
     vfs_path = Column(String(512), nullable=False)
     selected_text = Column(Text, nullable=False)
     context_before = Column(Text, default="")
@@ -364,7 +365,7 @@ class ChatHistory(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"), index=True)  # 所属用户（从 AgentProfile 获取）
-    agent_hash = Column(String(4), nullable=False, index=True)  # Agent hash
+    agent_hash = Column(String(8), nullable=False, index=True)  # Agent hash
     # role: "user" | "assistant" | "tool"
     # - "user": 用户消息
     # - "assistant": LLM 输出的纯文本回复；如有 tool_call，会在同一行的 content+tool_name+tool_args+tool_call_id 字段中体现
@@ -417,7 +418,42 @@ class SandboxToken(Base):
     __tablename__ = 'sandbox_tokens'
 
     token = Column(String(64), primary_key=True)
-    agent_hash = Column(String(64), nullable=False, index=True)
+    agent_hash = Column(String(8), nullable=False, index=True)
+
+
+class AgentTemplate(Base):
+    """Agent 模板表"""
+    __tablename__ = "agent_templates"
+
+    id          = Column(String(32), primary_key=True)
+    name        = Column(String(100), nullable=False)
+    description = Column(String(500))
+
+    definition  = Column(JSON, nullable=False)
+
+    is_builtin  = Column(Boolean, default=False)
+    sort_order  = Column(Integer, default=0)
+
+    author_id   = Column(Integer, ForeignKey("users.id"), nullable=True)
+    author_name = Column(String(100))
+
+    version          = Column(String(20), default="1.0.0")
+    feclaw_version   = Column(String(20))
+
+    category    = Column(String(50))
+    tags        = Column(JSON)
+    language    = Column(String(10), default="zh-CN")
+    icon        = Column(String(50))
+
+    license     = Column(String(50), default="MIT")
+
+    compliance_category  = Column(String(50), default="education")
+    compliance_status    = Column(String(20), default="pending")
+    compliance_reviewed_at = Column(DateTime, nullable=True)
+    compliance_reason      = Column(String(500), nullable=True)
+
+    created_at  = Column(DateTime)
+    updated_at  = Column(DateTime)
 
 
 # 创建所有表

@@ -55,23 +55,39 @@ MODEL_REGISTRY = {
         "supports_thinking": True,
         "supports_vision": False,
     },
-    "deepseek-chat": {  # 兼容期别名，无深度思考
-        "provider": "deepseek",
-        "supports_thinking": False,
-        "supports_vision": False,
-    },
-    "deepseek-reasoner": {  # 兼容期别名，深度思考模式
-        "provider": "deepseek",
-        "supports_thinking": True,
-        "supports_vision": False,
-    },
+
     # ─── 通义千问 ───
     "qwen3.6-flash": {
         "provider": "qwen",
         "supports_thinking": False,
         "supports_vision": False,
     },
+    "qwen3.6-plus": {
+        "provider": "qwen",
+        "supports_thinking": False,
+        "supports_vision": False,
+    },
+    "qwen3.7-plus": {
+        "provider": "qwen",
+        "supports_thinking": True,
+        "supports_vision": False,
+    },
+    "qwen3.7-max": {
+        "provider": "qwen",
+        "supports_thinking": True,
+        "supports_vision": False,
+    },
     "qwen3.6-35b-a3b": {
+        "provider": "qwen",
+        "supports_thinking": False,
+        "supports_vision": True,
+    },
+    "qwen3-vl-flash": {
+        "provider": "qwen",
+        "supports_thinking": False,
+        "supports_vision": True,
+    },
+    "qwen3-vl-plus": {
         "provider": "qwen",
         "supports_thinking": False,
         "supports_vision": True,
@@ -87,11 +103,41 @@ MODEL_REGISTRY = {
         "supports_thinking": False,
         "supports_vision": False,
     },
+    "glm-4.6v": {
+        "provider": "zhipuai",
+        "supports_thinking": False,
+        "supports_vision": True,
+    },
+    "glm-4.5-air": {
+        "provider": "zhipuai",
+        "supports_thinking": False,
+        "supports_vision": False,
+    },
+    "glm-5-turbo": {
+        "provider": "zhipuai",
+        "supports_thinking": True,
+        "supports_vision": False,
+    },
+    "glm-5": {
+        "provider": "zhipuai",
+        "supports_thinking": True,
+        "supports_vision": False,
+    },
     # ─── 豆包 ───
     "doubao-seed-2-0-lite-260215": {
         "provider": "doubao",
         "supports_thinking": False,
         "supports_vision": True,
+    },
+    "doubao-seed-2-1-turbo-260628": {
+        "provider": "doubao",
+        "supports_thinking": False,
+        "supports_vision": False,
+    },
+    "doubao-seed-2-1-pro-260628": {
+        "provider": "doubao",
+        "supports_thinking": True,
+        "supports_vision": False,
     },
     "doubao-seedream-5-0-260128": {
         "provider": "doubao",
@@ -104,17 +150,12 @@ MODEL_REGISTRY = {
         "supports_thinking": True,
         "supports_vision": False,
     },
-    # ─── 小米 MiMo ───
-    "mimo-v2-flash": {
-        "provider": "mimo",
-        "supports_thinking": False,
-        "supports_vision": False,
-    },
-    "mimo-v2-pro": {
-        "provider": "mimo",
+    "kimi-k2.6": {
+        "provider": "kimi",
         "supports_thinking": True,
         "supports_vision": False,
     },
+    # ─── 小米 MiMo ───
     "mimo-v2.5": {
         "provider": "mimo",
         "supports_thinking": True,
@@ -287,23 +328,6 @@ TTS_MODEL_REGISTRY = {
         "max_chars_per_segment": 500,
         "supports_rate": True,
         "supports_emotion": False,
-    },
-    "cosyvoice-v3.5-plus": {
-        "provider": "cosyvoice",
-        "model_id": "cosyvoice-v3.5-plus",
-        "voices": {
-            "longyingxun": "年轻青涩男声",
-            "longyingmu": "优雅知性女声",
-            "longhuhu": "天真烂漫女童",
-            "longanpei": "青少年教师女",
-            "longpaopao": "飞天泡泡音",
-            "longshanshan": "戏剧化童声",
-            "longniuniu": "阳光男童声",
-            "longwangwang": "台湾少年音",
-        },
-        "max_chars_per_segment": 500,
-        "supports_rate": True,
-        "supports_emotion": True,
     },
     "minimax-speech-02": {
         "provider": "minimax",

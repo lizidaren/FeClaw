@@ -15,6 +15,10 @@ from config import settings
 
 from services.oauth_service import oauth_service
 from models.database import get_db, SessionLocal, User
+from utils.auth_dependencies import (
+    get_current_user,
+    get_current_token_payload,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -167,15 +171,15 @@ async def oauth_callback(
                     f"Username collision: {username} is owned by platform_user_id={by_username.platform_user_id}, "
                     f"but login attempt from platform_user_id={platform_user_id}. Creating separate account."
                 )
-                from utils.auth import generate_salt, hash_password
-                salt = generate_salt()
-                dummy_password = hash_password(secrets.token_hex(32), salt)
+                from utils.auth import hash_password
+                dummy_password = hash_password(secrets.token_hex(32))
                 is_admin = user_info.get("is_admin", False) or username == "admin"
                 user = User(
                     username=f"{username}_{platform_user_id}",
                     platform_user_id=platform_user_id,
                     password_hash=dummy_password,
-                    salt=salt,
+                    salt=None,
+                    password_version=2,
                     is_admin=is_admin
                 )
                 db.add(user)
@@ -184,15 +188,15 @@ async def oauth_callback(
                 logger.info(f"Created new user from OAuth (username collision): {username}_{platform_user_id}")
             else:
                 # 全新用户 → 创建
-                from utils.auth import generate_salt, hash_password
-                salt = generate_salt()
-                dummy_password = hash_password(secrets.token_hex(32), salt)
+                from utils.auth import hash_password
+                dummy_password = hash_password(secrets.token_hex(32))
                 is_admin = user_info.get("is_admin", False) or username == "admin"
                 user = User(
                     username=username,
                     platform_user_id=platform_user_id,
                     password_hash=dummy_password,
-                    salt=salt,
+                    salt=None,
+                    password_version=2,
                     is_admin=is_admin
                 )
                 db.add(user)
@@ -257,29 +261,12 @@ async def oauth_callback(
 
 @router.post("/refresh")
 async def oauth_refresh(
-    request: Request,
-    db = Depends(get_db)
+    payload: dict = Depends(get_current_token_payload),
 ):
     """
     刷新 OAuth token
     需要 Authorization header 或 cookie 中的 token
     """
-    # 从 header 或 cookie 获取 token
-    auth_header = request.headers.get("Authorization", "")
-    if auth_header.startswith("Bearer "):
-        token = auth_header[7:]
-    else:
-        token = request.cookies.get("feclaw_jwt")
-
-    if not token:
-        raise HTTPException(status_code=401, detail="No token provided")
-
-    # 解码当前 token
-    from utils.auth import decode_jwt_token
-    payload = decode_jwt_token(token)
-    if payload is None:
-        raise HTTPException(status_code=401, detail="Invalid token")
-
     # 创建新的 token
     new_token = oauth_service.create_local_jwt({
         "sub": payload.get("sub"),
@@ -345,41 +332,11 @@ async def oauth_logout_get(
 
 @router.get("/me")
 async def oauth_me(
-    request: Request,
-    db = Depends(get_db)
+    user: User = Depends(get_current_user),
 ):
     """
     获取当前登录用户信息
     """
-    # 从 header 或 cookie 获取 token
-    auth_header = request.headers.get("Authorization", "")
-    if auth_header.startswith("Bearer "):
-        token = auth_header[7:]
-    else:
-        token = request.cookies.get("feclaw_jwt")
-
-    if not token:
-        raise HTTPException(status_code=401, detail="No token provided")
-
-    # 解码 token
-    from utils.auth import decode_jwt_token
-    payload = decode_jwt_token(token)
-    if payload is None:
-        raise HTTPException(status_code=401, detail="Invalid token")
-
-    user_id = payload.get("sub")
-    if not user_id:
-        raise HTTPException(status_code=401, detail="Invalid token payload")
-
-    # 获取用户
-    try:
-        user_id_int = int(user_id)
-    except (ValueError, TypeError):
-        raise HTTPException(status_code=401, detail="Invalid user ID in token")
-    user = db.query(User).filter(User.id == user_id_int).first()
-    if user is None:
-        raise HTTPException(status_code=404, detail="User not found")
-
     return JSONResponse(content={
         "status": "success",
         "user": {

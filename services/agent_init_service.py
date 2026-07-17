@@ -5,6 +5,7 @@ Agent 初始化服务
 
 import json
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import Optional, Dict, Any, List, Tuple
 
@@ -131,223 +132,6 @@ class AgentInitService:
 
     # 回复风格选项
     VALID_STYLES = ["professional", "friendly", "casual", "formal", "creative"]
-
-    # Persona 预设模板
-    PERSONA_TEMPLATES = {
-        "default": {
-            "name": "默认助手",
-            "description": "通用助手，适合日常对话和文件管理",
-            "persona": """# FeClaw 助手
-
-你是 FeClaw 智能体网关平台的默认助手。
-
-## 核心能力
-
-1. **文件操作**: 通过 VFS 管理文件，支持 workspace 目录下的读写操作
-2. **对话管理**: 支持多轮对话、上下文压缩、会话保存
-3. **工具调用**: 支持文件读写、bash 命令、网页搜索、定时提醒等
-4. **子Agent**: 可启动子 Agent 处理复杂任务
-
-## 使用规范
-
-- 文件操作限制在 workspace 目录内
-- 不能直接操作 agent/ 目录
-- 重要信息应保存到 agent/memory/ 目录
-- 使用 create_share_link 分享文件
-## 记忆分层
-
-对话上下文采用四级压缩管线管理。你的记忆策略应匹配如下层次：
-
-1. **L1 工作记忆**（当前对话）：不需要主动保存，上下文在对话中自然流动
-2. **L2 对话历史**（已保存会话）：自动保存，查询 list_conversations 可回溯
-3. **L3 持久记忆**（agent/memory.md 文件）：当前对话可能被压缩，**跨对话保留的信息必须主动写入 agent/memory.md 文件**
-4. **L4 核心记忆**（角色设定/长期规划）：写入 agent/memory.md 或通过系统提示词维护
-
-**写入 agent/memory/ 的时机**：对话可能随时被上下文压缩，当内容较多或涉及长期项目时，主动用 file_write 将当前进展、决策、配置保存到 agent/memory/ 目录。
-
-## 工作模式
-
-- **learning**: 学习模式，适合信息收集和整理
-- **code**: 编码模式，适合编程任务
-"""
-        },
-        "coding": {
-            "name": "编程助手",
-            "description": "专业的编程助手，精通多种编程语言",
-            "persona": """# 编程助手
-
-你是一位专业的编程助手，精通多种编程语言和开发框架。
-
-## 专业领域
-
-1. **编程语言**: Python, JavaScript, TypeScript, Go, Rust, Java, C++, Ruby
-2. **前端框架**: React, Vue, Angular, Next.js, Nuxt.js
-3. **后端框架**: Django, Flask, FastAPI, Express, Spring Boot
-4. **数据库**: MySQL, PostgreSQL, MongoDB, Redis, Elasticsearch
-5. **DevOps**: Docker, Kubernetes, CI/CD, Git, Linux
-
-## 工作方式
-
-- 提供清晰、简洁的代码示例
-- 解释代码逻辑和最佳实践
-- 帮助调试和优化代码
-- 建议合适的技术方案
-
-## 规范要求
-
-- 代码注释清晰明了
-- 遵循语言特定的编码规范
-- 考虑性能和安全性
-- 提供完整的解决方案
-
-📝 你的记忆系统遵循分层原则:
-  - L1 (当前对话): 就是本次聊天的完整历史
-  - L2 (当日记录): 每天写 /workspace/agent/memory/YY-MM-DD.md，记录当日重要事件和决策
-  - L3 (长期记忆): 定期把 L2 中的重要内容提炼到 /workspace/agent/memory.md
-  - L4 (会话压缩): 上下文过长时系统会自动压缩，重要信息需在压缩前写入文件
-"""
-        },
-        "learning": {
-            "name": "学习助手",
-            "description": "学习导师，帮助用户高效学习和理解知识",
-            "persona": """# 学习助手
-
-你是一位耐心的学习导师，帮助用户高效学习和理解各类知识。
-
-## 教学风格
-
-1. **循序渐进**: 从基础概念开始，逐步深入
-2. **实例教学**: 使用具体例子解释抽象概念
-3. **互动引导**: 通过提问引导用户思考
-4. **总结归纳**: 帮助用户整理知识框架
-
-## 支持领域
-
-- 理工科知识：数学、物理、化学、生物
-- 编程技术：各类编程语言和框架
-- 语言学习：英语、日语等多语言学习
-- 专业技能：数据分析、项目管理等
-
-## 工作原则
-
-- 保持耐心和友好
-- 因材施教，适应不同学习水平
-- 提供学习建议和资源推荐
-- 鼓励思考和主动学习
-
-📝 你的记忆系统遵循分层原则:
-  - L1 (当前对话): 就是本次聊天的完整历史
-  - L2 (当日记录): 每天写 /workspace/agent/memory/YY-MM-DD.md，记录当日重要事件和决策
-  - L3 (长期记忆): 定期把 L2 中的重要内容提炼到 /workspace/agent/memory.md
-  - L4 (会话压缩): 上下文过长时系统会自动压缩，重要信息需在压缩前写入文件
-"""
-        },
-        "writing": {
-            "name": "写作助手",
-            "description": "专业的写作助手，帮助创作各类文档和内容",
-            "persona": """# 写作助手
-
-你是一位专业的写作助手，擅长各类文档创作和内容优化。
-
-## 写作类型
-
-1. **技术文档**: API文档、技术方案、项目报告
-2. **博客文章**: 技术分享、教程指南、行业分析
-3. **商业文案**: 产品介绍、营销文案、用户手册
-4. **学术论文**: 论文结构、文献综述、研究方法
-
-## 服务能力
-
-- 文章结构规划
-- 内容润色优化
-- 格式规范化
-- 语言风格调整
-
-## 写作原则
-
-- 内容准确、逻辑清晰
-- 语言简洁、表达专业
-- 结构合理、层次分明
-- 注重读者体验
-
-📝 你的记忆系统遵循分层原则:
-  - L1 (当前对话): 就是本次聊天的完整历史
-  - L2 (当日记录): 每天写 /workspace/agent/memory/YY-MM-DD.md，记录当日重要事件和决策
-  - L3 (长期记忆): 定期把 L2 中的重要内容提炼到 /workspace/agent/memory.md
-  - L4 (会话压缩): 上下文过长时系统会自动压缩，重要信息需在压缩前写入文件
-"""
-        },
-        "creative": {
-            "name": "创意助手",
-            "description": "富有创意的助手，激发灵感和创造力",
-            "persona": """# 创意助手
-
-你是一位富有创意的助手，帮助用户激发灵感和创造力。
-
-## 创意领域
-
-1. **创意写作**: 故事构思、剧本创作、诗歌散文
-2. **产品设计**: UI/UX设计、产品方案、用户体验
-3. **品牌创意**: 品牌命名、口号设计、视觉概念
-4. **活动策划**: 活动方案、营销创意、传播策略
-
-## 思维方式
-
-- 鼓励发散思维
-- 提供多样化方案
-- 挑战常规思维
-- 结合实际可行性
-
-## 工作风格
-
-- 保持开放和好奇
-- 善于发现和连接
-- 提供有价值的反馈
-- 激励用户探索创新
-
-📝 你的记忆系统遵循分层原则:
-  - L1 (当前对话): 就是本次聊天的完整历史
-  - L2 (当日记录): 每天写 /workspace/agent/memory/YY-MM-DD.md，记录当日重要事件和决策
-  - L3 (长期记忆): 定期把 L2 中的重要内容提炼到 /workspace/agent/memory.md
-  - L4 (会话压缩): 上下文过长时系统会自动压缩，重要信息需在压缩前写入文件
-"""
-        }
-    }
-
-    # 默认 persona
-    DEFAULT_PERSONA = """# FeClaw 助手
-
-你是 FeClaw 智能体网关平台的默认助手。
-
-## 核心能力
-
-1. **文件操作**: 通过 VFS 管理文件，支持 workspace 目录下的读写操作
-2. **对话管理**: 支持多轮对话、上下文压缩、会话保存
-3. **工具调用**: 支持文件读写、bash 命令、网页搜索、定时提醒等
-4. **子Agent**: 可启动子 Agent 处理复杂任务
-
-## 使用规范
-
-- 文件操作限制在 workspace 目录内
-- 不能直接操作 agent/ 目录
-- 重要信息应保存到 agent/memory/ 目录
-- 使用 create_share_link 分享文件
-## 记忆分层
-
-对话上下文采用四级压缩管线管理。你的记忆策略应匹配如下层次：
-
-1. **L1 工作记忆**（当前对话）：不需要主动保存，上下文在对话中自然流动
-2. **L2 对话历史**（已保存会话）：自动保存，查询 list_conversations 可回溯
-3. **L3 持久记忆**（agent/memory.md 文件）：当前对话可能被压缩，**跨对话保留的信息必须主动写入 agent/memory.md 文件**
-4. **L4 核心记忆**（角色设定/长期规划）：写入 agent/memory.md 或通过系统提示词维护
-
-**写入 agent/memory/ 的时机**：对话可能随时被上下文压缩，当内容较多或涉及长期项目时，主动用 file_write 将当前进展、决策、配置保存到 agent/memory/ 目录。
-
-## 工作模式
-
-- **learning**: 学习模式，适合信息收集和整理
-- **code**: 编码模式，适合编程任务
-"""
 
     def __init__(self):
         self._storage = None  # 懒加载
@@ -529,7 +313,8 @@ class AgentInitService:
         agent: AgentProfile,
         persona: str = None,
         tools_config: Dict = None,
-        agent_config: Dict = None
+        agent_config: Dict = None,
+        template_id: str = None
     ) -> Dict[str, Any]:
         """
         初始化 Agent
@@ -546,6 +331,7 @@ class AgentInitService:
             persona: 自定义 persona（可选）
             tools_config: 工具配置（可选）
             agent_config: Agent 配置（可选）
+            template_id: 模板 ID（可选）。如果提供且 persona 为空，则从数据库加载模板的 persona
 
         Returns:
             初始化结果
@@ -553,8 +339,25 @@ class AgentInitService:
         agent_hash = agent.hash
         user_id = agent.user_id
 
-        # 1. 保存 persona 到数据库
-        persona_content = persona or self.DEFAULT_PERSONA
+        # 1. 解析 persona：优先级 persona > template_id > 内置 default 模板
+        persona_content = persona
+        if not persona_content and template_id:
+            from services.template_manager import TemplateManager
+            persona_content = TemplateManager.get_persona(db, template_id)
+        if not persona_content:
+            # 回退到内置 default 模板
+            from services.template_manager import TemplateManager
+            persona_content = TemplateManager.get_persona(db, "internal::default")
+
+        # 记录 template_id 到 AgentProfile（如提供）
+        if template_id:
+            agent.template_id = template_id
+            from services.template_manager import TemplateManager
+            tpl = TemplateManager.get_template(db, template_id)
+            if tpl:
+                agent.template_version = tpl.version
+
+        # 保存 persona 到数据库
         self._write_config_db(agent_hash, "persona", persona_content)
 
         # 2. 保存 tools 配置到数据库（仅当不存在时写入默认值）
@@ -581,7 +384,7 @@ class AgentInitService:
         default_config = {
             "llm_provider": _ais_main_info["provider"],
             "llm_model": settings.MAIN_TEXT_MODEL,
-            "max_context_tokens": 110000,
+            "max_context_tokens": settings.CONTEXT_LIMIT_TOKENS,
             "compression_ratio": 0.3,
             "max_tool_rounds": 50
         }
@@ -611,7 +414,7 @@ class AgentInitService:
         vfs_base = self._get_vfs_base_path(agent.user_id, agent_hash)
         vfs_dirs_created = []
 
-        # 4. 创建 Agent 元数据文件（agents/{hash}/agent/）
+        # 4. 创建 Agent 元数据文件（agents/{hash}/agent/）—— 5 个文件并行上传
         if self.storage:
             agent_files = {
                 "workspace/agent/BOOTSTRAP.md": DEFAULT_BOOTSTRAP,
@@ -620,17 +423,29 @@ class AgentInitService:
                 "workspace/agent/user.md": DEFAULT_USER,
                 "workspace/agent/memory.md": DEFAULT_MEMORY_HEADER,
             }
-            for rel_path, content in agent_files.items():
+
+            def _upload_file(rel_path: str, content: str) -> Tuple[str, str]:
                 file_key = f"{vfs_base}{rel_path}"
-                try:
-                    self.storage.put_object(file_key, content.encode("utf-8"))
-                    logger.info(f"Created agent metadata file: {file_key}")
-                    # 记录目录（去重）
-                    dir_name = rel_path.split("/")[0]
-                    if dir_name not in vfs_dirs_created:
-                        vfs_dirs_created.append(dir_name)
-                except Exception as e:
-                    logger.warning(f"Failed to create agent metadata file {file_key}: {e}")
+                self.storage.put_object(file_key, content.encode("utf-8"))
+                return rel_path, file_key
+
+            with ThreadPoolExecutor(max_workers=5) as executor:
+                futures = {
+                    executor.submit(_upload_file, rel_path, content): rel_path
+                    for rel_path, content in agent_files.items()
+                }
+                for future in as_completed(futures):
+                    try:
+                        rel_path, file_key = future.result()
+                        logger.info(f"Created agent metadata file: {file_key}")
+                        # 记录目录（去重）
+                        dir_name = rel_path.split("/")[0]
+                        if dir_name not in vfs_dirs_created:
+                            vfs_dirs_created.append(dir_name)
+                    except Exception as e:
+                        rel_path = futures[future]
+                        file_key = f"{vfs_base}{rel_path}"
+                        logger.warning(f"Failed to create agent metadata file {file_key}: {e}")
 
         # Note: soul/identity/user 不再写入 AgentConfig。
         # Agent 读取自 COS (workspace/agent/*.md)，配置页面也改为从 COS 读取。
@@ -766,14 +581,20 @@ class AgentInitService:
         """获取可用工具列表"""
         return self.AVAILABLE_TOOLS
 
-    def get_persona_templates(self) -> Dict[str, Dict[str, str]]:
+    def get_persona_templates(self) -> List[Dict[str, Any]]:
         """
-        获取 persona 预设模板列表
+        获取 persona 预设模板列表（从 DB）
 
         Returns:
-            模板字典，包含每个模板的 name, description, persona
+            模板列表，每项包含 id, name, description, persona 等字段
         """
-        return self.PERSONA_TEMPLATES
+        from models.database import SessionLocal
+        from services.template_manager import TemplateManager
+        db = SessionLocal()
+        try:
+            return TemplateManager.list_templates(db)
+        finally:
+            db.close()
 
     def validate_tools_config(self, tools_config: Dict) -> Tuple[bool, Optional[str]]:
         """

@@ -34,35 +34,6 @@ from models.agent_profile import AgentProfile
 from models.database import WeChatBinding
 from utils.auth import get_current_user, decode_jwt_token
 from models.database import User as DbUser
-
-
-async def get_current_user_cookie_first(
-    request: Request,
-    db = Depends(get_db)
-) -> User:
-    """读取 JWT 时优先用 cookie，其次 Authorization header
-
-    与 utils/auth.py 的 get_current_user 不同：
-    - 原始版只用 Authorization header（HTTPBearer）
-    - 这个版本先查 cookie（TOTP / Platform JWT），再查 header
-    """
-    token = _get_token_from_request(request)
-    if not token:
-        raise HTTPException(
-            status_code=401,
-            detail={"status": "unauthorized"},
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    payload = decode_jwt_token(token)
-    if payload is None:
-        raise HTTPException(status_code=401, detail={"status": "unauthorized"})
-    user_id: int = payload.get("user_id")
-    if user_id is None:
-        raise HTTPException(status_code=401, detail={"status": "unauthorized"})
-    user = db.query(User).filter(User.id == user_id).first()
-    if user is None:
-        raise HTTPException(status_code=401, detail={"status": "unauthorized"})
-    return user
 from utils.qr import generate_qr_data_url
 from services.storage_service import get_storage_service as s
 
@@ -471,7 +442,7 @@ def _read_config_value(agent_hash: str, vpath: str) -> Optional[str]:
 
 
 @router.get("/api/files", response_model=FileListResponse)
-async def list_files(request: Request, path: str = "", user: User = Depends(get_current_user_cookie_first)):
+async def list_files(request: Request, path: str = "", user: User = Depends(get_current_user)):
     """列出 VFS 文件"""
     from fastapi.responses import Response as APIResponse
     agent_hash = extract_hash_from_host(_get_domain(request))
@@ -604,7 +575,7 @@ class FileUpdateRequest(PydanticModel):
 
 
 @router.get("/api/file", response_model=FileContentResponse)
-async def get_file(path: str, request: Request, user: User = Depends(get_current_user_cookie_first)):
+async def get_file(path: str, request: Request, user: User = Depends(get_current_user)):
     """获取文件内容"""
     # Validate path (prevent path traversal)
     import os as _os
@@ -654,7 +625,7 @@ async def get_file(path: str, request: Request, user: User = Depends(get_current
 
 
 @router.put("/api/file")
-async def update_file(path: str, body: FileUpdateRequest, req: Request, user: User = Depends(get_current_user_cookie_first)) -> dict:
+async def update_file(path: str, body: FileUpdateRequest, req: Request, user: User = Depends(get_current_user)) -> dict:
     """更新文件内容"""
     # Validate path (prevent path traversal)
     import os as _os
@@ -724,7 +695,7 @@ async def update_file(path: str, body: FileUpdateRequest, req: Request, user: Us
 
 
 @router.delete("/api/file")
-async def delete_file(path: str, request: Request, user: User = Depends(get_current_user_cookie_first)) -> dict:
+async def delete_file(path: str, request: Request, user: User = Depends(get_current_user)) -> dict:
     """删除文件"""
     # Validate path (prevent path traversal)
     import os as _os
@@ -904,6 +875,19 @@ async def login_page(request: Request):
 async def initialize_page(request: Request):
     """初始化页面（新 UI）"""
     return templates.TemplateResponse(request, "initialize.html", {"request": request})
+
+
+@router.get("/setup", response_class=HTMLResponse)
+@router.get("/setup/", response_class=HTMLResponse)
+async def setup_page(request: Request):
+    """首次启动配置向导页面（仅 admin 可见，未登录会重定向到 /login）。
+
+    页面自身不强制鉴权（前端在加载时会检查 token；后端 API 已用 get_admin_user 守护）。
+    未登录用户打开 /setup 时由前端跳转到 /login。
+    """
+    resp = templates.TemplateResponse(request, "setup.html", {"request": request})
+    resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    return resp
 
 
 @router.get("/dashboard", response_class=HTMLResponse)
@@ -1300,7 +1284,7 @@ async def upload_file_vfs(
     path: str,
     request: Request,
     file: UploadFile = File(...),
-    user: User = Depends(get_current_user_cookie_first)
+    user: User = Depends(get_current_user)
 ):
     """Upload file to agent VFS"""
     import os as _os

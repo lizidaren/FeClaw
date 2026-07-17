@@ -1257,16 +1257,16 @@ class ChatService:
             for msg in self.context.history
         )
 
-        if total_est > 80000:
+        if total_est > settings.COMPACTION_MAX_TOKENS:
             from services.message_compactor import MessageCompactor
-            compactor = MessageCompactor(max_tokens=80000)
+            compactor = MessageCompactor(max_tokens=settings.COMPACTION_MAX_TOKENS)
             self.context.history = compactor.l2_shear(self.context.history)
             self.context.history = compactor.l3_micro_compact(self.context.history)
             total_est = sum(
                 estimate_tokens(msg.get("content", ""))
                 for msg in self.context.history
             )
-            if total_est > 80000:
+            if total_est > settings.COMPACTION_MAX_TOKENS:
                 self.context.history = compactor.l4_context_crash(self.context.history)
 
         # wechat_msg_id 从 meta JSON 派生

@@ -95,6 +95,8 @@ def _extract_balanced_json(text: str) -> Optional[str]:
 class LLMProvider(ABC):
     """LLM提供商抽象基类"""
 
+    # P0.5: last_usage 标记为 deprecated —— 实例属性在并发请求下不安全（共享 provider 实例）
+    # 调用方应通过 usage_holder 参数接收 per-call usage；旧代码仍可读，但**有竞态风险**。
     last_usage: Optional[Dict] = None
 
     @abstractmethod
@@ -106,8 +108,16 @@ class LLMProvider(ABC):
         model: Optional[str] = None,
         reasoning_effort: Optional[str] = None,
         max_tokens: Optional[int] = None,
-        disable_thinking: bool = False
+        disable_thinking: bool = False,
+        usage_holder: Optional[List[Optional[Dict[str, Any]]]] = None,
     ) -> AsyncGenerator[str, None]:
+        """LLM 调用。
+
+        Args:
+            usage_holder: P0.5 新增 —— 单元素 list，provider 在收到 usage 时 append 进去。
+                          wrapper 每次调用传入新的 list，避免跨请求/跨实例污染。
+                          为 None 时退化为旧行为（仅写 self.last_usage）。
+        """
         pass
 
 
@@ -126,7 +136,8 @@ class DeepSeekProvider(LLMProvider):
         model: Optional[str] = None,
         reasoning_effort: Optional[str] = None,
         max_tokens: Optional[int] = None,
-        disable_thinking: bool = False
+        disable_thinking: bool = False,
+        usage_holder: Optional[List[Optional[Dict[str, Any]]]] = None,
     ) -> AsyncGenerator[str, None]:
         """调用DeepSeek API"""
 
@@ -170,7 +181,10 @@ class DeepSeekProvider(LLMProvider):
                             try:
                                 parsed = json.loads(data)
                                 if "usage" in parsed:
-                                    self.last_usage = parsed["usage"]
+                                    usage = parsed["usage"]
+                                    if usage_holder is not None:
+                                        usage_holder[0] = usage
+                                    self.last_usage = usage
                                 choices = parsed.get("choices")
                                 if choices:
                                     content = choices[0].get("delta", {}).get("content", "")
@@ -186,7 +200,10 @@ class DeepSeekProvider(LLMProvider):
                 )
                 response.raise_for_status()
                 result = response.json()
-                self.last_usage = result.get("usage")
+                usage = result.get("usage")
+                if usage_holder is not None:
+                    usage_holder[0] = usage
+                self.last_usage = usage
                 content = result.get("choices", [{}])[0].get("message", {}).get("content", "")
                 yield content
 
@@ -207,6 +224,7 @@ class DoubaoProvider(LLMProvider):
         reasoning_effort: Optional[str] = None,
         max_tokens: Optional[int] = None,
         disable_thinking: bool = False,
+        usage_holder: Optional[List[Optional[Dict[str, Any]]]] = None,
     ) -> AsyncGenerator[str, None]:
         """调用豆包API"""
 
@@ -248,7 +266,10 @@ class DoubaoProvider(LLMProvider):
                             try:
                                 parsed = json.loads(data)
                                 if "usage" in parsed:
-                                    self.last_usage = parsed["usage"]
+                                    usage = parsed["usage"]
+                                    if usage_holder is not None:
+                                        usage_holder[0] = usage
+                                    self.last_usage = usage
                                 choices = parsed.get("choices")
                                 if choices:
                                     # 豆包的推理过程在 reasoning_content 字段中
@@ -269,7 +290,10 @@ class DoubaoProvider(LLMProvider):
                 )
                 response.raise_for_status()
                 result = response.json()
-                self.last_usage = result.get("usage")
+                usage = result.get("usage")
+                if usage_holder is not None:
+                    usage_holder[0] = usage
+                self.last_usage = usage
                 content = result.get("choices", [{}])[0].get("message", {}).get("content", "")
                 yield content
 
@@ -289,7 +313,8 @@ class ZhipuAIProvider(LLMProvider):
         model: Optional[str] = None,
         reasoning_effort: Optional[str] = None,
         max_tokens: Optional[int] = None,
-        disable_thinking: bool = False
+        disable_thinking: bool = False,
+        usage_holder: Optional[List[Optional[Dict[str, Any]]]] = None,
     ) -> AsyncGenerator[str, None]:
         """调用智谱AI API"""
 
@@ -334,7 +359,10 @@ class ZhipuAIProvider(LLMProvider):
                             try:
                                 parsed = json.loads(data)
                                 if "usage" in parsed:
-                                    self.last_usage = parsed["usage"]
+                                    usage = parsed["usage"]
+                                    if usage_holder is not None:
+                                        usage_holder[0] = usage
+                                    self.last_usage = usage
                                 choices = parsed.get("choices")
                                 if choices:
                                     content = choices[0].get("delta", {}).get("content", "")
@@ -350,7 +378,10 @@ class ZhipuAIProvider(LLMProvider):
                 )
                 response.raise_for_status()
                 result = response.json()
-                self.last_usage = result.get("usage")
+                usage = result.get("usage")
+                if usage_holder is not None:
+                    usage_holder[0] = usage
+                self.last_usage = usage
                 content = result.get("choices", [{}])[0].get("message", {}).get("content", "")
                 yield content
 
@@ -370,7 +401,8 @@ class KimiProvider(LLMProvider):
         model: Optional[str] = None,
         reasoning_effort: Optional[str] = None,
         max_tokens: Optional[int] = None,
-        disable_thinking: bool = False
+        disable_thinking: bool = False,
+        usage_holder: Optional[List[Optional[Dict[str, Any]]]] = None,
     ) -> AsyncGenerator[str, None]:
         """调用 Kimi API (OpenAI 兼容接口)"""
 
@@ -408,7 +440,10 @@ class KimiProvider(LLMProvider):
                             try:
                                 parsed = json.loads(data)
                                 if "usage" in parsed:
-                                    self.last_usage = parsed["usage"]
+                                    usage = parsed["usage"]
+                                    if usage_holder is not None:
+                                        usage_holder[0] = usage
+                                    self.last_usage = usage
                                 choices = parsed.get("choices")
                                 if choices:
                                     content = choices[0].get("delta", {}).get("content", "")
@@ -424,7 +459,90 @@ class KimiProvider(LLMProvider):
                 )
                 response.raise_for_status()
                 result = response.json()
-                self.last_usage = result.get("usage")
+                usage = result.get("usage")
+                if usage_holder is not None:
+                    usage_holder[0] = usage
+                self.last_usage = usage
+                content = result.get("choices", [{}])[0].get("message", {}).get("content", "")
+                yield content
+
+
+class MimoProvider(LLMProvider):
+    """MiMo (小米) 大模型提供商 — OpenAI 兼容接口"""
+
+    def __init__(self, api_key: str):
+        self.api_key = api_key
+        self.base_url = "https://api.xiaomimimo.com/v1"
+
+    async def chat(
+        self,
+        messages: List[Dict[str, str]],
+        stream: bool = True,
+        response_format: Optional[Dict[str, str]] = None,
+        model: Optional[str] = None,
+        reasoning_effort: Optional[str] = None,
+        max_tokens: Optional[int] = None,
+        disable_thinking: bool = False,
+        usage_holder: Optional[List[Optional[Dict[str, Any]]]] = None,
+    ) -> AsyncGenerator[str, None]:
+        """调用 MiMo API (OpenAI 兼容)"""
+
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        }
+
+        payload = {
+            "model": model or "mimo-v2.5-pro",
+            "messages": messages,
+            "stream": stream,
+        }
+
+        if response_format:
+            payload["response_format"] = response_format
+        if max_tokens:
+            payload["max_tokens"] = max_tokens
+
+        async with httpx.AsyncClient(timeout=300.0) as client:
+            if stream:
+                async with client.stream(
+                    "POST",
+                    f"{self.base_url}/chat/completions",
+                    headers=headers,
+                    json=payload
+                ) as response:
+                    response.raise_for_status()
+                    async for line in response.aiter_lines():
+                        if line.startswith("data: "):
+                            data = line[6:]
+                            if data == "[DONE]":
+                                break
+                            try:
+                                parsed = json.loads(data)
+                                if "usage" in parsed:
+                                    usage = parsed["usage"]
+                                    if usage_holder is not None:
+                                        usage_holder[0] = usage
+                                    self.last_usage = usage
+                                choices = parsed.get("choices")
+                                if choices:
+                                    content = choices[0].get("delta", {}).get("content", "")
+                                    if content:
+                                        yield content
+                            except json.JSONDecodeError:
+                                continue
+            else:
+                response = await client.post(
+                    f"{self.base_url}/chat/completions",
+                    headers=headers,
+                    json=payload
+                )
+                response.raise_for_status()
+                result = response.json()
+                usage = result.get("usage")
+                if usage_holder is not None:
+                    usage_holder[0] = usage
+                self.last_usage = usage
                 content = result.get("choices", [{}])[0].get("message", {}).get("content", "")
                 yield content
 
@@ -444,7 +562,8 @@ class QwenProvider(LLMProvider):
         model: Optional[str] = None,
         reasoning_effort: Optional[str] = None,
         max_tokens: Optional[int] = None,
-        disable_thinking: bool = False
+        disable_thinking: bool = False,
+        usage_holder: Optional[List[Optional[Dict[str, Any]]]] = None,
     ) -> AsyncGenerator[str, None]:
         """调用 Qwen API (OpenAI 兼容接口)"""
 
@@ -489,7 +608,10 @@ class QwenProvider(LLMProvider):
                             try:
                                 parsed = json.loads(data)
                                 if "usage" in parsed:
-                                    self.last_usage = parsed["usage"]
+                                    usage = parsed["usage"]
+                                    if usage_holder is not None:
+                                        usage_holder[0] = usage
+                                    self.last_usage = usage
                                 choices = parsed.get("choices", [])
                                 if not choices:
                                     continue
@@ -506,7 +628,10 @@ class QwenProvider(LLMProvider):
                 )
                 response.raise_for_status()
                 result = response.json()
-                self.last_usage = result.get("usage")
+                usage = result.get("usage")
+                if usage_holder is not None:
+                    usage_holder[0] = usage
+                self.last_usage = usage
                 content = result.get("choices", [{}])[0].get("message", {}).get("content", "")
                 yield content
 
@@ -552,6 +677,8 @@ class LLMService:
             self.providers["doubao"] = DoubaoProvider(settings.DOUBAO_API_KEY)
         if settings.KIMI_API_KEY:
             self.providers["kimi"] = KimiProvider(settings.KIMI_API_KEY)
+        if settings.MIMO_API_KEY:
+            self.providers["mimo"] = MimoProvider(settings.MIMO_API_KEY)
         if settings.QWEN_API_KEY:
             self.providers["qwen"] = QwenProvider(settings.QWEN_API_KEY)
 
@@ -638,6 +765,10 @@ class LLMService:
         provider_instance = self.get_provider(provider_name)
         actual_model = model or settings.DEFAULT_LLM_MODEL
 
+        # P0.5: per-call usage 接收器（单元素 list）—— 解决 last_usage 跨实例竞态
+        # 每个 chat 调用独立持有，互不污染；provider 在收到 usage 时 append 进来
+        usage_holder: List[Optional[Dict[str, Any]]] = [None]
+
         try:
             async for chunk in provider_instance.chat(
                 messages=messages,
@@ -646,11 +777,15 @@ class LLMService:
                 model=model,
                 reasoning_effort=reasoning_effort,
                 max_tokens=max_tokens,
-                disable_thinking=disable_thinking
+                disable_thinking=disable_thinking,
+                usage_holder=usage_holder,
             ):
                 yield chunk
         finally:
-            tokens_used = provider_instance.last_usage.get("total_tokens", 0) if provider_instance.last_usage else 0
+            # P0.5: 从 per-call holder 读取 usage，避免读取 provider_instance.last_usage
+            # （后者会被其他并发请求覆盖，导致 token 统计错乱）
+            usage = usage_holder[0]
+            tokens_used = usage.get("total_tokens", 0) if usage else 0
             asyncio.create_task(self._record_stat(provider_name, actual_model, request_type, tokens_used))
     
     async def chat_json(

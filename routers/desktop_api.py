@@ -94,28 +94,28 @@ async def desktop_auth_exchange(
             user = by_username
             logger.info(f"Desktop auth: linked local user {username}")
         elif by_username and by_username.platform_user_id != platform_user_id:
-            from utils.auth import generate_salt, hash_password
-            salt = generate_salt()
-            dummy_password = hash_password(secrets.token_hex(32), salt)
+            from utils.auth import hash_password
+            dummy_password = hash_password(secrets.token_hex(32))
             user = User(
                 username=f"{username}_{platform_user_id}",
                 platform_user_id=platform_user_id,
                 password_hash=dummy_password,
-                salt=salt,
+                salt=None,
+                password_version=2,
                 is_admin=False,
             )
             db.add(user)
             db.commit()
             db.refresh(user)
         else:
-            from utils.auth import generate_salt, hash_password
-            salt = generate_salt()
-            dummy_password = hash_password(secrets.token_hex(32), salt)
+            from utils.auth import hash_password
+            dummy_password = hash_password(secrets.token_hex(32))
             user = User(
                 username=username,
                 platform_user_id=platform_user_id,
                 password_hash=dummy_password,
-                salt=salt,
+                salt=None,
+                password_version=2,
                 is_admin=False,
             )
             db.add(user)

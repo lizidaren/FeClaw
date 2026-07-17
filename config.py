@@ -21,6 +21,9 @@ class Settings(BaseSettings):
     JWT_ALGORITHM: str = "HS256"
     JWT_EXPIRE_HOURS: int = 24 * 7  # 7天过期
 
+    # 配置向导完成标记（由 services.setup_service 自动写入 .env）
+    SETUP_COMPLETE: bool = False
+
     # MySQL 数据库配置
     MYSQL_HOST: str = "localhost"
     MYSQL_PORT: int = 3306
@@ -36,6 +39,7 @@ class Settings(BaseSettings):
     DEEPSEEK_API_KEY: str = ""
     DOUBAO_API_KEY: str = ""
     QWEN_API_KEY: str = ""
+    MIMO_API_KEY: str = ""
     MINIMAX_API_KEY: str = ""
     DEFAULT_LLM_PROVIDER: str = "zhipuai"
     DEFAULT_LLM_MODEL: str = "glm-4.7"
@@ -146,6 +150,11 @@ class Settings(BaseSettings):
     CACHE_TTL: int = 300  # 搜索结果缓存 TTL（秒）
     TOOL_TIMEOUT: int = 300  # 工具调用超时（秒）
     SESSION_CLEANUP_DAYS: int = 7  # 会话历史保留天数
+
+    # ─── 上下文 / 压缩限制（P1.1: 魔法数字收口） ───
+    CONTEXT_LIMIT_TOKENS: int = 110000          # 触发上下文压缩的 token 阈值
+    CONTEXT_COMPACTION_THRESHOLD: float = 0.15   # 压缩后保留比例（group_service 用）
+    COMPACTION_MAX_TOKENS: int = 80000           # MessageCompactor 压缩目标 token 数
 
     # 日志配置
     LOG_LEVEL: str = "INFO"

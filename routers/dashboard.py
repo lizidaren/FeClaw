@@ -4,36 +4,14 @@ Dashboard 页面 — 群聊消息实时浏览
 import logging
 from fastapi import APIRouter, Request, Depends, HTTPException, Query
 from fastapi.responses import HTMLResponse, JSONResponse
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
 from typing import Optional
 
 from models.database import get_db
 from models.group import Group, GroupMember, GroupMessage
 from models.agent_profile import AgentProfile
-from utils.auth import get_current_user_id, decode_jwt_token
+from utils.auth_dependencies import get_current_user_id_optional
 
-
-async def get_current_user_id_optional_from_cookie(
-    request: Request,
-    credentials: Optional[HTTPAuthorizationCredentials] = Depends(HTTPBearer(auto_error=False)),
-) -> Optional[int]:
-    """从 Authorization header 或 cookie 获取 user_id"""
-    # Try Authorization header first
-    if credentials:
-        token = credentials.credentials
-        payload = decode_jwt_token(token)
-        if payload and payload.get("user_id"):
-            return payload["user_id"]
-
-    # Try the feclaw_jwt cookie
-    cookie_token = request.cookies.get("feclaw_jwt")
-    if cookie_token:
-        payload = decode_jwt_token(cookie_token)
-        if payload and payload.get("user_id"):
-            return payload["user_id"]
-
-    return None
 
 logger = logging.getLogger(__name__)
 
@@ -89,7 +67,7 @@ async def get_group_messages(
     since: Optional[str] = Query(default=None, description="UTC timestamp ISO format"),
     limit: int = Query(default=200, ge=1, le=500),
     db: Session = Depends(get_db),
-    user_id: Optional[int] = Depends(get_current_user_id_optional_from_cookie),
+    user_id: Optional[int] = Depends(get_current_user_id_optional),
 ):
     """API: 获取群聊消息（支持 since 参数实现增量轮询）"""
     if not user_id:

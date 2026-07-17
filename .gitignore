@@ -86,3 +86,8 @@ history/
 # LLM work files
 claude-work/
 v3-progress/
+claude-tasks/
+
+# One-shot test / migration scripts
+scripts/compliance-prompt-iter.py
+scripts/migrate_passwords.py

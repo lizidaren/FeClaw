@@ -14,6 +14,60 @@ if _project_root not in sys.path:
 
 
 @pytest.fixture
+def real_db():
+    """P1.4: 真实 SQLite in-memory 数据库 fixture。
+
+    替代 mock_db，让测试跑真实的 SQL（commit/rollback/foreign keys/JSON 列等），
+    同时不依赖外部 MySQL/Redis 服务。
+
+    默认 opt-in：只在显式声明 `def test_x(real_db):` 时才使用。
+    CI 策略：`pytest -m "not real_db"` 跑全套；`real_db` 用例仅 main 分支必跑。
+
+    用法示例：
+        def test_user_creation(real_db):
+            db = real_db()
+            user = User(username="alice", password_hash="x", salt=None)
+            db.add(user)
+            db.commit()
+            assert db.query(User).count() == 1
+    """
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from sqlalchemy.pool import StaticPool
+
+    # 延迟导入：避免 conftest.py 加载时触发 main.py 副作用
+    from models.database import Base
+
+    # 确保所有模型都被 import（Base.metadata 才能识别全部表）
+    # 这些 import 触发 model class 注册到 Base
+    from models import database as _db_mod  # noqa: F401
+    from models.agent_profile import AgentProfile  # noqa: F401
+    from models.agent_buffer import AgentBuffer  # noqa: F401
+    from models.group import Group, GroupMember, GroupMessage, GroupMoments  # noqa: F401
+    from models.fehub import FePublish, AppData  # noqa: F401
+    from models.zentrim import ZentrimEntry, ZentrimTimeline, ZentrimTimelineEntry, ZentrimReference  # noqa: F401
+
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,  # 共享单连接：让多次 SessionLocal() 看到同一份 in-memory DB
+    )
+    Base.metadata.create_all(bind=engine)
+    TestSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+    # 模拟 SessionLocal 工厂：返回新 session（与真实 SessionLocal 行为一致）
+    def session_factory():
+        return TestSessionLocal()
+
+    # Patch 所有 import SessionLocal 的位置（与服务模块级 import 兼容）
+    with patch("models.database.SessionLocal", session_factory):
+        with patch("services.llm_service.SessionLocal", session_factory):
+            with patch("services.permission_service.SessionLocal", session_factory):
+                with patch("services.agent_executor.SessionLocal", session_factory):
+                    yield session_factory
+
+
+@pytest.fixture
 def mock_db():
     """Mock 数据库 SessionLocal，返回 MagicMock 实例。
 

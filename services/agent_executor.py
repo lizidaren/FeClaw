@@ -19,8 +19,8 @@ from services.message_compactor import MessageCompactor
 
 logger = logging.getLogger(__name__)
 
-# 110K tokens 触发压缩（简单实现）
-CONTEXT_LIMIT = 110000
+# P1.1: 上下文压缩阈值从 config.py 读取（原硬编码 110000）
+CONTEXT_LIMIT = settings.CONTEXT_LIMIT_TOKENS
 
 # === Subagent 权限体系 ===
 

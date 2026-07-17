@@ -23,7 +23,7 @@ class AgentBuffer(Base):
     __tablename__ = "agent_buffers"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    agent_hash = Column(String(32), unique=True, nullable=False, index=True)  # 唯一 buffer
+    agent_hash = Column(String(8), unique=True, nullable=False, index=True)  # 唯一 buffer
     content = Column(Text, default="")
     attachments = Column(JSON, default=list)
     version = Column(Integer, default=0)  # 单调递增，每次 write 自增

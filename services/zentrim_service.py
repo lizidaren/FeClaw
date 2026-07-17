@@ -36,6 +36,8 @@ from sqlalchemy.orm import Session
 
 from config import settings
 from models.zentrim import (
+    BLOCK_TYPES,
+    ZentrimBlock,
     ZentrimEntry,
     ZentrimReference,
     ZentrimTimeline,
@@ -129,34 +131,22 @@ class ZentrimService:
     def create_entry(
         self,
         user_id: int,
-        type: str,
         title: Optional[str] = None,
-        content: Optional[str] = None,
-        source: Optional[str] = None,
-        attachment: Optional[Dict[str, Any]] = None,
         tags: Optional[List[str]] = None,
-        summary: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
-        bbox: Optional[Dict[str, Any]] = None,
-        source_url: Optional[str] = None,
     ) -> ZentrimEntry:
-        """创建条目，自动生成 ULID"""
-        if type not in ("note", "photo", "recording", "link", "canvas"):
-            raise ValueError(f"Invalid entry type: {type}")
+        """创建条目，自动生成 ULID。
 
+        精简后的 schema：实际内容由 ZentrimBlock 承载。
+        旧字段（type/content/summary/source/source_url/attachment/bbox）已废弃 —
+        如传入会被忽略（保持向后兼容的静默降级）。
+        """
         entry = ZentrimEntry(
             id=_generate_ulid(),
             user_id=user_id,
-            type=type,
             title=title,
-            content=content,
-            summary=summary,
             tags=tags,
             status="active",
-            source=source or type,  # 默认 source 等于 type
-            source_url=source_url,
-            attachment=attachment,
-            bbox=bbox,
             metadata_=metadata or {},
         )
         self.db.add(entry)
@@ -167,17 +157,18 @@ class ZentrimService:
     def get_entries(
         self,
         user_id: int,
-        type: Optional[str] = None,
         limit: int = 20,
         before: Optional[datetime] = None,
         include_archived: bool = False,
     ) -> List[ZentrimEntry]:
-        """获取时间线（按 created_at 倒序，仅 active 条目默认）"""
+        """获取时间线（按 created_at 倒序，仅 active 条目默认）
+
+        精简后 schema 不再有 entry.type —
+        如需按内容类型筛选，应通过 blocks 子查询（未来扩展）。
+        """
         # fix(P2-3): Service 层硬性 limit 上限（1-100），防止内部/测试调用传超大值
         limit = max(1, min(limit, 100))
         query = self.db.query(ZentrimEntry).filter(ZentrimEntry.user_id == user_id)
-        if type:
-            query = query.filter(ZentrimEntry.type == type)
         if not include_archived:
             query = query.filter(ZentrimEntry.status != "archived")
         if before:
@@ -194,17 +185,8 @@ class ZentrimService:
         return query.first()
 
     def archive_entry(self, entry_id: str, user_id: Optional[int] = None) -> Optional[ZentrimEntry]:
-        # fix(P1-10): 状态更新走统一的 update_entry_status 入口，避免路径重复
-        """归档条目（软删） — 委托内部 update_entry_status 实现"""
+        """归档条目（软删）"""
         entry = self.get_entry(entry_id, user_id=user_id)
-        if not entry:
-            return None
-        entry.status = "archived"
-        entry.archived_at = datetime.now(timezone.utc)
-        entry.updated_at = datetime.now(timezone.utc)
-        self.db.commit()
-        self.db.refresh(entry)
-        return entry
         if not entry:
             return None
         entry.status = "archived"
@@ -215,8 +197,7 @@ class ZentrimService:
         return entry
 
     def unarchive_entry(self, entry_id: str, user_id: Optional[int] = None) -> Optional[ZentrimEntry]:
-        # fix(P1-10): 状态更新走统一的 update_entry_status 入口，避免路径重复
-        """取消归档 — 委托内部 update_entry_status 实现"""
+        """取消归档"""
         entry = self.get_entry(entry_id, user_id=user_id)
         if not entry:
             return None
@@ -233,6 +214,23 @@ class ZentrimService:
         if not entry:
             return False
 
+        # fix(blocks-migration): 先收集 blocks 的 COS key + vector_id（事务提交前要锁住）
+        blocks_to_cleanup = (
+            self.db.query(ZentrimBlock)
+            .filter(ZentrimBlock.entry_id == entry_id)
+            .all()
+        )
+        cos_keys: List[str] = []
+        vector_ids: List[str] = []
+        for blk in blocks_to_cleanup:
+            data = blk.data or {}
+            if isinstance(data, dict):
+                k = data.get("key")
+                if isinstance(k, str) and k:
+                    cos_keys.append(k)
+            if blk.vector_id:
+                vector_ids.append(blk.vector_id)
+
         # fix(P0-3): DB 操作必须放在单个事务里，失败整体 rollback 避免状态错乱
         try:
             self.db.query(ZentrimTimelineEntry).filter(
@@ -244,6 +242,10 @@ class ZentrimService:
                     ZentrimReference.target_id == entry_id,
                 )
             ).delete(synchronize_session=False)
+            # fix(blocks-migration): 同步清理 blocks（事务内）
+            self.db.query(ZentrimBlock).filter(
+                ZentrimBlock.entry_id == entry_id
+            ).delete(synchronize_session=False)
             self.db.delete(entry)
             self.db.commit()
         except Exception as e:
@@ -254,21 +256,21 @@ class ZentrimService:
         # fix(P0-3): COS 删除放事务外（IO 操作不应阻塞 DB 事务）
         # fix(P0-4): 失败时改打 ERROR 并标记 ORPHAN，便于监控告警
         # TODO: 后续应引入 cos_cleanup_queue outbox 表 + worker 重试机制
-        att = entry.attachment or {}
-        if isinstance(att, dict) and att.get("key"):
+        # fix(blocks-migration): COS key 从 blocks.data.key 收集（不再从 entry.attachment 读）
+        for key in cos_keys:
             try:
-                self._delete_storage_object(att["key"])
+                self._delete_storage_object(key)
             except Exception as e:
                 logger.error(
                     f"[ZentrimService] ORPHAN COS FILE: user={user_id} entry={entry_id} "
-                    f"key={att['key']} err={e}",
+                    f"key={key} err={e}",
                     exc_info=True,
                 )
                 # TODO: 入 outbox 表（cos_cleanup_queue），由 worker 重试清理
 
         # fix(P1-5): 清理向量索引（防止硬删后向量残留导致搜索结果指向已删条目）
-        vector_id = getattr(entry, "vector_id", None)
-        if vector_id:
+        # fix(blocks-migration): vector_id 现在挂在 blocks 上（每个 block 一个向量）
+        if vector_ids:
             try:
                 import asyncio
                 from services.vector_search_service import VectorSearchService
@@ -279,17 +281,17 @@ class ZentrimService:
                     loop = asyncio.get_event_loop()
                     if loop.is_running():
                         # 已有运行 loop：后台任务清理，不阻塞删除
-                        asyncio.ensure_future(vs.delete(keys=[vector_id], index=index_name))
+                        asyncio.ensure_future(vs.delete(keys=vector_ids, index=index_name))
                     else:
-                        loop.run_until_complete(vs.delete(keys=[vector_id], index=index_name))
+                        loop.run_until_complete(vs.delete(keys=vector_ids, index=index_name))
                 except RuntimeError:
                     # 无 event loop 时同步执行
-                    asyncio.run(vs.delete(keys=[vector_id], index=index_name))
+                    asyncio.run(vs.delete(keys=vector_ids, index=index_name))
             except Exception as e:
                 # 向量清理失败只警告，不阻塞 DB 删除（DB 是真相之源）
                 logger.warning(
                     f"[ZentrimService] vector cleanup failed (non-fatal): user={user_id} "
-                    f"entry={entry_id} vector_id={vector_id} err={e}"
+                    f"entry={entry_id} vector_ids={vector_ids} err={e}"
                 )
         return True
 
@@ -356,7 +358,7 @@ class ZentrimService:
         if not entry:
             return None
 
-        allowed = {"title", "content", "summary", "tags", "metadata", "bbox"}  # fix(P1-10): status 走专门的 status 更新端点
+        allowed = {"title", "tags", "metadata"}  # fix(blocks-migration): 精简后只允许 title/tags/metadata；status 走专门的 status 更新端点
         for key, value in fields.items():
             if key in allowed:
                 if key == "metadata":
@@ -367,6 +369,146 @@ class ZentrimService:
         self.db.commit()
         self.db.refresh(entry)
         return entry
+
+    # ════════════════════════════════════════
+    # Blocks（条目内容块 — 迁移文档 §2.2）
+    # ════════════════════════════════════════
+    def save_blocks(
+        self,
+        entry_id: str,
+        blocks: List[Dict[str, Any]],
+        user_id: Optional[int] = None,
+    ) -> int:
+        """全量替换一个 entry 的所有 blocks。
+
+        流程：
+        1. 校验 entry 存在 + user_id 匹配
+        2. 事务内：删除旧 blocks → 插入新 blocks（生成 ULID + sort_order）
+        3. 更新 entry.updated_at
+        4. 返回 block_count
+
+        每个 block dict 至少需要 {'type': str}；
+        可选字段：'data' (dict), 'text' (str), 'model_name' (str), 'vector_id' (str)
+        """
+        entry = self.get_entry(entry_id, user_id=user_id)
+        if not entry:
+            return -1
+
+        if not isinstance(blocks, list):
+            raise ValueError("blocks must be a list")
+
+        # fix(blocks-migration): 防止单条目 blocks 数量被滥用撑爆表
+        if len(blocks) > 1000:
+            raise ValueError("Too many blocks in one entry (max 1000)")
+
+        try:
+            # 1. 删除旧的
+            self.db.query(ZentrimBlock).filter(
+                ZentrimBlock.entry_id == entry_id
+            ).delete(synchronize_session=False)
+
+            # 2. 插入新的
+            inserted_blocks: List[tuple] = []  # (block_id, block_type, cos_key)
+            for idx, blk in enumerate(blocks):
+                if not isinstance(blk, dict):
+                    raise ValueError(f"blocks[{idx}] must be a dict")
+                btype = blk.get("type")
+                if btype not in BLOCK_TYPES:
+                    raise ValueError(
+                        f"blocks[{idx}].type must be one of {BLOCK_TYPES}, got: {btype!r}"
+                    )
+
+                new_block_id = _generate_ulid()
+                new_block = ZentrimBlock(
+                    id=new_block_id,
+                    entry_id=entry_id,
+                    sort_order=idx,
+                    type=btype,
+                    data=blk.get("data"),
+                    text=blk.get("text"),
+                    model_name=blk.get("model_name"),
+                    vector_id=blk.get("vector_id"),
+                )
+                self.db.add(new_block)
+
+                # 收集需要触发管线的 block
+                blk_data = blk.get("data") or {}
+                if isinstance(blk_data, dict):
+                    cos_key = blk_data.get("key") or blk_data.get("cos_key")
+                    if cos_key and btype in ("photo", "audio", "ink"):
+                        inserted_blocks.append((new_block_id, btype, cos_key))
+
+            # 3. 刷新 entry.updated_at
+            entry.updated_at = datetime.now(timezone.utc)
+            self.db.commit()
+        except Exception as e:
+            self.db.rollback()
+            logger.exception(
+                f"[ZentrimService] save_blocks({entry_id}) failed; rolled back: {e}"
+            )
+            raise
+
+        # 4. auto-trigger pipeline for photo/audio/ink blocks (§9 Pipeline)
+        if inserted_blocks and user_id is not None:
+            try:
+                from services.zentrim_pipeline import pipeline as _pipeline
+                for bid, btype, cos_key in inserted_blocks:
+                    if btype == "photo":
+                        _pipeline.process_photo(entry_id, bid, cos_key, user_id)
+                    elif btype == "audio":
+                        _pipeline.process_audio(entry_id, bid, cos_key, user_id)
+                    elif btype == "ink":
+                        _pipeline.process_ink(entry_id, bid, cos_key, user_id)
+                    logger.info(
+                        f"[ZentrimService] auto-triggered pipeline: entry={entry_id} "
+                        f"block={bid} type={btype}"
+                    )
+            except Exception as e:
+                # 管线触发失败不阻塞 save_blocks（用户数据已落库）
+                logger.warning(
+                    f"[ZentrimService] pipeline auto-trigger failed (non-fatal): "
+                    f"entry={entry_id} err={e}"
+                )
+
+        return len(blocks)
+
+    def load_blocks(
+        self,
+        entry_id: str,
+        user_id: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        """按 sort_order 读取 entry 的所有 blocks。
+
+        返回 [{'id': ..., 'type': ..., 'data': ..., 'text': ..., ...}, ...]
+        """
+        entry = self.get_entry(entry_id, user_id=user_id)
+        if not entry:
+            return []
+
+        rows = (
+            self.db.query(ZentrimBlock)
+            .filter(ZentrimBlock.entry_id == entry_id)
+            .order_by(ZentrimBlock.sort_order.asc(), ZentrimBlock.created_at.asc())
+            .all()
+        )
+        return [self._serialize_block(b) for b in rows]
+
+    @staticmethod
+    def _serialize_block(block: ZentrimBlock) -> Dict[str, Any]:
+        """统一序列化单条 block（router JSON 响应使用）"""
+        if block is None:
+            return {}
+        return {
+            "id": block.id,
+            "entry_id": block.entry_id,
+            "sort_order": block.sort_order,
+            "type": block.type,
+            "data": block.data,
+            "text": block.text,
+            "model_name": block.model_name,
+            "vector_id": block.vector_id,
+            "created_at": block.created_at.isoformat() if block.created_at else None,
+        }
 
     # ════════════════════════════════════════
     # 文件存储
@@ -464,17 +606,23 @@ class ZentrimService:
         except Exception as e:
             logger.debug(f"[ZentrimService] vector search skipped: {e}")
 
-        # 2. 字面匹配（title/content/summary LIKE）
+        # 2. 字面匹配（entry.title + blocks.text LIKE，子查询去重）
         try:
             # fix(P1-1): 先转义 %/_，避免用户输入作为通配符导致全表扫描或绕过匹配
             safe_query = _escape_like(query)
             pat = f"%{safe_query}%"
+
+            # fix(blocks-migration): 从 ZentrimBlock.text 找匹配的 entry_id
+            # 使用 EXISTS 子查询避免 SAWarning + 减少 DISTINCT 开销
+            from sqlalchemy import exists, select
+            block_text_match = select(ZentrimBlock.entry_id).where(
+                ZentrimBlock.text.like(pat, escape="\\")
+            ).exists()
             like_query = self.db.query(ZentrimEntry).filter(
                 ZentrimEntry.user_id == user_id,
                 or_(
                     ZentrimEntry.title.like(pat, escape="\\"),
-                    ZentrimEntry.content.like(pat, escape="\\"),
-                    ZentrimEntry.summary.like(pat, escape="\\"),
+                    block_text_match,
                 ),
             )
             if not include_archived:
@@ -514,7 +662,25 @@ class ZentrimService:
             vs = _VS_SINGLETON
             # idx-zentrim-{uid} 索引命名约定
             index_name = f"idx-zentrim-{user_id}"
-            raw = vs.search(query, top_k=top_k * 2) if hasattr(vs, "search") else []
+            # fix(P0-1): 必须传 index=index_name，否则 vs.search 默认走 idx-public-kb，
+            # 写入到 idx-zentrim-{uid} 的向量永远不会被自己搜到（搜索功能彻底失效）。
+            # vs.search 是 async def — 在 sync 函数中用 asyncio 桥接（与 delete_entry 同模式）。
+            import asyncio as _asyncio
+            search_coro = vs.search(query, index=index_name, top_k=top_k * 2)
+            raw: list = []
+            try:
+                loop = _asyncio.get_event_loop()
+                if loop.is_running():
+                    # 已有运行 loop：用线程池在独立 loop 中同步等待，避免嵌套
+                    import concurrent.futures
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                        raw = pool.submit(_asyncio.run, search_coro).result(timeout=15)
+                else:
+                    raw = loop.run_until_complete(search_coro)
+            except RuntimeError:
+                raw = _asyncio.run(search_coro)
+            if not isinstance(raw, list):
+                raw = []
 
             entries_with_score = []
             for hit in raw or []:
@@ -765,7 +931,11 @@ class ZentrimService:
     # ════════════════════════════════════════
     @staticmethod
     def serialize_entry(entry: ZentrimEntry) -> Dict[str, Any]:
-        """统一序列化（供 router JSON 响应使用）"""
+        """统一序列化（供 router JSON 响应使用）
+
+        精简后 schema：不再返回 type/content/summary/source/source_url/attachment/bbox/vector_id。
+        实际内容请通过 GET /entries/{id}/blocks 拉取。
+        """
         if entry is None:
             return {}
 
@@ -775,18 +945,10 @@ class ZentrimService:
         return {
             "id": entry.id,
             "user_id": entry.user_id,
-            "type": entry.type,
             "title": entry.title,
-            "content": entry.content,
-            "summary": entry.summary,
             "tags": entry.tags or [],
             "status": entry.status,
-            "source": entry.source,
-            "source_url": entry.source_url,
-            "attachment": entry.attachment,
-            "bbox": entry.bbox,
             "metadata": entry.metadata_ or {},
-            "vector_id": entry.vector_id,
             "created_at": _iso(entry.created_at),
             "updated_at": _iso(entry.updated_at),
             "archived_at": _iso(entry.archived_at),

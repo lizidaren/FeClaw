@@ -279,6 +279,9 @@ class VirtualFileSystem:
                 parts.append(part)
 
         resolved = "/".join(parts)
+        # P1.2: Golden Rule 检查 -- 检测 workspace 段重复
+        from services.vfs.paths import check_golden_rule
+        check_golden_rule(self.base_path, resolved)
         cos_key = f"{self.base_path}{resolved}" if resolved else self.base_path
         return cos_key, None
 
@@ -321,6 +324,17 @@ class VirtualFileSystem:
     def resolve_path(self, path: str):
         """Public API: resolve a virtual path to a COS key tuple (cos_key, error)."""
         return self._resolve_path(path)
+
+    def cos_key_for(self, vfs_path: str) -> str:
+        """P1.2: 推荐的 VFS -> COS key 转换出口。
+
+        封装 _resolve_path + Golden Rule 检查。
+        所有新代码应优先使用此方法而非直接拼字符串。
+        """
+        cos_key, err = self._resolve_path(vfs_path)
+        if err:
+            return ""
+        return cos_key
 
     def read_file(self, path: str) -> str:
         """Public API: read a file by virtual path."""

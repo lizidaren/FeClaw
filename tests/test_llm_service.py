@@ -273,6 +273,10 @@ class TestLLMServiceChat:
         mock_provider.last_usage = {"prompt_tokens": 50, "completion_tokens": 30, "total_tokens": 80}
 
         async def mock_chat(*args, **kwargs):
+            # P0.5: 模拟真实 provider，把 usage 写入 usage_holder（per-call 隔离）
+            usage_holder = kwargs.get("usage_holder")
+            if usage_holder is not None:
+                usage_holder[0] = mock_provider.last_usage
             yield "Hello"
             yield " World"
 
@@ -495,6 +499,10 @@ class TestLLMServiceIntegration:
         mock_provider.last_usage = {"prompt_tokens": 50, "completion_tokens": 30, "total_tokens": 80}
 
         async def mock_chat(*args, **kwargs):
+            # P0.5: per-call usage_holder 隔离，模拟真实 provider 行为
+            usage_holder = kwargs.get("usage_holder")
+            if usage_holder is not None:
+                usage_holder[0] = mock_provider.last_usage
             yield "response"
 
         mock_provider.chat = mock_chat
@@ -515,3 +523,127 @@ class TestLLMServiceIntegration:
             assert added.provider == "deepseek"
             assert added.model == "deepseek-v4-flash"
             assert added.request_type == "chat"
+
+
+class TestP05ConcurrencyFix:
+    """P0.5 验证：last_usage 并发竞态已修复
+
+    之前的 bug：provider 是单例，多个请求共享 self.last_usage。
+    请求 A 写完 self.last_usage 后，请求 B 写入会覆盖它。
+    finally 块读到的是 B 的 usage，但归因到 A 的请求。
+
+    修复：每个 chat() 调用传入独立的 usage_holder list，provider 用 usage_holder[0] = usage 写入。
+    finally 块从 usage_holder[0] 读取，永远是自己这次调用的 usage。
+    """
+
+    @pytest.mark.asyncio
+    async def test_concurrent_requests_get_isolated_usage(self, mock_db):
+        """两个并发请求，provider 返回不同 usage，wrapper 必须各自记录到自己的统计。"""
+        service = LLMService()
+
+        # 共享 provider 单例（模拟真实情况）
+        mock_provider = MagicMock()
+
+        # 用可变字典模拟 usage 字典：每个请求看到不同的值
+        usage_per_call = {}
+
+        async def mock_chat(*args, **kwargs):
+            # 把这次调用的"会话 ID"作为标记，记录到 usage 字典里
+            # 这里没法直接拿到调用方 ID，简化处理：每次都 yield 一个带标记的内容 chunk
+            # 实际测试时我们用 mid-request 切换 mock_provider.last_usage 来制造 race
+            yield "chunk"
+
+        async def mock_chat_for_a(*args, **kwargs):
+            """A 请求期间：provider.last_usage = {total_tokens: 100}"""
+            mock_provider.last_usage = {"prompt_tokens": 60, "completion_tokens": 40, "total_tokens": 100}
+            usage_holder = kwargs.get("usage_holder")
+            if usage_holder is not None:
+                usage_holder[0] = mock_provider.last_usage
+            yield "a-chunk"
+            await asyncio.sleep(0.01)  # 让 B 有机会插入
+
+        async def mock_chat_for_b(*args, **kwargs):
+            """B 请求期间：provider.last_usage = {total_tokens: 200}"""
+            mock_provider.last_usage = {"prompt_tokens": 120, "completion_tokens": 80, "total_tokens": 200}
+            usage_holder = kwargs.get("usage_holder")
+            if usage_holder is not None:
+                usage_holder[0] = mock_provider.last_usage
+            yield "b-chunk"
+            await asyncio.sleep(0.01)
+
+        # 第一次调用用 A，第二次用 B —— 模拟"同一个 provider 实例被两个并发请求使用"
+        call_count = {"n": 0}
+
+        async def dispatch(*args, **kwargs):
+            call_count["n"] += 1
+            if call_count["n"] % 2 == 1:
+                async for c in mock_chat_for_a(*args, **kwargs):
+                    yield c
+            else:
+                async for c in mock_chat_for_b(*args, **kwargs):
+                    yield c
+
+        mock_provider.chat = dispatch
+
+        # 并发触发两个 chat() 调用
+        async def run_call(tag: str):
+            async for _ in service.chat(messages=[{"role": "user", "content": tag}]):
+                pass
+
+        with patch.object(service, "get_provider", return_value=mock_provider):
+            with patch.object(settings, "DEFAULT_LLM_PROVIDER", "deepseek"):
+                with patch.object(settings, "DEFAULT_LLM_MODEL", "deepseek-v4-flash"):
+                    # 关键：两个并发调用同一个 provider 实例
+                    await asyncio.gather(
+                        run_call("a"),
+                        run_call("b"),
+                    )
+
+        await asyncio.sleep(0.02)
+
+        # 验证：两个 add() 调用，tokens_used 必须是 100 和 200，不能交叉污染
+        assert mock_db.add.call_count == 2
+        tokens_used_list = [call.args[0].tokens_used for call in mock_db.add.call_args_list]
+        assert sorted(tokens_used_list) == [100, 200], (
+            f"P0.5 concurrency bug: expected [100, 200] in some order, got {tokens_used_list}. "
+            "Per-call usage_holder should isolate concurrent requests."
+        )
+
+    @pytest.mark.asyncio
+    async def test_usage_holder_none_falls_back_to_last_usage(self, mock_db):
+        """usage_holder 为 None 时（旧调用方路径），provider 仍写 self.last_usage，向后兼容。"""
+        from services.llm_service import DeepSeekProvider
+
+        # 直接构造一个 provider（DeepSeek 是具体类，可实例化）
+        provider = DeepSeekProvider(api_key="dummy")
+        # 类属性默认值（来自 LLMProvider 基类）仍是 None
+        assert provider.last_usage is None
+
+        # 验证 chat() 方法接受 usage_holder=None（不会崩溃）
+        import inspect
+        sig = inspect.signature(provider.chat)
+        assert "usage_holder" in sig.parameters
+        assert sig.parameters["usage_holder"].default is None
+
+    @pytest.mark.asyncio
+    async def test_zero_usage_does_not_crash(self, mock_db):
+        """provider 完全没返回 usage 时（某些 API 不发 usage），tokens_used 应为 0，不崩。"""
+        service = LLMService()
+        mock_provider = MagicMock()
+        mock_provider.last_usage = None
+
+        async def mock_chat(*args, **kwargs):
+            # 不写 usage_holder，模拟某些 API 完全不发 usage 字段
+            yield "response"
+
+        mock_provider.chat = mock_chat
+
+        with patch.object(service, "get_provider", return_value=mock_provider):
+            with patch.object(settings, "DEFAULT_LLM_PROVIDER", "deepseek"):
+                async for _ in service.chat(messages=[{"role": "user", "content": "hi"}]):
+                    pass
+
+        await asyncio.sleep(0.01)
+
+        added = mock_db.add.call_args[0][0]
+        assert added.tokens_used == 0

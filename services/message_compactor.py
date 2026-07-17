@@ -68,7 +68,7 @@ class MessageCompactor:
     def __init__(
         self,
         max_recent: int = 20,
-        max_tokens: int = 80000,
+        max_tokens: int = None,
         compression_ratio: float = 0.3,
         summary_provider: str = None,
         summary_model: str = None,
@@ -88,9 +88,9 @@ class MessageCompactor:
             shear_aggressive: L2 剪切激进程度，激进模式下删除更多信息
         """
         self.max_recent = max_recent
-        self.max_tokens = max_tokens
-        self.compression_ratio = compression_ratio
         from config import settings
+        self.max_tokens = max_tokens or settings.COMPACTION_MAX_TOKENS
+        self.compression_ratio = compression_ratio
         from services.model_registry import resolve
         self.summary_model = summary_model or settings.MAIN_TEXT_MODEL
         self.summary_provider = summary_provider or resolve(self.summary_model)["provider"]

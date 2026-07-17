@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>配置向导 - FeClaw</title>
+    <link rel="stylesheet" href="/static/css/setup.css">
+</head>
+<body>
+    <div class="setup-container">
+        <header class="setup-header">
+            <div class="logo">FeClaw</div>
+            <div class="step-indicator">
+                <div class="step-dot active" data-step="1"><span>1</span></div>
+                <div class="step-line"></div>
+                <div class="step-dot" data-step="2"><span>2</span></div>
+                <div class="step-line"></div>
+                <div class="step-dot" data-step="3"><span>3</span></div>
+                <div class="step-line"></div>
+                <div class="step-dot" data-step="4"><span>4</span></div>
+            </div>
+            <div class="step-titles">
+                <span data-step-title="1" class="active">管理员</span>
+                <span data-step-title="2">选择平台</span>
+                <span data-step-title="3">填入 Key</span>
+                <span data-step-title="4">完成</span>
+            </div>
+        </header>
+
+        <main class="setup-main">
+            <!-- Step 1: 管理员信息 -->
+            <section class="step-panel active" data-panel="1">
+                <h1>欢迎使用 FeClaw</h1>
+                <p class="step-subtitle">先确认管理员信息。邮箱用于找回密码（可选），密码已由系统生成，无需在此输入。</p>
+
+                <div class="form-group">
+                    <label for="admin-email">管理员邮箱</label>
+                    <input type="email" id="admin-email" placeholder="admin@example.com（可选）">
+                </div>
+
+                <div class="info-box">
+                    <div class="info-icon">ℹ️</div>
+                    <div class="info-text">
+                        密码已在启动时打印到终端。如遗忘，运行 <code>python -m uvicorn main:app --reset-admin</code> 重置。
+                    </div>
+                </div>
+
+                <div class="step-actions">
+                    <button class="btn btn-primary" data-action="next">下一步 →</button>
+                </div>
+            </section>
+
+            <!-- Step 2: 选择平台 -->
+            <section class="step-panel" data-panel="2">
+                <h1>你有哪些 API 账号？</h1>
+                <p class="step-subtitle">多选。选中的平台会在下一步展示 Key 输入框。</p>
+
+                <div class="provider-list" id="provider-list">
+                    <!-- 由 JS 动态渲染 -->
+                </div>
+
+                <div class="step-actions">
+                    <button class="btn btn-secondary" data-action="prev">← 上一步</button>
+                    <button class="btn btn-primary" data-action="next">下一步 →</button>
+                </div>
+            </section>
+
+            <!-- Step 3: 填入 API Key -->
+            <section class="step-panel" data-panel="3">
+                <h1>请粘贴你的 API Key</h1>
+                <p class="step-subtitle">仅显示你勾选的平台。Key 只会保存到本机的 <code>.env</code> 文件（权限 600）。</p>
+
+                <div id="key-inputs" class="key-inputs">
+                    <!-- 由 JS 动态渲染 -->
+                </div>
+
+                <div class="verify-bar">
+                    <button class="btn btn-secondary" id="btn-verify" data-action="verify">测试连接 🔄</button>
+                </div>
+
+                <div class="verify-results" id="verify-results"></div>
+
+                <div class="step-actions">
+                    <button class="btn btn-secondary" data-action="prev">← 上一步</button>
+                    <button class="btn btn-primary" data-action="next">下一步 →</button>
+                </div>
+            </section>
+
+            <!-- Step 4: 完成 -->
+            <section class="step-panel" data-panel="4">
+                <h1>🎉 配置完成！</h1>
+                <p class="step-subtitle">以下是当前的能力覆盖情况。</p>
+
+                <div class="summary" id="summary">
+                    <!-- 由 JS 动态渲染 -->
+                </div>
+
+                <div class="step-actions">
+                    <button class="btn btn-secondary" data-action="prev">← 上一步</button>
+                    <button class="btn btn-primary" id="btn-finish">进入控制台 🚀</button>
+                </div>
+            </section>
+        </main>
+
+        <footer class="setup-footer">
+            <span>FeClaw 配置向导 · 仅在首次启动时显示</span>
+        </footer>
+    </div>
+
+    <div class="toast-container" id="toast-container"></div>
+
+    <script src="/static/js/setup.js"></script>
+</body>
+</html>

@@ -17,7 +17,7 @@ class FePublish(Base):
     __tablename__ = "fe_publishes"
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
-    agent_hash = Column(String(4), nullable=False, index=True)
+    agent_hash = Column(String(8), nullable=False, index=True)
     app_name = Column(String(100), nullable=False)
     tag = Column(String(50), nullable=False)
     is_public = Column(Boolean, default=False)

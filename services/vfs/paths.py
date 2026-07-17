@@ -2,10 +2,55 @@
 Path utilities for VirtualFileSystem - COS 路径映射 + path 合法性检查
 """
 import hashlib
+import logging
 import os
 import re
 from datetime import datetime, timezone
 from typing import List, Optional, Tuple
+
+logger = logging.getLogger(__name__)
+
+
+# ────────────────────────────────────────────────────────────────────
+# P1.2: Golden Rule -- 禁止 COS key 拼接时 workspace 段重复
+# ────────────────────────────────────────────────────────────────────
+# Golden Rule 的含义：VFS path 自身可以包含 /workspace/...（合法访问），
+# 但 COS key 拼接时，如果 base_path 已以 workspace/ 结尾，
+# 而 VFS path 又以 /workspace/ 开头，就会出现 .../workspace/workspace/... 的重复。
+# 本函数检测这种情况，宽容模式下仅 warning，严格模式下 raise。
+
+# 全局开关：False = 宽容模式（warning），True = 严格模式（raise）
+# 建议在 1-2 个迭代后切换为 True
+GOLDEN_RULE_STRICT = False
+
+
+def check_golden_rule(base_path: str, vfs_path: str) -> Optional[str]:
+    """检查 COS key 拼接是否存在 workspace 段重复。
+
+    Args:
+        base_path: COS 基础前缀，如 "feclaw/agents/abc1/" 或 "feclaw/agents/abc1/workspace/"
+        vfs_path: VFS 路径（已去除前导 /），如 "workspace/foo" 或 "agent/config.md"
+
+    Returns:
+        错误消息字符串（如果检测到违规），None 表示通过。
+    """
+    # 检测 base_path 是否以 workspace/ 结尾
+    base_ends_with_workspace = base_path.rstrip("/").endswith("/workspace") or base_path.endswith("workspace/")
+    # 检测 vfs_path 是否以 workspace/ 开头
+    vfs_starts_with_workspace = vfs_path.startswith("workspace/") or vfs_path == "workspace"
+
+    if base_ends_with_workspace and vfs_starts_with_workspace:
+        msg = (
+            f"Golden Rule violation: workspace 段重复 "
+            f"(base_path={base_path!r}, vfs_path={vfs_path!r})。"
+            f"请检查是否多拼了一层 workspace/。"
+        )
+        if GOLDEN_RULE_STRICT:
+            raise ValueError(msg)
+        else:
+            logger.warning(msg)
+            return msg
+    return None
 
 
 def validate_filename(name: str) -> str:
@@ -191,6 +236,8 @@ class PathResolver:
                 parts.append(part)
 
         resolved = "/".join(parts)
+        # P1.2: Golden Rule 检查 -- 检测 workspace 段重复
+        check_golden_rule(self.base_path, resolved)
         cos_key = f"{self.base_path}{resolved}" if resolved else self.base_path
         return cos_key, None
 

@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>FeClaw - 你的 AI 学习搭档</title>
+    <title>FeClaw — 你的 AI 学习向导</title>
     <link rel="stylesheet" href="/static/css/base.css">
     <link rel="stylesheet" href="/static/css/glass.css">
     <link rel="stylesheet" href="/static/css/components.css">
@@ -27,337 +27,690 @@
         })();
     </script>
     <style>
-        .feature-grid {
-            display: grid;
-            grid-template-columns: repeat(2, 1fr);
-            gap: 1.5rem;
+        /* ========== 基础重置 & 字体 ========== */
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap');
+        @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;600;700;800;900&display=swap');
+
+        * { box-sizing: border-box; }
+        body {
+            background: #050510;
+            color: #fff;
+            font-family: 'Inter', 'Noto Sans SC', system-ui, -apple-system, sans-serif;
+            margin: 0;
+            padding: 0;
+            -webkit-font-smoothing: antialiased;
+        }
+
+        /* ========== 背景 ========== */
+        .bg-glow {
+            position: fixed;
+            top: -30vh;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 1400px;
+            height: 800px;
+            background: radial-gradient(ellipse at center, rgba(0,180,255,0.08) 0%, rgba(120,80,255,0.04) 40%, transparent 70%);
+            pointer-events: none;
+            z-index: 0;
+        }
+        .bg-glow-2 {
+            position: fixed;
+            bottom: -20vh;
+            right: -10vw;
+            width: 800px;
+            height: 800px;
+            background: radial-gradient(ellipse at center, rgba(0,200,150,0.05) 0%, transparent 60%);
+            pointer-events: none;
+            z-index: 0;
+        }
+
+        /* ========== 网格背景 ========== */
+        .grid-bg {
+            position: fixed;
+            inset: 0;
+            background-image:
+                linear-gradient(rgba(255,255,255,0.02) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(255,255,255,0.02) 1px, transparent 1px);
+            background-size: 60px 60px;
+            pointer-events: none;
+            z-index: 0;
+        }
+
+        /* ========== 导航 ========== */
+        .navbar {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            z-index: 100;
+            padding: 1rem 2rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background: transparent;
+        }
+        .nav-brand {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-size: 1.05rem;
+            font-weight: 600;
+            color: #fff;
+            text-decoration: none;
+        }
+        .nav-brand svg {
+            width: 28px;
+            height: 28px;
+        }
+        .nav-links {
+            display: flex;
+            gap: 1rem;
+            align-items: center;
+        }
+        .nav-links a {
+            color: rgba(255,255,255,0.5);
+            text-decoration: none;
+            font-size: 0.85rem;
+            font-weight: 500;
+            transition: color 0.2s;
+            padding: 0.4rem 0.8rem;
+            border-radius: 8px;
+        }
+        .nav-links a:hover { color: #fff; }
+        .nav-links .btn-ghost {
+            border: 1px solid rgba(255,255,255,0.1);
+        }
+        .nav-links .btn-ghost:hover {
+            background: rgba(255,255,255,0.05);
+            border-color: rgba(255,255,255,0.2);
+        }
+
+        /* ========== 通用容器 ========== */
+        .content {
+            position: relative;
+            z-index: 1;
+            max-width: 1100px;
+            margin: 0 auto;
+            padding: 0 2rem;
+        }
+        section {
+            padding-top: 10rem;
+            padding-bottom: 2rem;
         }
         @media (max-width: 768px) {
-            .feature-grid { grid-template-columns: 1fr; }
+            section { padding: 5rem 0 2rem; }
+            .content { padding: 0 1.25rem; }
         }
-        .feature-card {
-            background: var(--bg-primary);
-            border: 1px solid var(--border-light);
-            border-radius: 16px;
-            padding: 1.5rem;
-            cursor: pointer;
-            transition: all 0.3s ease;
-        }
-        .feature-card:hover {
-            background: var(--bg-hover);
-            transform: translateY(-2px);
-        }
-        .feature-card .detail {
-            max-height: 0;
+
+        /* ========== Hero ========== */
+        .hero-section {
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            text-align: center;
+            padding: 0 2rem 2rem;
+            position: relative;
             overflow: hidden;
-            transition: max-height 0.4s ease, opacity 0.3s ease;
-            opacity: 0;
         }
-        .feature-card.expanded .detail {
-            max-height: 300px;
-            opacity: 1;
-            margin-top: 1rem;
+        .hero-section .hero-bg {
+            position: absolute;
+            top: -20px;
+            left: -20px;
+            right: -20px;
+            bottom: -20px;
+            background: url('/static/img/think-hero.webp') center center / cover no-repeat;
+            filter: blur(12px);
+            z-index: 0;
         }
-        .feature-card .toggle-icon {
-            transition: transform 0.3s ease;
+        .hero-section .hero-overlay {
+            position: absolute;
+            inset: 0;
+            background: rgba(5,5,16,0.55);
+            z-index: 1;
+        }
+        .hero-section > *:not(.hero-bg):not(.hero-overlay) {
+            position: relative;
+            z-index: 2;
+        }
+        .hero-section .hero-inner {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            width: 100%;
+            max-width: 720px;
+            padding: 0 2rem;
+        }
+        .hero-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            background: rgba(255,255,255,0.08);
+            border: 1px solid rgba(255,255,255,0.12);
+            border-radius: 100px;
+            padding: 0.4rem 1rem 0.4rem 1.2rem;
+            font-size: 0.8rem;
+            color: rgba(255,255,255,0.7);
+            font-weight: 500;
+            margin-bottom: 2.5rem;
+        }
+        .hero-badge .dot {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: #4ade80;
             display: inline-block;
         }
-        .feature-card.expanded .toggle-icon {
-            transform: rotate(180deg);
+        .hero-title {
+            font-size: clamp(2.5rem, 6.5vw, 5rem);
+            font-weight: 800;
+            line-height: 1.1;
+            letter-spacing: -0.02em;
+            margin: 0 0 1.5rem;
+            background: linear-gradient(135deg, #fff 30%, rgba(255,255,255,0.5));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
         }
-        .comparison-table {
+        .hero-sub {
+            font-size: clamp(1rem, 2vw, 1.2rem);
+            color: rgba(255,255,255,0.7);
+            font-weight: 400;
+            max-width: 600px;
+            margin: 0 auto 2.5rem;
+            line-height: 1.7;
+        }
+        .hero-actions {
+            display: flex;
+            justify-content: center;
+            gap: 1rem;
+            flex-wrap: wrap;
+        }
+        .btn-primary {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.5rem;
+            min-width: 180px;
+            background: #fff;
+            color: #050510 !important;
+            padding: 0.85rem 2rem;
+            border-radius: 12px;
+            font-size: 0.95rem;
+            font-weight: 600;
+            text-decoration: none;
+            transition: all 0.2s;
+            border: none;
+            cursor: pointer;
+        }
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 30px rgba(255,255,255,0.15);
+        }
+        .btn-secondary {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.5rem;
+            min-width: 180px;
+            background: rgba(255,255,255,0.06);
+            color: #fff !important;
+            padding: 0.85rem 2rem;
+            border-radius: 12px;
+            font-size: 0.95rem;
+            font-weight: 500;
+            text-decoration: none;
+            border: 1px solid rgba(255,255,255,0.1);
+            transition: all 0.2s;
+        }
+        .btn-secondary:hover {
+            background: rgba(255,255,255,0.1);
+            border-color: rgba(255,255,255,0.2);
+        }
+
+        /* ========== Section 标题 ========== */
+        .section-label {
+            font-size: 1.7rem;
+            font-weight: 700;
+            letter-spacing: 0.05em;
+            color: rgba(255,255,255,0.3);
+            margin-bottom: 0.75rem;
+        }
+        .section-heading {
+            font-size: clamp(1.5rem, 3.5vw, 2.5rem);
+            font-weight: 700;
+            margin: 0 0 2rem;
+            line-height: 1.3;
+            letter-spacing: -0.01em;
+        }
+        .section-desc {
+            font-size: 1rem;
+            color: rgba(255,255,255,0.65);
+            max-width: 540px;
+            margin: 0 auto 4rem;
+            line-height: 1.7;
+        }
+
+        /* ========== 痛点块 ========== */
+        .problem-block {
+            background: rgba(255,255,255,0.03);
+            border: 1px solid rgba(255,255,255,0.06);
+            border-radius: 20px;
+            padding: 4rem;
+            max-width: 720px;
+            margin: 0 auto;
+        }
+        .problem-block p {
+            color: rgba(255,255,255,0.65);
+            line-height: 1.9;
+            font-size: 1rem;
+            margin: 0;
+        }
+        .problem-block p + p {
+            margin-top: 2rem;
+        }
+        .problem-block strong {
+            color: #fff;
+            font-weight: 600;
+        }
+        .problem-block .quote {
+            font-style: italic;
+            color: rgba(255,255,255,0.5);
+            font-size: 0.9rem;
+            border-top: 1px solid rgba(255,255,255,0.06);
+            margin-top: 2rem;
+            padding-top: 1.5rem;
+        }
+
+        /* ========== 三卡片 ========== */
+        .cards-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 2rem;
+        }
+        @media (max-width: 800px) {
+            .cards-grid { grid-template-columns: 1fr; }
+        }
+        .card {
+            background: rgba(255,255,255,0.03);
+            border: 1px solid rgba(255,255,255,0.06);
+            border-radius: 16px;
+            padding: 2.5rem;
+            transition: all 0.3s ease;
+            position: relative;
+            overflow: hidden;
+        }
+        .card:hover {
+            background: rgba(255,255,255,0.05);
+            border-color: rgba(255,255,255,0.12);
+            transform: translateY(-3px);
+        }
+        .card .card-icon {
+            font-size: 1.75rem;
+            margin-bottom: 1rem;
+        }
+        .card h3 {
+            font-size: 1.1rem;
+            font-weight: 600;
+            margin: 0 0 0.5rem;
+        }
+        .card .card-brief {
+            font-size: 0.9rem;
+            color: rgba(255,255,255,0.5);
+            margin: 0 0 1rem;
+            line-height: 1.5;
+        }
+        .card .card-detail {
+            font-size: 0.85rem;
+            color: rgba(255,255,255,0.5);
+            line-height: 1.7;
+            border-top: 1px solid rgba(255,255,255,0.05);
+            padding-top: 1rem;
+        }
+
+        /* ========== 对比 ========== */
+        .compare-wrap {
+            background: rgba(255,255,255,0.03);
+            border: 1px solid rgba(255,255,255,0.06);
+            border-radius: 20px;
+            padding: 3rem;
+            overflow-x: auto;
+        }
+        .compare-table {
             width: 100%;
             border-collapse: collapse;
             font-size: 0.9rem;
         }
-        .comparison-table th,
-        .comparison-table td {
-            padding: 0.75rem 1rem;
+        .compare-table th,
+        .compare-table td {
+            padding: 1rem 1.25rem;
             text-align: left;
-            border-bottom: 1px solid var(--border-subtle);
-            color: var(--text-primary);
+            border-bottom: 1px solid rgba(255,255,255,0.05);
+            color: rgba(255,255,255,0.7);
         }
-        .comparison-table th {
-            color: var(--text-muted);
-            font-weight: 500;
-            font-size: 0.8rem;
+        .compare-table th {
+            font-size: 0.75rem;
+            font-weight: 600;
+            letter-spacing: 0.08em;
             text-transform: uppercase;
-            letter-spacing: 0.05em;
+            color: rgba(255,255,255,0.4);
         }
-        .comparison-table .check { color: #4ade80; }
-        .comparison-table .cross { color: var(--text-hint); }
-        .section-tag {
-            display: inline-block;
-            font-size: 0.85rem;
-            letter-spacing: 0.1em;
-            color: var(--text-secondary);
-            margin-bottom: 0.5rem;
+        .compare-table th:first-child { color: rgba(255,255,255,0.55); }
+        .compare-table tr:last-child td { border-bottom: none; }
+        .compare-table .col-dim { color: rgba(255,255,255,0.5); }
+        .compare-table .col-bright { color: rgba(255,255,255,0.9); font-weight: 500; }
+        .check-mark { color: #4ade80; }
+        .check-label { color: #4ade80; }
+
+        /* ========== CTA 双卡片 ========== */
+        .cta-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 2rem;
+            max-width: 600px;
+            margin: 0 auto;
         }
-        .prompt-chips {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 0.75rem;
-            justify-content: center;
+        @media (max-width: 600px) {
+            .cta-grid { grid-template-columns: 1fr; }
         }
-        .prompt-chip {
-            background: var(--bg-primary);
-            border: 1px solid var(--border-light);
-            border-radius: 100px;
-            padding: 0.6rem 1.2rem;
-            color: var(--text-secondary);
-            font-size: 0.85rem;
-            cursor: pointer;
-            transition: all 0.2s;
-        }
-        .prompt-chip:hover {
-            background: rgba(74, 222, 128, 0.1);
-            border-color: rgba(74, 222, 128, 0.3);
-            color: #4ade80;
-        }
-        .hero-tagline {
-            font-size: 0.95rem;
-            color: var(--text-muted);
-            margin-top: 0.5rem;
-        }
-        .philosophy-text {
-            color: var(--text-secondary);
-            line-height: 1.8;
-        }
-        .philosophy-text strong {
-            color: var(--text-primary);
-        }
-        .detail-text {
-            color: var(--text-secondary);
-            font-size: 0.9rem;
-            line-height: 1.7;
-        }
-        .card-tagline {
-            color: var(--text-muted);
-            font-size: 0.85rem;
-            margin-top: 0.25rem;
-        }
-        .footer-text {
+        .cta-card {
+            background: rgba(255,255,255,0.03);
+            border: 1px solid rgba(255,255,255,0.06);
+            border-radius: 16px;
+            padding: 2.5rem;
             text-align: center;
-            color: var(--text-hint);
-            font-size: 0.8rem;
         }
-        .subtitle-support {
+        .cta-card h3 {
+            font-size: 1.05rem;
+            font-weight: 600;
+            margin: 0 0 0.5rem;
+        }
+        .cta-card p {
             font-size: 0.85rem;
-            color: var(--text-hint);
-            margin-top: 0.25rem;
+            color: rgba(255,255,255,0.55);
+            margin: 0.5rem 0 1.5rem;
+            line-height: 1.5;
         }
-        @media (max-width: 768px) {
-            .hero {
-                padding-left: 12px !important;
-                padding-right: 12px !important;
-            }
-            .hero-title {
-                font-size: clamp(18px, 5vw, 22px) !important;
-            }
-            .hero-subtitle {
-                font-size: 15px !important;
-            }
-            .container {
-                padding-left: 8px !important;
-                padding-right: 8px !important;
-            }
-            .glass-button-lg {
-                padding: 8px 16px;
-                font-size: 0.85rem;
-            }
+        .cta-card .btn-secondary {
+            font-size: 0.85rem;
+            padding: 0.6rem 1.5rem;
+        }
+
+        /* ========== Footer ========== */
+        .footer {
+            padding: 4rem 0 6rem;
+            text-align: center;
+        }
+        .footer p {
+            font-size: 0.85rem;
+            color: rgba(255,255,255,0.35);
+            margin: 0;
+        }
+        .footer-links {
+            display: flex;
+            justify-content: center;
+            gap: 1.5rem;
+            margin-top: 1rem;
+            flex-wrap: wrap;
+        }
+        .footer-links a {
+            color: rgba(255,255,255,0.3);
+            text-decoration: none;
+            font-size: 0.8rem;
+            transition: color 0.2s;
+        }
+        .footer-links a:hover { color: rgba(255,255,255,0.6); }
+
+        /* ========== 向下箭头 ========== */
+        .scroll-hint {
+            margin-top: auto;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 0.4rem;
+            color: rgba(255,255,255,0.5);
+            cursor: pointer;
+            z-index: 3;
+            transition: color 0.2s;
+            padding-bottom: 0.5rem;
+        }
+        .scroll-hint:hover {
+            color: rgba(255,255,255,0.75);
+        }
+        .scroll-hint .arrow-icon {
+            width: 38px;
+            height: 38px;
+            animation: bob 2s ease-in-out infinite;
+        }
+        .scroll-hint span {
+            font-size: 0.85rem;
+            letter-spacing: 0.12em;
+            text-transform: uppercase;
+        }
+        @keyframes bob {
+            0%, 100% { transform: translateY(0); }
+            50% { transform: translateY(6px); }
+        }
+
+        /* ========== 分隔装饰 ========== */
+        .divider {
+            width: 100%;
+            height: 1px;
+            background: linear-gradient(90deg, transparent, rgba(255,255,255,0.06), transparent);
         }
     </style>
 </head>
 <body>
-    <div class="page page-enter">
-        <!-- 导航栏 -->
-        <nav class="glass-nav">
-            <div class="container flex justify-between items-center">
-                <a href="/" class="navbar-brand">
-                    <span class="brand-icon">
-                        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                            <path d="M12 2L2 7l10 5 10-5-10-5z"/>
-                            <path d="M2 17l10 5 10-5"/>
-                            <path d="M2 12l10 5 10-5"/>
-                        </svg>
-                    </span>
-                    FeClaw
-                </a>
-                <div class="navbar-nav">
-                    {% if is_logged_in %}
-                    <a href="/dashboard" class="nav-link">控制台</a>
-                    <a href="/settings" class="nav-link">设置</a>
-                    {% else %}
-                    <a href="/login" class="nav-link">登录</a>
-                    {% endif %}
+
+    <!-- 背景层 -->
+    <div class="bg-glow"></div>
+    <div class="bg-glow-2"></div>
+    <div class="grid-bg"></div>
+
+    <!-- 导航 -->
+    <nav class="navbar">
+        <a href="/" class="nav-brand">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 2L2 7l10 5 10-5-10-5z"/>
+                <path d="M2 17l10 5 10-5"/>
+                <path d="M2 12l10 5 10-5"/>
+            </svg>
+            FeClaw
+        </a>
+        <div class="nav-links">
+            {% if is_logged_in %}
+            <a href="/dashboard">控制台</a>
+            <a href="/settings">设置</a>
+            {% else %}
+            <a href="https://github.com/lizidaren/FeClaw" target="_blank">GitHub</a>
+            <a href="/login" class="btn-ghost">登录</a>
+            {% endif %}
+        </div>
+    </nav>
+
+    <!-- ===== Hero ===== -->
+    <section class="hero-section">
+        <div class="hero-bg"></div>
+        <div class="hero-overlay"></div>
+        <div class="hero-inner">
+        <div class="hero-badge">
+            <span class="dot"></span>
+            FeClaw - MIT 协议开源
+        </div>
+        <h1 class="hero-title">
+            你的 AI 学习向导
+        </h1>
+        <p class="hero-sub">
+            不是又一个 AI 聊天——它记得你学过什么、会引导你思考、在你卡住时拉一把。因为学习这件事，不能外包。
+        </p>
+        <div class="hero-actions">
+            {% if is_logged_in %}
+            <a href="/dashboard" class="btn-primary">进入控制台 →</a>
+            {% else %}
+            <a href="/login" class="btn-primary">内测入口 →</a>
+            <a href="https://github.com/lizidaren/FeClaw" target="_blank" class="btn-secondary"><svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" style="vertical-align:-2px;margin-right:4px;"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>开源仓库</a>
+            {% endif %}
+        </div>
+
+        </div>
+
+        <!-- 向下箭头 -->
+    <div class="scroll-hint" onclick="document.getElementById('scene').scrollIntoView({behavior:'smooth'})">
+            <svg class="arrow-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M6 9l6 6 6-6"/>
+            </svg>
+            <span>了解更多</span>
+        </div>
+    </section>
+
+    <!-- ===== Scene 1: 铺垫 ===== -->
+    <!-- ===== Scene 1: 铺垫 - AI 很强 ===== -->
+    <section class="content" style="text-align:center;padding-top:5rem;" id="scene">
+        <div class="section-label">2026 年</div>
+        <h2 class="section-heading">AI 已经能做高考题、处理工作了</h2>
+        <p class="section-desc" style="max-width:580px;">
+            腾讯 2025 年 50% 的新代码由 AI 生成。讯飞星火在广东物理类高考中拿下了 708 分。
+            身边越来越多人在用 AI 工作、编程、处理文档。
+        </p>
+        <div class="problem-block" style="text-align:left;">
+            <p>
+                但当我打开手机上的 AI 聊天软件，问一道题的时候——<strong>为什么总觉得差了点什么？</strong>
+            </p>
+            <p>
+                答案来得很快，说得很详细。但仔细想想，这跟作业帮甚至直接翻答案详解，<strong>好像也没什么本质区别</strong>。
+                不过是「给答案装了一张嘴」——快了一点，说出来而不是写出来。<strong>但你还是没学会</strong>，因为思考的那几步，被跳过了。
+            </p>
+        </div>
+    </section>
+
+    <div class="content"><div class="divider"></div></div>
+
+    <!-- ===== Scene 2: 转折 ===== -->
+    <section class="content" style="text-align:center;" id="problem">
+        <div class="section-label">为什么？</div>
+        <h2 class="section-heading">因为学习，是不能外包的</h2>
+        <div class="problem-block" style="text-align:left;">
+            <p>
+                工作和学习的区别就在这儿。工作可以外包——PPT 谁做的都行，代码谁写的都有用。
+                因为意义来自<strong>劳动的交付物</strong>。
+            </p>
+            <p>
+                但学习的价值，源于过程——<strong>让知识流过大脑，让思想留下印记</strong>。
+            </p>
+        </div>
+    </section>
+
+    <div class="content"><div class="divider"></div></div>
+
+    <!-- ===== Scene 3: 答案 ===== -->
+    <section class="content" style="text-align:center;" id="solution">
+        <div class="section-label">所以我们需要</div>
+        <h2 class="section-heading">一个 AI 向导，不是一个答题机器</h2>
+        <p class="section-desc">
+            像登山向导一样陪你走，而不是直接替你把山铲平。
+        </p>
+        <div class="cards-grid" style="text-align:left;">
+            <div class="card">
+                <div class="card-icon">📖</div>
+                <h3>不会忘记你</h3>
+                <div class="card-brief">不用每次重新自我介绍，它记得你学到哪了</div>
+                <div class="card-detail">
+                    昨天的错题整理好了，上周卡在动量守恒上，下次聊自动接着讲。不是每次从零开始——它的记忆会不断沉淀，而不是堆聊天记录。
                 </div>
             </div>
-        </nav>
-
-        <!-- Hero -->
-        <section class="section" style="padding-top:5rem;padding-bottom:2rem;">
-            <div class="container">
-                <div class="hero animate-slide-up" style="text-align:center;">
-                    <h1 class="hero-title" style="margin-bottom:0.25rem;">FeClaw - 你的 AI 学习搭档</h1>
-                    <p class="hero-subtitle" style="font-size:1.1rem;">
-                        让 AI 的浪潮，惠及每一个学生
-                    </p>
-                    <p class="hero-tagline">
-                        K-12 学习场景优化（目前主要针对高考）
-                    </p>
-                    <div class="flex justify-center gap-lg" style="margin-top:2rem;">
-                        {% if is_logged_in %}
-                        <a href="/dashboard" class="glass-button glass-button-primary glass-button-lg">进入控制台</a>
-                        {% else %}
-                        <a href="/login" class="glass-button glass-button-primary glass-button-lg">开始使用</a>
-                        <a href="/dashboard" class="glass-button glass-button-lg">了解更多</a>
-                        {% endif %}
-                    </div>
+            <div class="card">
+                <div class="card-icon">🧭</div>
+                <h3>引导你，不替你做</h3>
+                <div class="card-brief">直接给答案不是本事，让你自己想出来才是</div>
+                <div class="card-detail">
+                    卡在压轴题上？它会把题目拆成一步步，让你自己推出结论。能用苏格拉底提问法，也能听你讲一遍，再帮你找出漏洞。
                 </div>
             </div>
-        </section>
-
-        <!-- 设计哲学 -->
-        <section class="section">
-            <div class="container" style="max-width:720px;">
-                <div style="text-align:center;margin-bottom:2rem;">
-                    <span class="section-tag">🧠 设计哲学</span>
-                    <h2>为什么 FeClaw 这样做？</h2>
-                </div>
-                <div class="glass-card" style="padding:2rem;">
-                    <p class="philosophy-text" style="margin-bottom:1rem;">
-                        <strong>All in Text</strong> — 所有数据进入主模型前先文本化。查找处理都更高效。
-                    </p>
-                    <p class="philosophy-text">
-                        <strong>大小模型分步混排</strong> — 深度模型负责复杂推理，轻量模型处理简单任务。各司其职，复杂场景不降质，日常对话少等待。
-                    </p>
+            <div class="card">
+                <div class="card-icon">💪</div>
+                <h3>卡住时有人搭把手</h3>
+                <div class="card-brief">不是冷冰冰甩一篇解析，而是"没关系，慢慢来"</div>
+                <div class="card-detail">
+                    一道题算了半小时还算错，本来就烦躁。这时候需要的不是长篇大论，而是有人把问题拆开，在卡点上拉一把。
                 </div>
             </div>
-        </section>
+        </div>
+    </section>
 
-        <!-- 核心特色 -->
-        <section class="section">
-            <div class="container" style="max-width:900px;">
-                <div style="text-align:center;margin-bottom:2rem;">
-                    <span class="section-tag">⭐ 核心特色</span>
-                    <h2>跟普通 AI 有什么不一样？</h2>
-                </div>
-                <div class="feature-grid">
-                    <div class="feature-card" onclick="this.classList.toggle('expanded')">
-                        <div style="display:flex;justify-content:space-between;align-items:center;">
-                            <span style="font-weight:600;font-size:1.05rem;color:var(--text-primary);">可持续记忆</span>
-                            <span class="toggle-icon" style="color:var(--text-muted);">▼</span>
-                        </div>
-                        <div class="card-tagline">不是每轮都从头开始</div>
-                        <div class="detail">
-                            <p class="detail-text">
-                                每次对话记录关键信息，每日自动提炼到长期记忆。
-                                下次回来，AI 还记得你上次的进度。不是堆历史消息，而是不断浓缩。
-                            </p>
-                        </div>
-                    </div>
+    <div class="content"><div class="divider"></div></div>
 
-                    <div class="feature-card" onclick="this.classList.toggle('expanded')">
-                        <div style="display:flex;justify-content:space-between;align-items:center;">
-                            <span style="font-weight:600;font-size:1.05rem;color:var(--text-primary);">双搜索系统</span>
-                            <span class="toggle-icon" style="color:var(--text-muted);">▼</span>
-                        </div>
-                        <div class="card-tagline">知识库 + 联网，各取所长</div>
-                        <div class="detail">
-                            <p class="detail-text">
-                                查教材走内置知识库，查时事走多源联网搜索。
-                                自动路由，你只管问。
-                            </p>
-                        </div>
-                    </div>
-                </div></div>
+    <!-- ===== 对比 ===== -->
+    <section class="content" style="text-align:center;">
+        <div class="section-label">对比</div>
+        <h2 class="section-heading">跟普通 AI 聊天的区别</h2>
+        <div class="compare-wrap" style="text-align:left;">
+            <table class="compare-table">
+                <thead>
+                    <tr>
+                        <th></th>
+                        <th>普通 AI 聊天</th>
+                        <th>FeClaw</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td style="font-weight:500;color:#fff;">记得你</td>
+                        <td class="col-dim">❌ 每轮从零开始</td>
+                        <td class="col-bright"><span class="check-mark">✓</span> 持续提炼记忆，自动跟上进度</td>
+                    </tr>
+                    <tr>
+                        <td style="font-weight:500;color:#fff;">怎么教</td>
+                        <td class="col-dim">直接给答案，长篇详解</td>
+                        <td class="col-bright"><span class="check-mark">✓</span> 步骤引导，启发式提问</td>
+                    </tr>
+                    <tr>
+                        <td style="font-weight:500;color:#fff;">除了聊天</td>
+                        <td class="col-dim">— 没什么别的</td>
+                        <td class="col-bright"><span class="check-mark">✓</span> 搜教材、整理错题、AI 出题、做知识点总结</td>
+                    </tr>
+                    <tr>
+                        <td style="font-weight:500;color:#fff;">开源</td>
+                        <td class="col-dim">— 商业产品</td>
+                        <td class="col-bright"><span class="check-mark">✓</span> MIT 协议，可自部署</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </section>
+
+    <div class="content"><div class="divider"></div></div>
+
+    <!-- ===== CTA ===== -->
+    <section class="content" style="text-align:center;">
+        <div class="section-label">找向导</div>
+        <h2 class="section-heading">开始用 FeClaw</h2>
+        <div class="cta-grid" style="text-align:center;">
+            <div class="cta-card">
+                <h3>🧪 在线体验</h3>
+                <p>联系 <a href="mailto:lizidaren@firstentrance.net" style="color:rgba(255,255,255,0.7);text-decoration:underline;text-decoration-color:rgba(255,255,255,0.2);">lizidaren</a> 加入内测</p>
+                <a href="mailto:lizidaren@firstentrance.net" class="btn-secondary">联系我 →</a>
             </div>
-        </section>
-
-        <!-- 对比表格 -->
-        <section class="section">
-            <div class="container" style="max-width:800px;">
-                <div style="text-align:center;margin-bottom:2rem;">
-                    <span class="section-tag">🔥 对比</span>
-                    <h2>FeClaw vs 普通 AI</h2>
-                </div>
-                <div class="glass-card" style="padding:1.5rem;overflow-x:auto;">
-                    <table class="comparison-table">
-                        <thead>
-                            <tr>
-                                <th style="width:28%;"></th>
-                                <th style="width:36%;">普通 AI 聊天</th>
-                                <th style="width:36%;">FeClaw</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            <tr>
-                                <td style="font-weight:500;color:var(--text-primary);">核心架构</td>
-                                <td>单一模型，什么都是一次调完</td>
-                                <td><span class="check">✓</span> 大小模型分步混排，SmartRouter 自动分流</td>
-                            </tr>
-                            <tr>
-                                <td style="font-weight:500;color:var(--text-primary);">搜索</td>
-                                <td>联网搜什么算什么</td>
-                                <td><span class="check">✓</span> 教材知识库 + 三级联网搜索，双路互补</td>
-                            </tr>
-                            <tr>
-                                <td style="font-weight:500;color:var(--text-primary);">错题</td>
-                                <td><span class="cross">—</span> 手动拍照粘贴</td>
-                                <td><span class="check">✓</span> VLM 识别 + 自动比对，整理成文档</td>
-                            </tr>
-                            <tr>
-                                <td style="font-weight:500;color:var(--text-primary);">记忆</td>
-                                <td>每轮对话从零开始</td>
-                                <td><span class="check">✓</span> 跨会话持续记忆，日总结 + 长期提炼</td>
-                            </tr>
-                            <tr>
-                                <td style="font-weight:500;color:var(--text-primary);">工具</td>
-                                <td>纯聊天，最多读个文件</td>
-                                <td><span class="check">✓</span> 代码执行、HTML 渲染、文件管理、定时任务</td>
-                            </tr>
-                        </tbody>
-                    </table>
-                </div>
+            <div class="cta-card">
+                <h3>📦 自部署</h3>
+                <p>MIT 协议开源</p>
+                <a href="https://github.com/lizidaren/FeClaw" target="_blank" class="btn-secondary">GitHub →</a>
             </div>
-        </section>
+        </div>
+    </section>
 
-        <!-- 试试这些 -->
-        <section class="section">
-            <div class="container" style="max-width:700px;">
-                <div style="text-align:center;margin-bottom:1.5rem;">
-                    <span class="section-tag">🚀 试试这些</span>
-                    <h2>不知道怎么开始？试试这些</h2>
-                </div>
-                <div class="prompt-chips">
-                    <span class="prompt-chip" onclick="navigateToChat('帮我整理一下这张试卷的错题')">📝 整理错题</span>
-                    <span class="prompt-chip" onclick="navigateToChat('用知识库查一下三角函数公式')">📚 查知识库</span>
-                    <span class="prompt-chip" onclick="navigateToChat('帮我搜索一下今年高考数学改革')">🔍 搜最新信息</span>
-                    <span class="prompt-chip" onclick="navigateToChat('生成一个函数图像的HTML演示')">🎨 概念可视化</span>
-                </div>
-                <p class="subtitle-support" style="margin-top:1.5rem;">
-                    需要先登录才能开始对话
-                </p>
-            </div>
-        </section>
+    <div class="content"><div class="divider"></div></div>
 
-        <!-- Footer -->
-        <footer class="section" style="padding:2rem 0;">
-            <div class="container">
-                <p class="footer-text">FeClaw — MIT License</p>
-            </div>
-        </footer>
-    </div>
+    <!-- ===== Footer ===== -->
+    <footer class="footer">
+        <p>"让知识流过大脑，让思想留下印记。"</p>
+        <div class="footer-links">
+            <a href="https://github.com/lizidaren/FeClaw" target="_blank">GitHub</a>
+            <a href="https://www.firstentrance.net" target="_blank">博客</a>
+            <a href="mailto:lizidaren@firstentrance.net">联系</a>
+        </div>
+    </footer>
 
-    <script>
-        function navigateToChat(prompt) {
-            var token = localStorage.getItem("feclaw_jwt");
-            if (token) {
-                window.location.href = "/dashboard?prompt=" + encodeURIComponent(prompt);
-            } else {
-                window.location.href = "/login";
-            }
-        }
-    </script>
 </body>
 </html>

@@ -1,0 +1,410 @@
+"""
+FeClaw 首次启动配置向导 — 后端服务
+
+提供：
+- 配置检测（is_setup_complete）
+- .env 安全读写（update_env / read_env）
+- Provider 列表（get_provider_list）
+- 管理员随机密码生成 + Banner 打印
+- admin 用户创建 / 重置
+- /setup API 的辅助函数
+
+所有 .env 写操作通过 _env_lock（threading.Lock）+ .env 文件权限 600 保证线程与权限安全。
+"""
+from __future__ import annotations
+
+import logging
+import os
+import secrets
+import stat
+import threading
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+from config import settings
+
+logger = logging.getLogger(__name__)
+
+# ───────────────────────────────────────────────────────────
+# 路径常量
+# ───────────────────────────────────────────────────────────
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+ENV_FILE = BASE_DIR / ".env"
+ENV_EXAMPLE_FILE = BASE_DIR / ".env.example"
+
+# .env 写入锁 —— 防止并发写入撕裂文件
+_env_lock = threading.Lock()
+
+
+# ───────────────────────────────────────────────────────────
+# Provider 列表（前端 Step 2 用）
+# ───────────────────────────────────────────────────────────
+
+# 注意：与 services/model_registry.PROVIDER_META 保持一致。
+# 但本表为面向用户的元数据（名称、描述、能力、推荐模型），更丰富。
+PROVIDER_LIST: List[Dict[str, Any]] = [
+    {
+        "id": "qwen",
+        "name": "阿里云百炼",
+        "description": "推荐，一个 Key 覆盖文本/视觉/嵌入/搜索",
+        "badge": "推荐",
+        "api_key_name": "QWEN_API_KEY",
+        "covers": ["text", "vision", "embedding", "search"],
+        "models": ["qwen3.6-flash", "qwen3.6-plus", "qwen3.7-plus", "qwen3.7-max", "qwen3.6-35b-a3b", "qwen3-vl-flash", "qwen3-vl-plus", "text-embedding-v4"],
+    },
+    {
+        "id": "deepseek",
+        "name": "DeepSeek",
+        "description": "中文更自然，有深度思考",
+        "badge": None,
+        "api_key_name": "DEEPSEEK_API_KEY",
+        "covers": ["text"],
+        "models": ["deepseek-v4-flash"],
+    },
+    {
+        "id": "zhipuai",
+        "name": "智谱 GLM",
+        "description": "flash 模型免费，GLM-4.6V 支持视觉",
+        "badge": None,
+        "api_key_name": "ZHIPU_API_KEY",
+        "covers": ["text", "vision"],
+        "models": ["glm-4.7", "glm-4.7-flash", "glm-4.6v", "glm-4.5-air", "glm-5-turbo", "glm-5"],
+    },
+    {
+        "id": "kimi",
+        "name": "Kimi (月之暗面)",
+        "description": "搜索能力强，长上下文",
+        "badge": None,
+        "api_key_name": "KIMI_API_KEY",
+        "covers": ["search", "text"],
+        "models": ["kimi-k2.5", "kimi-k2.6"],
+    },
+    {
+        "id": "mimo",
+        "name": "小米 MiMo",
+        "description": "速度快",
+        "badge": None,
+        "api_key_name": "MIMO_API_KEY",
+        "covers": ["text"],
+        "models": ["mimo-v2.5", "mimo-v2.5-pro", "mimo-v2.5-pro-ultraspeed"],
+    },
+    {
+        "id": "doubao",
+        "name": "火山引擎 (豆包)",
+        "description": "图片理解 / 文生图",
+        "badge": None,
+        "api_key_name": "DOUBAO_API_KEY",
+        "covers": ["vision", "image_generation"],
+        "models": ["doubao-seed-2-0-lite-260215", "doubao-seed-2-1-turbo-260628", "doubao-seed-2-1-pro-260628", "doubao-seedream-5-0-260128"],
+    },
+]
+
+# LLM API key 名称集合（用于配置检测）
+LLM_API_KEY_NAMES: List[str] = [p["api_key_name"] for p in PROVIDER_LIST]
+
+
+# ───────────────────────────────────────────────────────────
+# .env 读取 / 写入
+# ───────────────────────────────────────────────────────────
+
+def _parse_env_file(path: Path) -> Dict[str, str]:
+    """解析 .env 文件为 dict（保留注释 / 空行的顺序由调用方维护）。"""
+    result: Dict[str, str] = {}
+    if not path.exists():
+        return result
+    for raw_line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip()
+        # 去掉包裹的引号
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+            value = value[1:-1]
+        result[key] = value
+    return result
+
+
+def _set_env_value(env_text: str, key: str, value: str) -> str:
+    """在不丢失注释和顺序的情况下更新/插入 env 项。
+
+    若 key 已存在（行首匹配），则替换该行；
+    否则追加到文件末尾。
+    """
+    if not value:
+        return env_text
+    lines = env_text.splitlines()
+    new_line = f"{key}={value}"
+    found = False
+    for i, raw in enumerate(lines):
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        k = stripped.split("=", 1)[0].strip()
+        if k == key:
+            lines[i] = new_line
+            found = True
+            break
+    if not found:
+        # 若文件末尾无换行，补一个
+        if lines and lines[-1] != "":
+            lines.append("")
+        lines.append(new_line)
+    return "\n".join(lines) + "\n"
+
+
+def update_env(updates: Dict[str, str]) -> None:
+    """线程安全地更新 .env 文件。
+
+    - 仅在 value 非空时写入
+    - 写入后 chmod 600（仅 owner 可读写）
+    - 文件不存在则自动创建
+    """
+    if not updates:
+        return
+    with _env_lock:
+        if ENV_FILE.exists():
+            try:
+                text = ENV_FILE.read_text(encoding="utf-8")
+            except Exception as e:
+                logger.error(f"[Setup] 读取 .env 失败: {e}")
+                text = ""
+        else:
+            text = ""
+        for k, v in updates.items():
+            if v:
+                text = _set_env_value(text, k, v)
+        # 写入
+        ENV_FILE.write_text(text, encoding="utf-8")
+        # 权限 600
+        try:
+            os.chmod(ENV_FILE, stat.S_IRUSR | stat.S_IWUSR)
+        except Exception as e:
+            # Windows / WSL 等可能不支持；只记录不抛
+            logger.debug(f"[Setup] chmod 600 失败（非致命）: {e}")
+
+
+def get_partial_config() -> Dict[str, Any]:
+    """返回当前 .env 中已有的"非敏感占位"信息（用于前端预填）。"""
+    env = _parse_env_file(ENV_FILE) if ENV_FILE.exists() else {}
+    # 避免把真实密钥回显给前端 —— 只标记"是否已设置"
+    api_keys = {name: bool(env.get(name, "").strip()) for name in LLM_API_KEY_NAMES}
+    return {
+        "jwt_secret_set": bool(env.get("JWT_SECRET", "").strip()),
+        "database_url": env.get("DATABASE_URL", settings.DATABASE_URL or ""),
+        "storage_mode": env.get("STORAGE_MODE", settings.STORAGE_MODE or "auto"),
+        "api_keys_present": api_keys,
+        "setup_complete": (env.get("SETUP_COMPLETE", "").lower() == "true"),
+    }
+
+
+def get_current_admin(db) -> Optional[Any]:
+    """获取当前 admin 用户的 email（如果有）。"""
+    try:
+        from models.database import User
+        admin = db.query(User).filter(User.username == "admin").first()
+        if not admin:
+            return None
+        return {"username": admin.username, "email": admin.email}
+    except Exception as e:
+        logger.warning(f"[Setup] get_current_admin 失败: {e}")
+        return None
+
+
+# ───────────────────────────────────────────────────────────
+# 配置检测
+# ───────────────────────────────────────────────────────────
+
+def _has_any_llm_key() -> bool:
+    env = _parse_env_file(ENV_FILE) if ENV_FILE.exists() else {}
+    for name in LLM_API_KEY_NAMES:
+        if env.get(name, "").strip():
+            return True
+    # 也兼容 settings 中已加载的值
+    for name in LLM_API_KEY_NAMES:
+        if getattr(settings, name, ""):
+            return True
+    return False
+
+
+def _has_admin_user(db) -> bool:
+    try:
+        from models.database import User
+        return db.query(User).filter(User.username == "admin").first() is not None
+    except Exception:
+        return False
+
+
+def is_setup_complete(db=None) -> bool:
+    """检查 .env 是否满足最低运行要求。
+
+    最低运行要求：
+    1. SETUP_COMPLETE == "true" 显式标记
+    2. JWT_SECRET 非空
+    3. DATABASE_URL 能连上（仅在 db 提供时检测；无 db 仅做字段校验）
+    4. 至少有一个 LLM API Key
+    5. admin 用户存在（仅在 db 提供时检测）
+    """
+    env = _parse_env_file(ENV_FILE) if ENV_FILE.exists() else {}
+    # 优先以显式标记为准
+    if env.get("SETUP_COMPLETE", "").lower() == "true":
+        # 但即便标记为 true，仍做最基本校验：JWT + 至少一个 LLM key
+        if not env.get("JWT_SECRET", "").strip() and not settings.JWT_SECRET:
+            return False
+        if not _has_any_llm_key():
+            return False
+        if db is not None and not _has_admin_user(db):
+            return False
+        return True
+
+    # 未标记 —— 走全量检查
+    if not (env.get("JWT_SECRET", "").strip() or settings.JWT_SECRET):
+        return False
+    if not _has_any_llm_key():
+        return False
+    if db is not None and not _has_admin_user(db):
+        return False
+    return True
+
+
+# ───────────────────────────────────────────────────────────
+# 管理员密码生成 + Banner
+# ───────────────────────────────────────────────────────────
+
+def generate_admin_password(length: int = 12) -> str:
+    """生成强随机密码（16 字符 url-safe base64）"""
+    return secrets.token_urlsafe(12)[:length] if length <= 16 else secrets.token_urlsafe(length)
+
+
+def print_admin_banner(password: str, host: str = "localhost", port: int = 8080) -> None:
+    """打印首次启动 banner 到控制台。"""
+    banner = f"""
+  ╔══════════════════════════════════════════════╗
+  ║                                              ║
+  ║   FeClaw 首次启动                             ║
+  ║                                              ║
+  ║   管理面板: http://{host}:{port}              ║
+  ║   用户名:   admin                             ║
+  ║   密码:     {password:<30s}║
+  ║                                              ║
+  ║   ⚠️ 此密码仅显示一次                         ║
+  ║   忘记后运行 --reset-admin 重置                ║
+  ╚══════════════════════════════════════════════╝
+"""
+    # 用 print 而非 logger：logger 可能被配置成只入文件 / 不会显示在终端
+    print(banner)
+
+
+def create_or_reset_admin(db, password: str) -> Any:
+    """创建或重置 admin 用户的密码。返回 User 对象。
+
+    - 若已存在 admin：更新 password_hash（bcrypt），password_version=2
+    - 若不存在：创建新用户，bcrypt 哈希，is_admin=True
+    """
+    from models.database import User
+    from utils.auth import hash_password
+
+    admin = db.query(User).filter(User.username == "admin").first()
+    if admin:
+        admin.password_hash = hash_password(password)
+        admin.salt = None
+        admin.password_version = 2
+        admin.is_admin = True
+        db.commit()
+        db.refresh(admin)
+        logger.info("[Setup] 已重置 admin 用户密码")
+        return admin
+    # 创建
+    admin = User(
+        username="admin",
+        password_hash=hash_password(password),
+        salt=None,
+        password_version=2,
+        is_admin=True,
+    )
+    db.add(admin)
+    db.commit()
+    db.refresh(admin)
+    logger.info("[Setup] 已创建 admin 用户（随机密码）")
+    return admin
+
+
+# ───────────────────────────────────────────────────────────
+# Provider 列表（API 用）
+# ───────────────────────────────────────────────────────────
+
+def get_provider_list() -> Dict[str, Any]:
+    """返回前端 Step 2 需要的 provider 元数据 + 当前 key 状态。"""
+    env = _parse_env_file(ENV_FILE) if ENV_FILE.exists() else {}
+    api_keys_present: Dict[str, bool] = {}
+    for p in PROVIDER_LIST:
+        name = p["api_key_name"]
+        api_keys_present[name] = bool(env.get(name, "").strip() or getattr(settings, name, ""))
+    return {
+        "providers": PROVIDER_LIST,
+        "current_api_keys": api_keys_present,
+    }
+
+
+# ───────────────────────────────────────────────────────────
+# 连接测试（最小实现：检查 key 是否设置 + 形态合法）
+# ───────────────────────────────────────────────────────────
+
+def _looks_like_valid_key(value: str) -> bool:
+    if not value or len(value) < 8:
+        return False
+    return True
+
+
+async def verify_provider(provider_id: str) -> Dict[str, Any]:
+    """测试某个 provider 的 API key 是否可用。
+
+    实际是只做格式校验 + 标记 key 存在，不发起真实网络请求
+    （避免启动时阻塞 / 速率限制）。详细校验在 /setup/verify 中可选执行。
+    """
+    provider = next((p for p in PROVIDER_LIST if p["id"] == provider_id), None)
+    if not provider:
+        return {"ok": False, "provider": provider_id, "error": "unknown provider"}
+    key_name = provider["api_key_name"]
+    env = _parse_env_file(ENV_FILE) if ENV_FILE.exists() else {}
+    value = env.get(key_name, "") or getattr(settings, key_name, "")
+    if not _looks_like_valid_key(value):
+        return {"ok": False, "provider": provider_id, "error": f"{key_name} 未设置或格式异常"}
+    return {"ok": True, "provider": provider_id, "key_name": key_name}
+
+
+async def verify_config(db=None) -> Dict[str, Any]:
+    """测试当前配置（异步）—— 给出每项的状态。"""
+    results: List[Dict[str, Any]] = []
+
+    # 1. JWT_SECRET
+    env = _parse_env_file(ENV_FILE) if ENV_FILE.exists() else {}
+    jwt_set = bool(env.get("JWT_SECRET", "").strip() or settings.JWT_SECRET)
+    results.append({"name": "JWT_SECRET", "ok": jwt_set, "message": "已设置" if jwt_set else "缺失"})
+
+    # 2. DATABASE_URL
+    db_url = env.get("DATABASE_URL", "") or settings.DATABASE_URL or ""
+    db_ok = bool(db_url)
+    results.append({"name": "DATABASE_URL", "ok": db_ok, "message": "已设置" if db_ok else "缺失"})
+
+    # 3. LLM Keys
+    for p in PROVIDER_LIST:
+        r = await verify_provider(p["id"])
+        results.append({
+            "name": p["api_key_name"],
+            "ok": r["ok"],
+            "message": "已设置" if r["ok"] else r.get("error", "未设置"),
+            "provider": p["id"],
+        })
+
+    # 4. admin 用户
+    if db is not None:
+        admin_ok = _has_admin_user(db)
+        results.append({"name": "admin_user", "ok": admin_ok, "message": "已存在" if admin_ok else "缺失"})
+
+    overall = all(r["ok"] for r in results)
+    return {"status": "ok" if overall else "partial", "results": results, "overall_ok": overall}

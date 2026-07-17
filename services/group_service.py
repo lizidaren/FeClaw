@@ -79,7 +79,8 @@ GROUP_ALLOWED_TOOLS: Set[str] = {
 
 class GroupDispatchService:
     MAX_ROUNDS = 100
-    CONTEXT_COMPACTION_THRESHOLD = 0.15  # keep 15% when compacting
+    # P1.1: 压缩阈值从 config.py 读取（原硬编码 0.15）
+    CONTEXT_COMPACTION_THRESHOLD = settings.CONTEXT_COMPACTION_THRESHOLD
 
     def __init__(self):
         self._running_tasks: Dict[str, asyncio.Task] = {}
@@ -490,7 +491,7 @@ class GroupDispatchService:
     def _compact_context(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Compact context to ~15% of recent messages when too large."""
         total_tokens = sum(estimate_tokens(m.get("content", "")) for m in messages)
-        max_tokens = 110000 * self.CONTEXT_COMPACTION_THRESHOLD
+        max_tokens = settings.CONTEXT_LIMIT_TOKENS * self.CONTEXT_COMPACTION_THRESHOLD
 
         if total_tokens <= max_tokens:
             return messages

@@ -17,20 +17,12 @@ from typing import Optional, List
 from datetime import datetime
 
 from sqlalchemy.orm import Session
-from models.database import SessionLocal
+from models.database import SessionLocal, get_db
 from config import settings
 from routers.feclaw_domain import extract_hash_from_host
 from services.web_channel_service import WebChannelService
 from utils.auth import get_current_user_id, decode_jwt_token
 
-
-# 数据库依赖
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
 
 router = APIRouter(tags=["FeClaw Chat"])
 

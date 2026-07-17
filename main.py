@@ -70,6 +70,8 @@ from routers.well_known import router as well_known_router
 from routers.upload import router as upload_router
 from routers.desktop_api import router as desktop_api_router
 from routers.zentrim import router as zentrim_router
+from routers.metrics_internal import router as metrics_internal_router
+from routers.setup import router as setup_router
 
 
 @asynccontextmanager
@@ -84,6 +86,34 @@ async def lifespan(app: FastAPI):
     if not settings.JWT_SECRET:
         logger.critical("JWT_SECRET 未配置！请在 .env 中设置 JWT_SECRET")
         raise RuntimeError("JWT_SECRET is required but not set")
+
+    # 首次启动配置向导：检测 .env + admin 是否就绪
+    try:
+        from services.setup_service import (
+            create_or_reset_admin,
+            generate_admin_password,
+            is_setup_complete,
+            print_admin_banner,
+        )
+        db_setup = SessionLocal()
+        try:
+            if not is_setup_complete(db_setup):
+                # 生成随机管理员密码
+                _new_pwd = generate_admin_password(16)
+                # 写入/重置 admin 用户的密码
+                create_or_reset_admin(db_setup, _new_pwd)
+                # 打印 banner —— 仅终端，密码不入日志
+                _host = settings.HOST if settings.HOST not in ("0.0.0.0",) else "localhost"
+                print_admin_banner(_new_pwd, host=_host, port=settings.PORT)
+                logger.warning(
+                    "[Setup] 检测到首次启动 / 配置不完整，已生成随机 admin 密码并打印到终端"
+                )
+            else:
+                logger.info("[Setup] 配置完整，跳过首次启动向导")
+        finally:
+            db_setup.close()
+    except Exception as _e:
+        logger.warning(f"[Setup] 首次启动检测异常（非致命）: {_e}")
 
     # 初始化数据库（导入 Group 模型以确保 create_all 覆盖新表）
     from models.group import Group, GroupMember, GroupMessage, GroupMoments  # noqa: F401
@@ -141,39 +171,100 @@ async def lifespan(app: FastAPI):
             conn.commit()
             logger.info("Added agent_mode column to agent_profiles table (V2 self-driven mode)")
 
+        # P0.4 bcrypt 迁移：检查 users 表是否有 password_version 列
+        result = conn.execute(text(
+            "SELECT COLUMN_NAME FROM information_schema.COLUMNS "
+            "WHERE TABLE_NAME = 'users' AND COLUMN_NAME = 'password_version' AND TABLE_SCHEMA = DATABASE()"
+        ))
+        if not result.fetchone():
+            conn.execute(text(
+                "ALTER TABLE users ADD COLUMN password_version INT NOT NULL DEFAULT 1"
+            ))
+            conn.commit()
+            logger.info("Added password_version column to users table (P0.4 bcrypt migration)")
+
+        # 检查 users 表是否有 tier 列
+        result = conn.execute(text(
+            "SELECT COLUMN_NAME FROM information_schema.COLUMNS "
+            "WHERE TABLE_NAME = 'users' AND COLUMN_NAME = 'tier' AND TABLE_SCHEMA = DATABASE()"
+        ))
+        if not result.fetchone():
+            conn.execute(text(
+                "ALTER TABLE users ADD COLUMN tier VARCHAR(20) DEFAULT 'pro'"
+            ))
+            conn.commit()
+            logger.info("Added tier column to users table")
+
+        # P0.4 bcrypt 迁移：放宽 salt 列允许 NULL（bcrypt 用户不需要 salt）
+        result = conn.execute(text(
+            "SELECT IS_NULLABLE FROM information_schema.COLUMNS "
+            "WHERE TABLE_NAME = 'users' AND COLUMN_NAME = 'salt' AND TABLE_SCHEMA = DATABASE()"
+        ))
+        row = result.fetchone()
+        if row and row[0] == 'NO':
+            conn.execute(text("ALTER TABLE users MODIFY COLUMN salt VARCHAR(64) NULL"))
+            conn.commit()
+            logger.info("Relaxed users.salt to nullable for bcrypt migration")
+
+        # P1.3 agent_hash 列宽统一：扩到 VARCHAR(8)（MySQL 无损扩列，老数据不动）
+        # 老 agent hash（4 位如 5656、8d85）保持不变 —— 涉及子域名 URL 兼容性
+        _tables_with_agent_hash = [
+            "wechat_binding", "wechat_messages", "file_permissions",
+            "agent_config", "agent_usage_log", "share_mappings",
+            "share_references", "chat_history", "sandbox_tokens",
+        ]
+        for _tbl in _tables_with_agent_hash:
+            try:
+                conn.execute(text(
+                    f"ALTER TABLE {_tbl} MODIFY COLUMN agent_hash VARCHAR(8)"
+                ))
+                logger.info(f"P1.3: widened {_tbl}.agent_hash to VARCHAR(8)")
+            except Exception as _e:
+                logger.debug(f"P1.3: {_tbl}.agent_hash alter skipped: {_e}")
+        # agent_profiles.hash（特殊列名，不是 agent_hash）
+        try:
+            conn.execute(text("ALTER TABLE agent_profiles MODIFY COLUMN hash VARCHAR(8)"))
+            logger.info("P1.3: widened agent_profiles.hash to VARCHAR(8)")
+        except Exception as _e:
+            logger.debug(f"P1.3: agent_profiles.hash alter skipped: {_e}")
+        try:
+            conn.commit()
+        except Exception:
+            pass
+
     # 创建默认管理员用户（如果不存在）
     db = SessionLocal()
     try:
         admin = db.query(User).filter(User.username == "admin").first()
         if not admin:
-            salt = generate_salt()
             import hashlib
             default_password = hashlib.sha256("admin".encode()).hexdigest()
             admin = User(
                 username="admin",
-                password_hash=hash_password(default_password, salt),
-                salt=salt,
+                password_hash=hash_password(default_password),
+                salt=None,
+                password_version=2,
                 is_admin=True
             )
             db.add(admin)
             db.commit()
-            logger.info("Created default admin user (password: admin)")
+            logger.info("Created default admin user (password: admin, bcrypt)")
 
         # 创建测试用户
         test_user = db.query(User).filter(User.username == "test").first()
         if not test_user:
-            salt = generate_salt()
             import hashlib
             default_password = hashlib.sha256("test".encode()).hexdigest()
             test_user = User(
                 username="test",
-                password_hash=hash_password(default_password, salt),
-                salt=salt,
+                password_hash=hash_password(default_password),
+                salt=None,
+                password_version=2,
                 is_admin=False
             )
             db.add(test_user)
             db.commit()
-            logger.info("Created test user (password: test)")
+            logger.info("Created test user (password: test, bcrypt)")
     finally:
         db.close()
 
@@ -186,6 +277,19 @@ async def lifespan(app: FastAPI):
             logger.info("Agent 5178 creation skipped")
     except Exception as e:
         logger.error(f"Failed to create Agent 5178: {e}")
+
+    # 种子内置模板
+    try:
+        from services.template_manager import TemplateManager
+        seed_db = SessionLocal()
+        try:
+            seeded = TemplateManager.seed_builtin_templates(seed_db)
+            if seeded:
+                logger.info(f"Seeded {seeded} built-in agent templates")
+        finally:
+            seed_db.close()
+    except Exception as e:
+        logger.warning(f"Template seeding failed (table may not exist yet): {e}")
 
     # Agent V2: 启动所有 IM Agent 的协处理器（cron / file_watch）
     try:
@@ -373,6 +477,7 @@ app.include_router(console.router)  # 控制台 API (必须在 static_site_publi
 app.include_router(user_router)  # 用户 API (注册、登录)
 app.include_router(group_router)  # Group Chat API
 app.include_router(admin_router)  # 管理后台 API
+app.include_router(setup_router)  # 首次启动配置向导 API
 app.include_router(agent_config_ui_router)  # Agent 配置界面
 app.include_router(dashboard.router)  # Dashboard 页面
 app.include_router(agent_config_router)  # Agent 配置 API
@@ -390,8 +495,9 @@ app.include_router(oauth.router)  # OAuth 认证 (必须在 static_site_public �
 if settings.DESKTOP_ENABLED:
     app.include_router(desktop_ws_router)
     logger.info("Desktop WS relay enabled")
+app.include_router(metrics_internal_router)  # P1.5: 最小 metrics endpoint（admin-only），必须在 static_site_public 前注册（后者有 catch-all）
+app.include_router(zentrim_router)  # Zentrim（格物所）API — 必须在 static_site_public 前面，避免 catch-all 拦截
 app.include_router(static_site_public.router)  # 静态网站公开访问
-app.include_router(zentrim_router)  # Zentrim（格物所）API
 logger.info("Upload session router registered")
 
 
@@ -407,6 +513,27 @@ logger.info("Upload session router registered")
 
 
 if __name__ == "__main__":
+    import sys as _sys
+
+    # CLI: --reset-admin —— 启动前重置 admin 密码并打印 banner
+    if "--reset-admin" in _sys.argv:
+        _idx = _sys.argv.index("--reset-admin")
+        _sys.argv.pop(_idx)
+        # 需要等 lifespan 跑完才能访问 DB；直接在此处提前连接 SessionLocal
+        from services.setup_service import (
+            create_or_reset_admin,
+            generate_admin_password,
+            print_admin_banner,
+        )
+        _pwd = generate_admin_password(16)
+        _db = SessionLocal()
+        try:
+            create_or_reset_admin(_db, _pwd)
+        finally:
+            _db.close()
+        _host = settings.HOST if settings.HOST not in ("0.0.0.0",) else "localhost"
+        print_admin_banner(_pwd, host=_host, port=settings.PORT)
+
     uvicorn.run(
         "main:app",
         host=settings.HOST,

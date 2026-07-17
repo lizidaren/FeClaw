@@ -33,7 +33,7 @@ class GroupMember(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     group_id = Column(String(36), nullable=False, index=True)
-    agent_hash = Column(String(4), nullable=False)
+    agent_hash = Column(String(8), nullable=False)
     role = Column(String(16), default="member")
     is_silent = Column(Boolean, default=False)
     joined_at = Column(DateTime, default=datetime.utcnow)
@@ -69,7 +69,7 @@ class GroupMoments(Base):
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     group_id = Column(String(36), nullable=False, index=True)
-    agent_hash = Column(String(4), nullable=True)
+    agent_hash = Column(String(8), nullable=True)
     kind = Column(String(32), nullable=False)
     title = Column(String(200))
     content = Column(Text)

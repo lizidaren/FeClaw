@@ -755,6 +755,7 @@ async def _render_new_agent_page(request: Request):
         async function createAgent() {
             const name = document.getElementById('agentName').value.trim() || '新 Agent';
             const persona = templates[selectedTemplate]?.persona || '';
+            const templateId = selectedTemplate;
 
             nextStep(3);
 
@@ -774,14 +775,14 @@ async def _render_new_agent_page(request: Request):
                 const createData = await createResponse.json();
                 currentAgent = createData.agent;
 
-                // 2. 初始化 Agent
+                // 2. 初始化 Agent（携带 template_id 让后端从 DB 加载 persona）
                 const initResponse = await fetch(`/api/console/agents/${currentAgent.id}/initialize`, {
                     method: 'POST',
                     headers: {
                         'Authorization': `Bearer ${jwt}`,
                         'Content-Type': 'application/json'
                     },
-                    body: JSON.stringify({ persona })
+                    body: JSON.stringify({ persona, template_id: templateId })
                 });
 
                 if (!initResponse.ok) throw new Error('Failed to initialize agent');

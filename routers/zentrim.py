@@ -24,6 +24,10 @@ Zentrim（格物所）API 路由
 
 - GET    /api/zentrim/search?q=...                     搜索
 - POST   /api/zentrim/attachments                      通用附件上传（用户先创建条目 → 再上传）
+- GET    /api/zentrim/entries/{entry_id}/blocks    读取条目所有 blocks
+- GET    /api/zentrim/entries/{entry_id}/canvas    聚合端点（entry + blocks，供前端画布加载）
+- POST   /api/zentrim/entries/{entry_id}/process       触发 AI 管线处理
+- GET    /api/zentrim/entries/{entry_id}/status        获取管线处理状态
 
 约定：
 - 所有 endpoint 返回 JSON
@@ -31,7 +35,7 @@ Zentrim（格物所）API 路由
 """
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from fastapi import (
@@ -47,24 +51,14 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from config import settings
-from models.database import SessionLocal
+from models.database import SessionLocal, get_db
+from models.zentrim import ZentrimBlock
+from services.zentrim_pipeline import pipeline as zentrim_pipeline
 from services.zentrim_service import ZentrimService, _generate_ulid
 from utils.auth import get_current_user_id
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/zentrim", tags=["Zentrim"])
-
-
-# ────────────────────────────────────────────────────────────────────
-# DB Dependency
-# ────────────────────────────────────────────────────────────────────
-def get_db():
-    """数据库会话（与 `models/database.py` 保持一致）"""
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -87,27 +81,24 @@ class ReferenceCreateRequest(BaseModel):
 
 
 class EntryCreateRequest(BaseModel):
+    """精简版 entry 创建请求 — 实际内容由 blocks 承载"""
     # fix(P1-8): 限制字段最大长度，防止单请求打爆内存 / DB JSON 列
-    type: str = Field(..., max_length=16)
     title: Optional[str] = Field(default=None, max_length=512)
-    content: Optional[str] = Field(default=None, max_length=1_000_000)
-    source: Optional[str] = Field(default=None, max_length=32)
-    source_url: Optional[str] = Field(default=None, max_length=4096)
-    summary: Optional[str] = Field(default=None, max_length=4096)
     tags: Optional[List[str]] = Field(default=None, max_length=64)
     metadata: Optional[Dict[str, Any]] = None
-    bbox: Optional[Dict[str, Any]] = None
-    attachment: Optional[Dict[str, Any]] = None
 
 
 class EntryPatchRequest(BaseModel):
+    """精简版 entry 更新请求 — 仅允许 title / tags / metadata"""
     # fix(P1-8): 限制字段最大长度，防止单请求打爆内存 / DB JSON 列
     title: Optional[str] = Field(default=None, max_length=512)
-    content: Optional[str] = Field(default=None, max_length=1_000_000)
-    summary: Optional[str] = Field(default=None, max_length=4096)
     tags: Optional[List[str]] = Field(default=None, max_length=64)
     metadata: Optional[Dict[str, Any]] = None
-    bbox: Optional[Dict[str, Any]] = None
+
+
+class BlocksPutRequest(BaseModel):
+    """全量替换 blocks 请求体"""
+    blocks: List[Dict[str, Any]] = Field(..., max_length=1000)
 
 
 class AppendixRequest(BaseModel):
@@ -117,143 +108,78 @@ class AppendixRequest(BaseModel):
     attachments: Optional[List[Dict[str, Any]]] = None
 
 
+class PipelineProcessRequest(BaseModel):
+    """触发管线处理请求"""
+    block_id: str
+    cos_key: str
+    block_type: str  # "photo" | "audio" | "ink"
+
+
+# fix(P0-3): cos_key 白名单正则 — 必须以 feclaw/zentrim/user_{uid}/ 开头，
+# 后跟 blocks/{block_id}_* 或 attachments/{entry_id}_{file_type}.{ext} 形态。
+# 客户端传入的其他路径（如其他用户的 COS key、feclaw/agents/ 下 Agent 私有文件）一律拒绝。
+_COS_KEYPrefix_PATTERN_TEMPLATE = r"^feclaw/zentrim/user_{uid}/[A-Za-z0-9_\-/]+\.[a-z0-9]{{1,5}}$"
+
+
+def _validate_cos_key(cos_key: str, user_id: int) -> None:
+    """校验 cos_key 是否符合白名单格式且归属当前用户。
+
+    防御 COS 路径穿越攻击（review P0-3）：任意 cos_key 可让 pipeline 借服务端凭证
+    下载其他用户的 COS 文件。
+    """
+    import re
+    pattern = _COS_KEYPrefix_PATTERN_TEMPLATE.format(uid=user_id)
+    if not re.match(pattern, cos_key):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Invalid cos_key: must start with "
+                f"'feclaw/zentrim/user_{user_id}/' and match whitelist pattern."
+            ),
+        )
+    # 额外防御：禁止 .., //, 空字节
+    if ".." in cos_key or "//" in cos_key or "\x00" in cos_key:
+        raise HTTPException(status_code=400, detail="Invalid cos_key: forbidden characters")
+
+
 # ────────────────────────────────────────────────────────────────────
 # 条目 CRUD
 # ────────────────────────────────────────────────────────────────────
 @router.post("/entries")
 async def create_entry(
-    type: str = Form(...),
-    title: Optional[str] = Form(None),
-    content: Optional[str] = Form(None),
-    source: Optional[str] = Form(None),
-    source_url: Optional[str] = Form(None),
-    summary: Optional[str] = Form(None),
-    tags: Optional[str] = Form(None),  # JSON 字符串
-    metadata: Optional[str] = Form(None),  # JSON 字符串
-    bbox: Optional[str] = Form(None),  # JSON 字符串
-    file: Optional[UploadFile] = File(None),
-    file_type: Optional[str] = Form(None, pattern=r"^[a-z0-9_-]{1,32}$"),  # fix(P0-1): 校验 file_type 防止 COS Key 穿越
+    body: EntryCreateRequest,
     user_id: int = Depends(get_current_user_id),
     db: Session = Depends(get_db),
 ):
     """
-    创建条目 + 可选上传文件
+    创建条目（精简版 — JSON body）
 
-    - multipart/form-data
-    - tags / metadata / bbox 接受 JSON 字符串
-    - 若带 file，必须同时给 file_type
+    - 旧字段（type/content/summary/source/source_url/attachment/bbox）已废弃，
+      实际内容请通过 PUT /entries/{id}/blocks 写入。
+    - 返回的 entry 不包含 blocks 数组；如有需要再单独 GET。
     """
-    if type not in ("note", "photo", "recording", "link", "canvas"):
-        raise HTTPException(status_code=400, detail=f"Invalid type: {type}")
-
-    # 解析 JSON 字段
-    parsed_tags: Optional[List[str]] = None
-    if tags:
-        try:
-            parsed_tags = json.loads(tags)
-            if not isinstance(parsed_tags, list):
-                raise ValueError("tags must be a JSON array")
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=f"Invalid tags JSON: {e}")
-
-    parsed_metadata: Optional[Dict[str, Any]] = None
-    if metadata:
-        try:
-            parsed_metadata = json.loads(metadata)
-            if not isinstance(parsed_metadata, dict):
-                raise ValueError("metadata must be a JSON object")
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=f"Invalid metadata JSON: {e}")
-
-    parsed_bbox: Optional[Dict[str, Any]] = None
-    if bbox:
-        try:
-            parsed_bbox = json.loads(bbox)
-            if not isinstance(parsed_bbox, dict):
-                raise ValueError("bbox must be a JSON object")
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=f"Invalid bbox JSON: {e}")
-
     svc = ZentrimService(db)
-
-    # 先创建条目，拿到 id
     entry = svc.create_entry(
         user_id=user_id,
-        type=type,
-        title=title,
-        content=content,
-        source=source,
-        source_url=source_url,
-        summary=summary,
-        tags=parsed_tags,
-        metadata=parsed_metadata,
-        bbox=parsed_bbox,
+        title=body.title,
+        tags=body.tags,
+        metadata=body.metadata,
     )
 
-    # 可选上传附件
-    attachment: Optional[Dict[str, Any]] = None
-    if file is not None:
-        if not file_type:
-            raise HTTPException(status_code=400, detail="file_type is required when file is provided")
-        try:
-            file_bytes = await file.read()
-        finally:
-            await file.close()
-
-        # fix(P0-2): 限制单文件 ≤ 50MB，防止 OOM
-        if len(file_bytes) > 50 * 1024 * 1024:
-            raise HTTPException(status_code=413, detail="File too large (> 50MB)")
-
-        # fix(P0-5): 上传 COS 拿 key；失败则 delete_entry 回滚 DB 记录
-        try:
-            attachment = svc.upload_attachment(
-                user_id=user_id,
-                entry_id=entry.id,
-                file_bytes=file_bytes,
-                mime=file.content_type or "application/octet-stream",
-                file_type=file_type,
-                original_filename=file.filename,
-            )
-        except Exception as e:
-            logger.exception(f"[Zentrim] upload_attachment failed; rolling back entry {entry.id}: {e}")
-            # COS 上传失败 → 删 entry（补偿）
-            try:
-                svc.delete_entry(entry.id, user_id=user_id)
-            except Exception:
-                logger.exception(f"[Zentrim] rollback delete_entry({entry.id}) also failed")
-            raise HTTPException(status_code=502, detail="Upload to COS failed")
-
-        # 回写 attachment 到条目
-        entry.attachment = attachment
-        entry.updated_at = datetime.now(timezone.utc)
-        # fix(P0-5): 第二次 commit 失败则补偿删除已上传的 COS
-        try:
-            db.commit()
-        except Exception as e:
-            logger.exception(f"[Zentrim] db.commit failed after COS upload; compensating: {e}")
-            db.rollback()
-            try:
-                svc._delete_storage_object(attachment["key"])
-            except Exception:
-                logger.exception(f"[Zentrim] compensating delete of {attachment['key']} failed")
-            raise HTTPException(status_code=500, detail="DB commit failed after upload")
-        db.refresh(entry)
-
     # fix(P1-3): 写操作审计日志
-    logger.info(f"[audit] zentrim.create_entry user={user_id} entry={entry.id} type={type}")
+    logger.info(f"[audit] zentrim.create_entry user={user_id} entry={entry.id}")
     return ZentrimService.serialize_entry(entry)
 
 
 @router.get("/entries")
 async def list_entries(
-    type: Optional[str] = Query(None),
     limit: int = Query(20, ge=1, le=100),
     before: Optional[str] = Query(None),
     include_archived: bool = Query(False),
     user_id: int = Depends(get_current_user_id),
     db: Session = Depends(get_db),
 ):
-    """时间线分页"""
+    """时间线分页（精简 schema 无 type 过滤参数）"""
     before_dt: Optional[datetime] = None
     if before:
         try:
@@ -264,7 +190,6 @@ async def list_entries(
     svc = ZentrimService(db)
     entries = svc.get_entries(
         user_id=user_id,
-        type=type,
         limit=limit,
         before=before_dt,
         include_archived=include_archived,
@@ -293,7 +218,7 @@ async def patch_entry(
     user_id: int = Depends(get_current_user_id),
     db: Session = Depends(get_db),
 ):
-    """更新条目（title/content/tags/summary/metadata/bbox）"""
+    """更新条目（title/tags/metadata）"""
     svc = ZentrimService(db)
     fields = body.dict(exclude_unset=True)
     if not fields:
@@ -377,6 +302,82 @@ async def add_appendix(
 
 
 # ────────────────────────────────────────────────────────────────────
+# Blocks CRUD（迁移文档 §2.2）
+# ────────────────────────────────────────────────────────────────────
+@router.put("/entries/{entry_id}/blocks")
+async def save_blocks(
+    entry_id: str,
+    body: BlocksPutRequest,
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+):
+    """全量替换一个 entry 的所有 blocks。
+
+    请求体：{"blocks": [{"type":"text", "data":{...}, "text":"..."}, ...]}
+    返回：{"status": "ok", "block_count": N}
+    """
+    svc = ZentrimService(db)
+    try:
+        block_count = svc.save_blocks(entry_id, body.blocks, user_id=user_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if block_count < 0:
+        raise HTTPException(status_code=404, detail="Entry not found")
+    # fix(P1-3): 写操作审计日志
+    logger.info(
+        f"[audit] zentrim.save_blocks user={user_id} entry={entry_id} "
+        f"block_count={block_count}"
+    )
+    return {"status": "ok", "block_count": block_count}
+
+
+@router.get("/entries/{entry_id}/blocks")
+async def load_blocks(
+    entry_id: str,
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+):
+    """读取一个 entry 的所有 blocks（按 sort_order 升序）。
+
+    返回：{"blocks": [{"id":"...", "type":"text", "data":{...}, "text":"..."}, ...]}
+    """
+    svc = ZentrimService(db)
+    # 先确认 entry 存在 + 归属校验（404 比 200+[] 更明确）
+    entry = svc.get_entry(entry_id, user_id=user_id)
+    if not entry:
+        raise HTTPException(status_code=404, detail="Entry not found")
+    blocks = svc.load_blocks(entry_id, user_id=user_id)
+    return {"blocks": blocks}
+
+
+@router.get("/entries/{entry_id}/canvas")
+async def get_entry_canvas(
+    entry_id: str,
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+):
+    """聚合端点：一次调用返回 entry 基本信息 + blocks（按 sort_order 排序）。
+
+    用于前端 Canvas 页面加载已有条目的画布数据。
+    返回：
+    {
+      "entry": { id, title, tags, metadata: {...}, ... },
+      "blocks": [
+        { id, type, data, text, sort_order, ... },
+        ...
+      ]
+    }
+    """
+    svc = ZentrimService(db)
+    entry = svc.get_entry(entry_id, user_id=user_id)
+    if not entry:
+        raise HTTPException(status_code=404, detail="Entry not found")
+    entry_data = ZentrimService.serialize_entry(entry)
+    blocks = svc.load_blocks(entry_id, user_id=user_id)
+    return {"entry": entry_data, "blocks": blocks}
+
+
+# ────────────────────────────────────────────────────────────────────
 # 附件上传（条目已存在后单独上传）
 # ────────────────────────────────────────────────────────────────────
 @router.post("/attachments")
@@ -387,7 +388,7 @@ async def upload_attachment(
     user_id: int = Depends(get_current_user_id),
     db: Session = Depends(get_db),
 ):
-    """把附件上传到 `zentrim/user_{uid}/attachments/{entry_id}_{file_type}.{ext}`，并回写到 entry.attachment"""
+    """把附件上传到 COS，返回 key 供前端通过 PUT /blocks 写入 block 引用"""
     svc = ZentrimService(db)
     entry = svc.get_entry(entry_id, user_id=user_id)
     if not entry:
@@ -413,11 +414,7 @@ async def upload_attachment(
         file_type=file_type,
         original_filename=file.filename,
     )
-    entry.attachment = attachment
-    entry.updated_at = datetime.now(timezone.utc)
-    db.commit()
-    db.refresh(entry)
-
+    # fix(P0-1): 不再回写 entry.attachment（列已删除）；返回 COS key 供前端通过 PUT /blocks 写入 block 引用
     return {"status": "ok", "entry_id": entry_id, "attachment": attachment}
 
 
@@ -610,4 +607,117 @@ async def search_entries(
         "query": q,
         "count": len(entries),
         "results": [ZentrimService.serialize_entry(e) for e in entries],
+    }
+
+
+# ────────────────────────────────────────────────────────────────────
+# AI Pipeline（§9 Pipeline）
+# ────────────────────────────────────────────────────────────────────
+@router.post("/entries/{entry_id}/process")
+async def trigger_pipeline(
+    entry_id: str,
+    body: PipelineProcessRequest,
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+):
+    """触发管线处理（后台异步，不阻塞）
+
+    请求体：{"block_id": "...", "cos_key": "...", "block_type": "photo|audio|ink"}
+    返回：{"status": "processing", "entry_id": "...", "block_id": "..."}
+    """
+    svc = ZentrimService(db)
+    entry = svc.get_entry(entry_id, user_id=user_id)
+    if not entry:
+        raise HTTPException(status_code=404, detail="Entry not found")
+
+    # fix(P0-2): 校验 block_id 真的属于该 entry_id + 归属当前用户
+    # 防御攻击向量：用户 A 用自己合法的 entry_id，但编造 block_id + 任意 cos_key，
+    # 借 pipeline 服务端凭证读取他人 COS 文件。
+    block = (
+        db.query(ZentrimBlock)
+        .filter(
+            ZentrimBlock.id == body.block_id,
+            ZentrimBlock.entry_id == entry_id,
+        )
+        .first()
+    )
+    if not block:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Block {body.block_id} not found in entry {entry_id}",
+        )
+
+    # fix(P0-2): 从 DB 读 block.data.key 作为权威 cos_key，忽略前端传入的 cos_key
+    # （如果前端传入的 cos_key 与 DB 不一致，记 warning 但以 DB 为准）
+    block_data = block.data if isinstance(block.data, dict) else {}
+    db_cos_key = block_data.get("key") or block_data.get("cos_key")
+    if not db_cos_key:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Block {body.block_id} has no cos_key in data; cannot trigger pipeline",
+        )
+    if db_cos_key != body.cos_key:
+        logger.warning(
+            f"[audit] zentrim.pipeline.cos_key_mismatch user={user_id} entry={entry_id} "
+            f"block={body.block_id} client_cos_key={body.cos_key!r} db_cos_key={db_cos_key!r}; using DB value"
+        )
+    # 以 DB 为真相之源
+    cos_key = db_cos_key
+
+    # fix(P0-3): cos_key 路径白名单 + 归属校验（防止路径穿越 / 跨用户读取）
+    _validate_cos_key(cos_key, user_id)
+
+    bt = body.block_type
+    if bt == "photo":
+        zentrim_pipeline.process_photo(entry_id, body.block_id, cos_key, user_id)
+    elif bt == "audio":
+        zentrim_pipeline.process_audio(entry_id, body.block_id, cos_key, user_id)
+    elif bt == "ink":
+        zentrim_pipeline.process_ink(entry_id, body.block_id, cos_key, user_id)
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported block_type: {bt} (expected: photo/audio/ink)",
+        )
+
+    logger.info(
+        f"[audit] zentrim.pipeline.trigger user={user_id} entry={entry_id} "
+        f"block={body.block_id} type={bt}"
+    )
+    return {
+        "status": "processing",
+        "entry_id": entry_id,
+        "block_id": body.block_id,
+    }
+
+
+@router.get("/entries/{entry_id}/status")
+async def get_pipeline_status(
+    entry_id: str,
+    block_id: Optional[str] = Query(None),
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+):
+    """获取管线处理状态
+
+    - 不传 block_id 时返回 entry 整体状态（来自 DB entry.status）
+    - 传 block_id 时返回该 block 的管线任务状态（idle/processing/done）
+    """
+    svc = ZentrimService(db)
+    entry = svc.get_entry(entry_id, user_id=user_id)
+    if not entry:
+        raise HTTPException(status_code=404, detail="Entry not found")
+
+    if block_id:
+        task_status = zentrim_pipeline.get_status(entry_id, block_id)
+        return {
+            "entry_id": entry_id,
+            "block_id": block_id,
+            "pipeline_status": task_status,
+            "entry_status": entry.status,
+        }
+
+    return {
+        "entry_id": entry_id,
+        "entry_status": entry.status,
     }

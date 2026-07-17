@@ -32,6 +32,7 @@ class MockLLMProvider:
         reasoning_effort: Optional[str] = None,
         max_tokens: Optional[int] = None,
         disable_thinking: bool = False,
+        usage_holder: Optional[List[Optional[Dict[str, Any]]]] = None,
     ) -> AsyncGenerator[str, None]:
         """Mock chat 实现，yield 预设内容"""
         self.last_messages = messages
@@ -66,9 +67,12 @@ class MockLLMProviderWithUsage(MockLLMProvider):
         reasoning_effort: Optional[str] = None,
         max_tokens: Optional[int] = None,
         disable_thinking: bool = False,
+        usage_holder: Optional[List[Optional[Dict[str, Any]]]] = None,
     ) -> AsyncGenerator[str, None]:
-        """Mock chat 实现，结束后自动设置 last_usage"""
+        """Mock chat 实现，结束后自动设置 last_usage + 写入 usage_holder（P0.5）"""
         self.last_messages = messages
         for chunk in self.chat_responses:
             yield chunk
         self.last_usage = self._usage
+        if usage_holder is not None:
+            usage_holder[0] = self._usage

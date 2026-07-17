@@ -15,3 +15,4 @@ qrcode[pil]     # QR code generation
 
 pyfuse3>=1.4.0  # FUSE 3 filesystem in userspace
 numpy>=1.26.0
+bcrypt>=4.0.0   # 密码哈希（自 2026-07 起逐步替代 SHA-256+salt）

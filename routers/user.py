@@ -16,7 +16,7 @@ import time
 from config import settings
 from models.database import get_db, User, AgentProfile, ChatHistory, FilePermission
 from models.group import GroupMoments
-from utils.auth import generate_salt, hash_password, verify_password, create_jwt_token, get_current_user, get_current_user_id
+from utils.auth import hash_password, verify_password, create_jwt_token, get_current_user, get_current_user_id, needs_rehash
 from services.agent_init_service import agent_init_service
 from services.storage_service import get_storage_service
 from services.permission_service import PermissionService
@@ -614,16 +614,16 @@ async def register_user(
             if existing_email:
                 raise HTTPException(status_code=400, detail={"status": "error", "message": "邮箱已被注册"})
 
-        # 创建用户
-        salt = generate_salt()
-        password_hash = hash_password(password, salt)
+        # 创建用户 — P0.4 bcrypt：salt 嵌入 hash 本身，无需单独存
+        password_hash = hash_password(password)
 
         # 直接激活用户（无需管理员审批）
         # 如果需要审批机制，可以设置 is_active=False，需要管理员手动激活
         user = User(
             username=username,
             password_hash=password_hash,
-            salt=salt,
+            salt=None,
+            password_version=2,
             is_admin=False,
             created_at=datetime.utcnow()
         )
@@ -697,21 +697,40 @@ async def login_user(
         if not user:
             raise HTTPException(status_code=401, detail={"status": "error", "message": "用户名或密码错误"})
 
-        # 验证密码
-        if not verify_password(password, user.salt, user.password_hash):
+        # 验证密码 — P0.4：新签名 verify_password(password, password_hash)
+        if not verify_password(password, user.password_hash):
             raise HTTPException(status_code=401, detail={"status": "error", "message": "用户名或密码错误"})
+
+        # P0.4 透明懒迁移：legacy SHA-256+salt 用户登录成功后自动升级到 bcrypt
+        if needs_rehash(user.password_hash):
+            user.password_hash = hash_password(password)
+            user.salt = None
+            user.password_version = 2
+            db.commit()
+            logger.info(f"[User] 密码 hash 懒迁移到 bcrypt: username={username}")
 
         # 生成 Token
         token = create_jwt_token({"user_id": user.id})
 
         logger.info(f"[User] 用户登录成功: {username} (id={user.id})")
 
+        # 配置向导：若 .env 标记未完成 → 登录后跳到 /setup
+        redirect_to = None
+        try:
+            from services.setup_service import is_setup_complete
+            if user.is_admin and not is_setup_complete(db):
+                redirect_to = "/setup"
+        except Exception as _e:
+            # 配置检测失败不影响登录
+            logger.debug(f"[User] setup 检测异常（忽略）: {_e}")
+
         return JSONResponse(content={
             "status": "success",
             "token": token,
             "user_id": user.id,
             "username": user.username,
-            "is_admin": user.is_admin
+            "is_admin": user.is_admin,
+            "redirect": redirect_to,
         })
 
     except HTTPException:
@@ -735,17 +754,18 @@ async def change_password(
     """修改密码"""
     from utils.auth import verify_password
 
-    # 验证当前密码
-    if not verify_password(body.current_password, user.salt, user.password_hash):
+    # 验证当前密码 — P0.4：新签名
+    if not verify_password(body.current_password, user.password_hash):
         raise HTTPException(status_code=400, detail={"message": "当前密码错误"})
 
     # 验证新密码长度
     if len(body.new_password) < 6:
         raise HTTPException(status_code=400, detail={"message": "新密码至少 6 位"})
 
-    # 更新密码
-    user.salt = generate_salt()
-    user.password_hash = hash_password(body.new_password, user.salt)
+    # 更新密码 — P0.4：bcrypt，salt 嵌入 hash
+    user.password_hash = hash_password(body.new_password)
+    user.salt = None
+    user.password_version = 2
     db.commit()
 
     return {"status": "success", "message": "密码已修改"}
