@@ -322,6 +322,21 @@
     </div>
 
     <script>
+        // 已登录且页面没有错误/特殊参数时，跳 dashboard
+        (function() {
+            var params = new URLSearchParams(window.location.search);
+            if (params.has('error') || params.has('totp') || params.has('code')) return;
+            var tk = localStorage.getItem('feclaw_jwt') || '';
+            if (!tk) {
+                var m = document.cookie.match(/(?:^|;\\s*)feclaw_jwt=([^;]+)/);
+                if (m) tk = m[1];
+            }
+            if (tk) {
+                window.location.href = '/dashboard';
+                return;
+            }
+        })();
+
         var oauthConfigured = {{ 'true' if oauth_configured else 'false' }};
         var oauthLoginUrl = '{{ oauth_login_url }}';
 

@@ -82,12 +82,54 @@ async def lifespan(app: FastAPI):
     # 启动时
     logger.info("Starting FeClaw Gateway...")
 
-    # 检查必填配置
+    # 冷启动检测：SETUP_COMPLETE != true → 只挂载 setup 路由
+    if not bool(settings.SETUP_COMPLETE):
+        # 冷启动：确保 SETUP_TOKEN 已生成（首次启动时）
+        if not (settings.SETUP_TOKEN or "").strip():
+            from services.setup_service import generate_setup_token, update_env
+            _token = generate_setup_token()
+            update_env({"SETUP_TOKEN": _token})
+            # 重新加载 settings 让其读到刚写入的 token
+            try:
+                object.__setattr__(settings, "SETUP_TOKEN", _token)
+            except Exception:
+                pass
+            # 也写一份给前端 banner（仅终端展示一次）
+            _host = settings.HOST if settings.HOST not in ("0.0.0.0",) else "localhost"
+            _url = f"http://{_host}:{settings.PORT}/setup?token={_token}"
+            print(
+                "\n"
+                "  ╔══════════════════════════════════════════════════════════════╗\n"
+                "  ║                                                              ║\n"
+                "  ║   FeClaw 冷启动 — 首次运行，请完成配置向导                       ║\n"
+                "  ║                                                              ║\n"
+                f"  ║   配置地址: {_url:<49s}║\n"
+                "  ║                                                              ║\n"
+                "  ║   ⚠️  该 URL 含 setup token，配置完成后请勿分享                 ║\n"
+                "  ║   ⚠️  配置完成后需重启后端服务（uvicorn / systemctl）            ║\n"
+                "  ╚══════════════════════════════════════════════════════════════╝\n"
+            )
+            logger.warning(
+                f"[Setup] 冷启动 token 已生成（{len(_token)} 字符）"
+            )
+        else:
+            logger.info("[Setup] 冷启动模式：使用已有 SETUP_TOKEN")
+
+        # 冷启动：跳到 yield（只挂载 setup 路由 + 首页，不跑数据库初始化）
+        try:
+            yield
+        finally:
+            logger.info("Shutting down FeClaw Gateway (cold-start mode)...")
+        return
+
+    # ───────────────────────────────────────────────────────────
+    # 正常启动：SETUP_COMPLETE=true —— 跑全部初始化
+    # ───────────────────────────────────────────────────────────
     if not settings.JWT_SECRET:
         logger.critical("JWT_SECRET 未配置！请在 .env 中设置 JWT_SECRET")
         raise RuntimeError("JWT_SECRET is required but not set")
 
-    # 首次启动配置向导：检测 .env + admin 是否就绪
+    # 旧版 banner：admin 密码（保留向后兼容，正常启动时若 DB 里已有 admin 则不重置）
     try:
         from services.setup_service import (
             create_or_reset_admin,
@@ -98,15 +140,12 @@ async def lifespan(app: FastAPI):
         db_setup = SessionLocal()
         try:
             if not is_setup_complete(db_setup):
-                # 生成随机管理员密码
                 _new_pwd = generate_admin_password(16)
-                # 写入/重置 admin 用户的密码
                 create_or_reset_admin(db_setup, _new_pwd)
-                # 打印 banner —— 仅终端，密码不入日志
                 _host = settings.HOST if settings.HOST not in ("0.0.0.0",) else "localhost"
                 print_admin_banner(_new_pwd, host=_host, port=settings.PORT)
                 logger.warning(
-                    "[Setup] 检测到首次启动 / 配置不完整，已生成随机 admin 密码并打印到终端"
+                    "[Setup] 检测到配置不完整，已生成随机 admin 密码并打印到终端"
                 )
             else:
                 logger.info("[Setup] 配置完整，跳过首次启动向导")
@@ -465,40 +504,116 @@ async def health_check() -> dict:
 # 静态文件服务（必须在 static_site_public.router 之前）
 app.mount("/static", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "static")), name="static")
 
-# 注册路由
-app.include_router(apps_gateway.router)  # App 路由网关（必须在 feclaw_domain 之前）
-app.include_router(fehub.router)  # FeHub VCS + Publish API
-app.include_router(feclaw_domain_router)  # FeClaw 域名专用路由
-app.include_router(desktop_api_router)  # Desktop 客户端 API
-app.include_router(feclaw_chat_router)  # FeClaw 聊天 API
-app.include_router(workspace.router)  # 工作区管理
-app.include_router(wechat.router)  # 微信接入
-app.include_router(console.router)  # 控制台 API (必须在 static_site_public 之前)
-app.include_router(user_router)  # 用户 API (注册、登录)
-app.include_router(group_router)  # Group Chat API
-app.include_router(admin_router)  # 管理后台 API
-app.include_router(setup_router)  # 首次启动配置向导 API
-app.include_router(agent_config_ui_router)  # Agent 配置界面
-app.include_router(dashboard.router)  # Dashboard 页面
-app.include_router(agent_config_router)  # Agent 配置 API
-app.include_router(agent_config_chat_router)  # Agent 配置聊天 API
-app.include_router(static_site.router)  # 静态网站托管 API
-app.include_router(health.router)  # 健康检查 API (必须在 static_site_public 之前)
-app.include_router(vfs_image_dedup.router)  # VFS 图片去重管理 API
-app.include_router(sandbox.router)  # 安全沙箱执行环境 API
-app.include_router(share.router)  # 分享链接解析
-app.include_router(share_reference.router)  # 分享页引用令牌
-app.include_router(vfs_view.router)  # VFS 文件查看（历史图片/文件展示）
-app.include_router(oauth.router)  # OAuth 认证 (必须在 static_site_public 之前)
-# Desktop WS 通道（条件启用）
 
-if settings.DESKTOP_ENABLED:
-    app.include_router(desktop_ws_router)
-    logger.info("Desktop WS relay enabled")
-app.include_router(metrics_internal_router)  # P1.5: 最小 metrics endpoint（admin-only），必须在 static_site_public 前注册（后者有 catch-all）
-app.include_router(zentrim_router)  # Zentrim（格物所）API — 必须在 static_site_public 前面，避免 catch-all 拦截
-app.include_router(static_site_public.router)  # 静态网站公开访问
-logger.info("Upload session router registered")
+# ───────────────────────────────────────────────────────────
+# 路由挂载：按冷启动 vs 正常启动分流
+# ───────────────────────────────────────────────────────────
+
+_COLD_START = not bool(settings.SETUP_COMPLETE)
+
+if _COLD_START:
+    # 冷启动：只挂载 /setup* + 简单的欢迎首页。
+    # 其他路由全部不挂载，防止用户在配置完成前误访问 API 出错。
+    from fastapi.responses import HTMLResponse as _HTMLResponse
+
+    @app.get("/", response_class=_HTMLResponse)
+    async def _cold_start_home():
+        """冷启动首页：只显示欢迎信息和设置入口。
+
+        实际配置入口 URL 已在启动时打印到终端（含 SETUP_TOKEN）。
+        """
+        return _HTMLResponse(
+            """<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FeClaw · 冷启动</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #050510;
+    color: #e0e0e0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+    text-align: center;
+    padding: 24px;
+  }
+  .container { max-width: 480px; }
+  h1 {
+    font-size: 3em;
+    font-weight: 700;
+    background: linear-gradient(135deg, #667eea, #764ba2);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    margin-bottom: 16px;
+    letter-spacing: -0.02em;
+  }
+  p { color: #888; line-height: 1.7; margin-bottom: 12px; }
+  .hint { color: #666; font-size: 0.9em; margin-top: 24px; }
+  code {
+    background: rgba(255,255,255,0.08);
+    padding: 2px 8px;
+    border-radius: 4px;
+    color: #ccc;
+    font-size: 0.9em;
+  }
+</style>
+</head>
+<body>
+  <div class="container">
+    <h1>FeClaw</h1>
+    <p>首次启动，请完成配置</p>
+    <p class="hint">管理地址（含 token）已打印到启动终端：<br>
+       <code>http://&lt;host&gt;:&lt;port&gt;/setup?token=&lt;...&gt;</code></p>
+    <p class="hint">配置完成后需重启后端服务。</p>
+  </div>
+</body>
+</html>"""
+        )
+
+    # 挂载 setup 路由（包含 /setup 页面 + /setup/* API）
+    app.include_router(setup_router)
+    logger.info("Cold-start mode: only /setup* + / are mounted")
+else:
+    # 正常启动：挂载全部路由
+    app.include_router(apps_gateway.router)  # App 路由网关（必须在 feclaw_domain 之前）
+    app.include_router(fehub.router)  # FeHub VCS + Publish API
+    app.include_router(feclaw_domain_router)  # FeClaw 域名专用路由
+    app.include_router(desktop_api_router)  # Desktop 客户端 API
+    app.include_router(feclaw_chat_router)  # FeClaw 聊天 API
+    app.include_router(workspace.router)  # 工作区管理
+    app.include_router(wechat.router)  # 微信接入
+    app.include_router(console.router)  # 控制台 API (必须在 static_site_public 之前)
+    app.include_router(user_router)  # 用户 API (注册、登录)
+    app.include_router(group_router)  # Group Chat API
+    app.include_router(admin_router)  # 管理后台 API
+    app.include_router(setup_router)  # 首次启动配置向导 API（正常启动时也挂载，供 admin 在后台调整）
+    app.include_router(agent_config_ui_router)  # Agent 配置界面
+    app.include_router(dashboard.router)  # Dashboard 页面
+    app.include_router(agent_config_router)  # Agent 配置 API
+    app.include_router(agent_config_chat_router)  # Agent 配置聊天 API
+    app.include_router(static_site.router)  # 静态网站托管 API
+    app.include_router(health.router)  # 健康检查 API (必须在 static_site_public 之前)
+    app.include_router(vfs_image_dedup.router)  # VFS 图片去重管理 API
+    app.include_router(sandbox.router)  # 安全沙箱执行环境 API
+    app.include_router(share.router)  # 分享链接解析
+    app.include_router(share_reference.router)  # 分享页引用令牌
+    app.include_router(vfs_view.router)  # VFS 文件查看（历史图片/文件展示）
+    app.include_router(oauth.router)  # OAuth 认证 (必须在 static_site_public 之前)
+    # Desktop WS 通道（条件启用）
+
+    if settings.DESKTOP_ENABLED:
+        app.include_router(desktop_ws_router)
+        logger.info("Desktop WS relay enabled")
+    app.include_router(metrics_internal_router)  # P1.5: 最小 metrics endpoint（admin-only），必须在 static_site_public 前注册（后者有 catch-all）
+    app.include_router(zentrim_router)  # Zentrim（格物所）API — 必须在 static_site_public 前面，避免 catch-all 拦截
+    app.include_router(static_site_public.router)  # 静态网站公开访问
+    logger.info("Upload session router registered")
 
 
 # 注释掉：/ 路由由 feclaw_domain.py 处理，根据域名返回不同页面
@@ -519,6 +634,13 @@ if __name__ == "__main__":
     if "--reset-admin" in _sys.argv:
         _idx = _sys.argv.index("--reset-admin")
         _sys.argv.pop(_idx)
+        # 冷启动时数据库尚未初始化，无法重置 admin
+        if not bool(settings.SETUP_COMPLETE):
+            print(
+                "ERROR: --reset-admin 不可用 —— 当前为冷启动模式，"
+                "请先通过 /setup 完成首次配置。"
+            )
+            sys.exit(1)
         # 需要等 lifespan 跑完才能访问 DB；直接在此处提前连接 SessionLocal
         from services.setup_service import (
             create_or_reset_admin,

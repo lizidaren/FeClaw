@@ -24,6 +24,11 @@ class Settings(BaseSettings):
     # 配置向导完成标记（由 services.setup_service 自动写入 .env）
     SETUP_COMPLETE: bool = False
 
+    # 冷启动临时鉴权 token（首次启动时由 main.py 自动生成并写入 .env）
+    # 冷启动期间用户访问 /setup* 必须带 ?token=<SETUP_TOKEN> 才能通过验证。
+    # 正常启动后此 token 被清空，setup 路由降级为 JWT 鉴权。
+    SETUP_TOKEN: str = ""
+
     # MySQL 数据库配置
     MYSQL_HOST: str = "localhost"
     MYSQL_PORT: int = 3306

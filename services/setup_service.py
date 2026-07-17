@@ -8,6 +8,7 @@ FeClaw 首次启动配置向导 — 后端服务
 - 管理员随机密码生成 + Banner 打印
 - admin 用户创建 / 重置
 - /setup API 的辅助函数
+- 冷启动：generate_setup_token / test_db_connection / init_database
 
 所有 .env 写操作通过 _env_lock（threading.Lock）+ .env 文件权限 600 保证线程与权限安全。
 """
@@ -19,7 +20,7 @@ import secrets
 import stat
 import threading
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from config import settings
 
@@ -433,3 +434,189 @@ async def verify_config(db=None) -> Dict[str, Any]:
 
     overall = all(r["ok"] for r in results)
     return {"status": "ok" if overall else "partial", "results": results, "overall_ok": overall}
+
+
+# ───────────────────────────────────────────────────────────
+# 冷启动：token 生成、数据库连接测试、数据库初始化
+# ───────────────────────────────────────────────────────────
+
+def generate_setup_token() -> str:
+    """生成冷启动临时鉴权 token（16 字节 hex = 32 字符）。
+
+    用途：首次启动时 main.py 生成并打印到控制台 + 写入 .env。
+    用户访问 /setup* 必须带 ?token=<SETUP_TOKEN> 才能通过。
+    完成配置后此 token 被清空，setup 路由降级为 JWT 鉴权。
+    """
+    return secrets.token_hex(16)
+
+
+def build_database_url(host: str, port: int, user: str, password: str, database: str) -> str:
+    """组装 SQLAlchemy 格式的 MySQL URL。
+
+    pymysql 驱动；密码特殊字符走 urllib.parse.quote。
+    """
+    from urllib.parse import quote_plus
+    pwd = quote_plus(password or "")
+    return f"mysql+pymysql://{user}:{pwd}@{host}:{port}/{database}?charset=utf8mb4"
+
+
+def test_db_connection(
+    host: str,
+    port: int,
+    user: str,
+    password: str,
+    database: str,
+) -> Tuple[bool, str]:
+    """测试 MySQL 连接 + 目标数据库是否存在（不存在尝试创建）。
+
+    返回 (ok, message)：
+    - ok=True  → message 友好提示（"连接成功" / "数据库 X 已自动创建"）
+    - ok=False → message 错误描述（直接展示给用户）
+
+    此函数不修改任何 .env —— 仅做连接测试。
+    """
+    try:
+        import pymysql
+    except ImportError:
+        return False, "缺少 pymysql 依赖，请先 `pip install pymysql`"
+
+    # 1. 先尝试直接连目标数据库（不创建）
+    db_url = build_database_url(host, port, user, password, database)
+    try:
+        from sqlalchemy import create_engine, text
+        engine = create_engine(db_url, pool_pre_ping=True)
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        engine.dispose()
+        return True, "连接成功"
+    except Exception as e:
+        err = str(e).lower()
+        # 数据库不存在 → 尝试创建
+        if "unknown database" in err or "1049" in err:
+            try:
+                conn = pymysql.connect(
+                    host=host,
+                    port=int(port),
+                    user=user,
+                    password=password,
+                    charset="utf8mb4",
+                )
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            f"CREATE DATABASE IF NOT EXISTS `{database}` "
+                            f"CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
+                        )
+                    conn.commit()
+                finally:
+                    conn.close()
+                # 重新尝试连接目标库
+                from sqlalchemy import create_engine, text as _text
+                engine2 = create_engine(db_url, pool_pre_ping=True)
+                with engine2.connect() as conn2:
+                    conn2.execute(_text("SELECT 1"))
+                engine2.dispose()
+                return True, f"数据库 {database} 已自动创建，连接成功"
+            except Exception as e2:
+                return False, f"无法创建数据库 {database}：{e2}"
+        # 鉴权失败 / 网络不通 / 主机不存在
+        return False, f"连接失败：{e}"
+
+
+def init_database(
+    db_url: str,
+    admin_username: str,
+    admin_password: str,
+    jwt_secret: Optional[str] = None,
+) -> Tuple[bool, str]:
+    """用给定 db_url 初始化数据库（建表 + 创建 admin 用户）+ 写 .env。
+
+    步骤：
+    1. 用传入的 db_url 创建 engine
+    2. Base.metadata.create_all() 建表（需导入所有模型）
+    3. 创建 admin 用户（bcrypt 加密）
+    4. 写入 DATABASE_URL + JWT_SECRET 到 .env
+       - JWT_SECRET 缺省时自动生成（32 字节 hex）
+
+    返回 (ok, message)。
+    """
+    if not admin_username or not admin_password:
+        return False, "管理员用户名和密码不能为空"
+    if len(admin_password) < 8:
+        return False, "密码至少 8 位"
+
+    try:
+        from sqlalchemy import create_engine, text
+        from models.database import Base, SessionLocal, User
+        from utils.auth import hash_password
+    except ImportError as e:
+        return False, f"导入数据库模块失败：{e}"
+
+    try:
+        engine = create_engine(db_url, pool_pre_ping=True)
+        # 先确认可连
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+    except Exception as e:
+        return False, f"无法连接数据库：{e}"
+
+    # 1. 建表（先 import 所有模型以确保 metadata 完整）
+    try:
+        # 主 models.database 已包含大部分表
+        from models import database as _db_models  # noqa: F401
+        from models.agent_profile import AgentProfile  # noqa: F401
+        from models.chat import ChatHistory, ChatInput  # noqa: F401
+        from models.agent_buffer import AgentBuffer  # noqa: F401
+        from models.fehub import FePublish, AppData  # noqa: F401
+        from models.zentrim import (  # noqa: F401
+            ZentrimEntry, ZentrimTimeline, ZentrimTimelineEntry, ZentrimReference,
+        )
+        from models.group import (  # noqa: F401
+            Group, GroupMember, GroupMessage, GroupMoments,
+        )
+        from models.kaoxiang_models import KaoxiangKaodian  # noqa: F401
+        Base.metadata.create_all(bind=engine)
+    except Exception as e:
+        return False, f"建表失败：{e}"
+
+    # 2. 创建 admin 用户
+    try:
+        # 用临时 SessionLocal 绑定新 engine
+        from sqlalchemy.orm import sessionmaker as _sessionmaker
+        TempSessionLocal = _sessionmaker(autocommit=False, autoflush=False, bind=engine)
+        db = TempSessionLocal()
+        try:
+            existing = db.query(User).filter(User.username == admin_username).first()
+            if existing:
+                # 已存在 → 重置密码
+                existing.password_hash = hash_password(admin_password)
+                existing.salt = None
+                existing.password_version = 2
+                existing.is_admin = True
+            else:
+                admin = User(
+                    username=admin_username,
+                    password_hash=hash_password(admin_password),
+                    salt=None,
+                    password_version=2,
+                    is_admin=True,
+                )
+                db.add(admin)
+            db.commit()
+        finally:
+            db.close()
+    except Exception as e:
+        return False, f"创建管理员失败：{e}"
+
+    # 3. 写入 .env（DATABASE_URL + JWT_SECRET）
+    try:
+        updates: Dict[str, str] = {"DATABASE_URL": db_url}
+        if jwt_secret and jwt_secret.strip():
+            updates["JWT_SECRET"] = jwt_secret.strip()
+        else:
+            updates["JWT_SECRET"] = secrets.token_hex(32)
+        update_env(updates)
+    except Exception as e:
+        return False, f"写入 .env 失败：{e}"
+
+    return True, "数据库已初始化，管理员已创建"
