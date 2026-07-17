@@ -269,7 +269,7 @@
             <div class="spinner" id="oauthSpinner"></div>
 
             <a href="{{ oauth_login_url }}" class="glass-button glass-button-primary glass-button-full" id="loginBtn">
-                使用 Platform 账号登录
+                使用 {{ oauth_provider_name }} 登录
             </a>
 
             <p class="redirect-note" style="margin-top:20px;font-size:var(--text-sm);color:var(--text-muted);">
@@ -315,7 +315,7 @@
                 <span class="divider-text">或者</span>
             </div>
             <a href="{{ oauth_login_url }}" class="glass-button glass-button-secondary glass-button-full" id="oauthFallbackBtn" style="display:none;">
-                使用 Platform 账号登录
+                使用 {{ oauth_provider_name }} 登录
             </a>
         </div>
 
@@ -335,6 +335,11 @@
             document.getElementById('localLoginSection').style.display = 'none';
             var loginBtn = document.getElementById('loginBtn');
             if (loginBtn) {
+                // 防抖：防止双击生成两个 OAuth state
+                loginBtn.addEventListener('click', function(e) {
+                    if (this.dataset.clicked) { e.preventDefault(); return; }
+                    this.dataset.clicked = '1';
+                });
                 setTimeout(function() {
                     window.location.href = loginBtn.getAttribute('href');
                 }, 400);

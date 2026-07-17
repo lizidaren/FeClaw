@@ -64,7 +64,7 @@ class Settings(BaseSettings):
     # OAuth / OIDC Client 配置
     # 默认使用 FirstEntrancePlatform 兼容路径，可覆盖以接入任意 OIDC Provider
     OAUTH_PROVIDER_URL: str = ""  # OIDC Provider URL（如 https://sso.example.com）
-    OAUTH_PROVIDER_NAME: str = "FirstEntrance Platform"  # OAuth 提供商显示名称（登录页面展示用）
+    OAUTH_PROVIDER_NAME: str = "OAuth/OIDC 认证服务"  # OAuth 提供商显示名称（登录页面展示用）
     OAUTH_CLIENT_ID: str = "feclaw"
     OAUTH_CLIENT_SECRET: str = ""  # OAuth Client Secret
     OAUTH_REDIRECT_URI: str = ""  # OAuth 回调 URL（如 https://feclaw.example.com/api/oauth/callback）
