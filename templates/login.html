@@ -388,7 +388,11 @@
                     var redirect = data.redirect || params.get('redirect_to') || '/dashboard';
                     window.location.href = redirect;
                 } else {
-                    errorDiv.textContent = data.detail || '登录失败';
+                    var errMsg = data.detail;
+                    if (typeof errMsg === 'object' && errMsg !== null) {
+                        errMsg = errMsg.message || errMsg.error || JSON.stringify(errMsg);
+                    }
+                    errorDiv.textContent = errMsg || '登录失败';
                     btn.disabled = false;
                     btn.textContent = '登录';
                 }
@@ -405,12 +409,6 @@
         if (errorFromUrl === 'oauth_not_configured') {
             document.getElementById('oauthStatusText').textContent = 'OAuth 未配置，请使用本地账号登录';
         }
-    </script>
-        // 防抖：防止双击生成两个 OAuth state
-        loginBtn.addEventListener('click', function(e) {
-            if (this.dataset.clicked) { e.preventDefault(); return; }
-            this.dataset.clicked = '1';
-        });
     </script>
 {% endif %}
 </body>
