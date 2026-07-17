@@ -904,7 +904,10 @@ async def dashboard_page(request: Request, agent: Optional[int] = Query(None)):
         try:
             agent_profile = db.query(AgentProfile).filter(AgentProfile.id == agent).first()
             if agent_profile:
-                return RedirectResponse(url=f"https://{agent_profile.hash}.feclaw.lizidaren.cn", status_code=302)
+                domain = settings.FECLAW_DOMAIN
+            if domain:
+                return RedirectResponse(url=f"https://{agent_profile.hash}.{domain}", status_code=302)
+            return RedirectResponse(url=f"/agent/{agent_profile.hash}", status_code=302)
         finally:
             db.close()
     if not await get_user_for_page(request):
@@ -999,13 +1002,19 @@ def _check_agent_configured(agent_hash: str) -> bool:
 
 
 def _redirect_to_subdomain(agent_hash: str, path: str = "") -> RedirectResponse:
-    """将根域名 agent 路径重定向到子域名"""
-    return RedirectResponse(url=f"https://{agent_hash}.feclaw.lizidaren.cn{path}", status_code=302)
+    """将根域名 agent 路径重定向到子域名
+
+    有 FECLAW_DOMAIN 配置时用子域名，否则返回 None（由调用方决定渲染逻辑）。
+    """
+    domain = settings.FECLAW_DOMAIN
+    if domain:
+        return RedirectResponse(url=f"https://{agent_hash}.{domain}{path}", status_code=302)
+    return None  # 无域名时由调用方在根域名下渲染
 
 
 @router.get("/agent/{agent_hash}", response_class=HTMLResponse)
 async def agent_dashboard(agent_hash: str, request: Request):
-    """Agent 控制台 - 重定向到子域名"""
+    """Agent 控制台"""
     user_id = await get_user_for_page(request)
     if not user_id:
         return RedirectResponse(url=f"/login?redirect_to=/agent/{agent_hash}", status_code=302)
@@ -1013,12 +1022,16 @@ async def agent_dashboard(agent_hash: str, request: Request):
         raise HTTPException(status_code=403, detail="无权访问")
     if not _check_agent_configured(agent_hash):
         return RedirectResponse(url=f"/agent/{agent_hash}/configure?reason=unconfigured", status_code=302)
-    return _redirect_to_subdomain(agent_hash)
+    # 有子域名则重定向，无则渲染主域名下的 Agent 页面
+    sub = _redirect_to_subdomain(agent_hash)
+    if sub:
+        return sub
+    return templates.TemplateResponse(request, "agent_dashboard.html", {"request": request, "agent_hash": agent_hash})
 
 
 @router.get("/agent/{agent_hash}/chat", response_class=HTMLResponse)
 async def agent_chat(agent_hash: str, request: Request):
-    """Agent 聊天 - 重定向到子域名"""
+    """Agent 聊天"""
     user_id = await get_user_for_page(request)
     if not user_id:
         return RedirectResponse(url=f"/login?redirect_to=/agent/{agent_hash}/chat", status_code=302)
@@ -1026,12 +1039,15 @@ async def agent_chat(agent_hash: str, request: Request):
         raise HTTPException(status_code=403, detail="无权访问")
     if not _check_agent_configured(agent_hash):
         return RedirectResponse(url=f"/agent/{agent_hash}/configure?reason=unconfigured", status_code=302)
-    return _redirect_to_subdomain(agent_hash, "/chat")
+    sub = _redirect_to_subdomain(agent_hash, "/chat")
+    if sub:
+        return sub
+    return templates.TemplateResponse(request, "agent_chat.html", {"request": request, "agent_hash": agent_hash})
 
 
 @router.get("/agent/{agent_hash}/files", response_class=HTMLResponse)
 async def agent_files(agent_hash: str, request: Request):
-    """Agent 文件管理 - 重定向到子域名"""
+    """Agent 文件管理"""
     user_id = await get_user_for_page(request)
     if not user_id:
         return RedirectResponse(url=f"/login?redirect_to=/agent/{agent_hash}/files", status_code=302)
@@ -1039,7 +1055,10 @@ async def agent_files(agent_hash: str, request: Request):
         raise HTTPException(status_code=403, detail="无权访问")
     if not _check_agent_configured(agent_hash):
         return RedirectResponse(url=f"/agent/{agent_hash}/configure?reason=unconfigured", status_code=302)
-    return _redirect_to_subdomain(agent_hash, "/files")
+    sub = _redirect_to_subdomain(agent_hash, "/files")
+    if sub:
+        return sub
+    return templates.TemplateResponse(request, "agent_files.html", {"request": request, "agent_hash": agent_hash})
 
 
 @router.get("/agent/{agent_hash}/settings", response_class=HTMLResponse)
