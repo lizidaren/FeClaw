@@ -859,11 +859,15 @@ async def login_page(request: Request):
     host = _get_domain(request)
     agent_hash = extract_hash_from_host(host)
     is_subdomain = bool(agent_hash)
+    from services.oauth_service import oauth_service
+    oauth_configured = oauth_service._oauth_configured
     resp = templates.TemplateResponse(request, "login.html", {
         "request": request,
         "is_subdomain": is_subdomain,
         "agent_hash": agent_hash,
+        "oauth_configured": oauth_configured,
         "oauth_login_url": "/api/oauth/login",
+        "oauth_provider_name": settings.OAUTH_PROVIDER_NAME,
         "oauth_register_url": settings.OAUTH_PROVIDER_URL + "/register",
         "totp_strict_ownership": settings.TOTP_STRICT_OWNERSHIP,
     })

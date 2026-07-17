@@ -49,6 +49,12 @@ async def oauth_login(request: Request):
     OAuth 登录入口
     重定向到 Platform 登录页面
     """
+    # 检查 OAuth 是否已配置
+    authorize_url = oauth_service.get_authorize_url("dummy")
+    if not authorize_url:
+        logger.warning("[OAuth] OAuth 未配置，跳转到本地登录页")
+        return RedirectResponse(url="/login?error=oauth_not_configured", status_code=302)
+
     # 生成随机 state，防止 CSRF 攻击
     state = secrets.token_urlsafe(32)
 

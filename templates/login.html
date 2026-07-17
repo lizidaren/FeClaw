@@ -172,7 +172,7 @@
         }
     </script>
 {% else %}
-    {# 根域名：新版跳转提示 #}
+    {# 根域名：OAuth 已配置时跳转，未配置时显示本地登录 #}
     <link rel="stylesheet" href="/static/css/base.css">
     <link rel="stylesheet" href="/static/css/glass.css">
     <link rel="stylesheet" href="/static/css/components.css">
@@ -201,21 +201,61 @@
             animation: spin 0.8s linear infinite;
         }
         @keyframes spin { to { transform: rotate(360deg); } }
-        .redirect-note {
+        .input-group {
+            margin-bottom: 16px;
+            text-align: left;
+        }
+        .input-group label {
+            display: block;
             color: var(--text-muted);
             font-size: var(--text-sm);
-            margin-top: 20px;
+            margin-bottom: 6px;
         }
-        .redirect-note a {
-            color: var(--accent);
-            text-decoration: none;
+        .input-group input {
+            width: 100%;
+            padding: 10px 14px;
+            background: rgba(255,255,255,0.08);
+            border: 1px solid rgba(255,255,255,0.15);
+            border-radius: 10px;
+            color: #fff;
+            font-size: 16px;
+            outline: none;
         }
-        .redirect-note a:hover { text-decoration: underline; }
+        .input-group input:focus {
+            border-color: var(--accent);
+        }
+        .login-error {
+            color: #f87171;
+            font-size: var(--text-sm);
+            min-height: 20px;
+            margin-top: 8px;
+        }
+        .divider {
+            display: flex;
+            align-items: center;
+            margin: 20px 0;
+        }
+        .divider::before, .divider::after {
+            content: '';
+            flex: 1;
+            height: 1px;
+            background: rgba(255,255,255,0.1);
+        }
+        .divider-text {
+            padding: 0 16px;
+            color: #666;
+            font-size: 12px;
+        }
+        .local-login-form {
+            display: none;
+        }
     </style>
 </head>
 <body>
     <div class="glass-panel login-panel animate-scale-in">
-        <div class="brand mb-xl text-center">
+
+        <!-- OAuth 跳转（仅 OAuth 已配时显示） -->
+        <div id="oauthSection" class="brand mb-xl text-center">
             <span class="brand-icon" style="display:inline-flex;margin-bottom:12px;">
                 <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
                     <path d="M12 2L2 7l10 5 10-5-10-5z"/>
@@ -224,30 +264,143 @@
                 </svg>
             </span>
             <h2 class="hero-title" style="font-size:var(--text-xl);">FeClaw</h2>
-            <p class="text-secondary">正在跳转到 FirstEntrance Platform...</p>
+            <p class="text-secondary" id="oauthStatusText">正在跳转到 {{ oauth_provider_name }}...</p>
+
+            <div class="spinner" id="oauthSpinner"></div>
+
+            <a href="{{ oauth_login_url }}" class="glass-button glass-button-primary glass-button-full" id="loginBtn">
+                使用 Platform 账号登录
+            </a>
+
+            <p class="redirect-note" style="margin-top:20px;font-size:var(--text-sm);color:var(--text-muted);">
+                如果未自动跳转，请点击上方按钮
+            </p>
+
+            <div class="divider">
+                <span class="divider-text">或者</span>
+            </div>
+            <button class="glass-button glass-button-secondary glass-button-full" onclick="showLocalLogin()">
+                使用本地账号登录
+            </button>
         </div>
 
-        <div class="spinner"></div>
+        <!-- 本地密码登录（OAuth 未配时默认显示） -->
+        <div id="localLoginSection" class="local-login-form brand mb-xl text-center">
+            <span class="brand-icon" style="display:inline-flex;margin-bottom:12px;">
+                <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                    <path d="M12 2L2 7l10 5 10-5-10-5z"/>
+                    <path d="M2 17l10 5 10-5"/>
+                    <path d="M2 12l10 5 10-5"/>
+                </svg>
+            </span>
+            <h2 class="hero-title" style="font-size:var(--text-xl);">FeClaw</h2>
+            <p class="text-secondary">本地账号登录</p>
 
-        <a href="{{ oauth_login_url }}" class="glass-button glass-button-primary glass-button-full" id="loginBtn">
-            使用 Platform 账号登录
-        </a>
+            <form id="localLoginForm" onsubmit="return doLocalLogin(event)" style="margin-top:24px;">
+                <div class="input-group">
+                    <label>用户名</label>
+                    <input type="text" id="usernameInput" placeholder="admin" autocomplete="username" required>
+                </div>
+                <div class="input-group">
+                    <label>密码</label>
+                    <input type="password" id="passwordInput" placeholder="" autocomplete="current-password" required>
+                </div>
+                <button type="submit" class="glass-button glass-button-primary glass-button-full" id="localLoginBtn">
+                    登录
+                </button>
+                <div class="login-error" id="localLoginError"></div>
+            </form>
 
-        <p class="redirect-note">
-            如果未自动跳转，请点击上方按钮
-        </p>
-
+            <div id="oauthFallbackDivider" class="divider" style="display:none;">
+                <span class="divider-text">或者</span>
+            </div>
+            <a href="{{ oauth_login_url }}" class="glass-button glass-button-secondary glass-button-full" id="oauthFallbackBtn" style="display:none;">
+                使用 Platform 账号登录
+            </a>
+        </div>
 
     </div>
 
     <script>
-        // 自动跳转到 Platform 登录
-        var loginBtn = document.getElementById('loginBtn');
-        if (loginBtn) {
-            setTimeout(function() {
-                window.location.href = loginBtn.getAttribute('href');
-            }, 400);
+        var oauthConfigured = {{ 'true' if oauth_configured else 'false' }};
+        var oauthLoginUrl = '{{ oauth_login_url }}';
+
+        // 判断 OAuth 是否已配
+        if (!oauthConfigured) {
+            // 未配 OAuth → 直接显示本地登录
+            document.getElementById('oauthSection').style.display = 'none';
+            document.getElementById('localLoginSection').style.display = 'block';
+        } else {
+            // 已配 OAuth → 显示跳转提示，自动跳
+            document.getElementById('localLoginSection').style.display = 'none';
+            var loginBtn = document.getElementById('loginBtn');
+            if (loginBtn) {
+                setTimeout(function() {
+                    window.location.href = loginBtn.getAttribute('href');
+                }, 400);
+            }
         }
+
+        // 在 OAuth 页面点"使用本地账号"
+        function showLocalLogin() {
+            document.getElementById('oauthSection').style.display = 'none';
+            document.getElementById('localLoginSection').style.display = 'block';
+            document.getElementById('oauthFallbackDivider').style.display = 'flex';
+            document.getElementById('oauthFallbackBtn').style.display = 'block';
+        }
+
+        // 本地登录
+        async function doLocalLogin(event) {
+            event.preventDefault();
+            var username = document.getElementById('usernameInput').value.trim();
+            var password = document.getElementById('passwordInput').value;
+            var errorDiv = document.getElementById('localLoginError');
+            var btn = document.getElementById('localLoginBtn');
+
+            if (!username || !password) {
+                errorDiv.textContent = '请输入用户名和密码';
+                return false;
+            }
+
+            btn.disabled = true;
+            btn.textContent = '登录中...';
+            errorDiv.textContent = '';
+
+            try {
+                var res = await fetch('/api/user/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username: username, password: password })
+                });
+                var data = await res.json();
+                if (res.ok && data.token) {
+                    // 保存 token
+                    try {
+                        localStorage.setItem('feclaw_jwt', data.token);
+                    } catch(e) {}
+                    // 跳转
+                    var params = new URLSearchParams(window.location.search);
+                    var redirect = data.redirect || params.get('redirect_to') || '/dashboard';
+                    window.location.href = redirect;
+                } else {
+                    errorDiv.textContent = data.detail || '登录失败';
+                    btn.disabled = false;
+                    btn.textContent = '登录';
+                }
+            } catch(e) {
+                errorDiv.textContent = '网络错误，请重试';
+                btn.disabled = false;
+                btn.textContent = '登录';
+            }
+            return false;
+        }
+
+        // URL 参数中的错误提示
+        var errorFromUrl = new URLSearchParams(window.location.search).get('error');
+        if (errorFromUrl === 'oauth_not_configured') {
+            document.getElementById('oauthStatusText').textContent = 'OAuth 未配置，请使用本地账号登录';
+        }
+    </script>
         // 防抖：防止双击生成两个 OAuth state
         loginBtn.addEventListener('click', function(e) {
             if (this.dataset.clicked) { e.preventDefault(); return; }
