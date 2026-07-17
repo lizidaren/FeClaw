@@ -95,14 +95,13 @@
 
     function loadAdminEmail() {
         api('/setup/api/state').then(state => {
-            const emailInput = document.getElementById('admin-email');
-            if (state && state.admin && state.admin.email && emailInput) {
-                emailInput.value = state.admin.email;
-                STATE.admin.email = state.admin.email;
+            if (state && state.admin) {
+                STATE.admin.username = state.admin.username;
             }
             if (state && state.providers) {
                 STATE.providers = state.providers.providers || [];
                 STATE.currentKeys = state.providers.current_api_keys || {};
+                renderProviderList();
             }
         }).catch(err => {
             console.warn('load state failed', err);

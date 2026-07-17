@@ -129,6 +129,11 @@ class Settings(BaseSettings):
     BAIDU_SEARCH_API_KEY: str = ""
     BAIDU_SEARCH_URL: str = "https://qianfan.baidubce.com/v2/chat/completions"
 
+    # 联网搜索后端选择（balanced 级别生效）：
+    # qwen（默认） | glm | kimi | auto
+    # auto 模式下按可用 API Key 自动选择首选后端
+    DEFAULT_SEARCH_ENGINE: str = "qwen"
+
     # 豆包 / 火山引擎配置
     DOUBAO_BASE_URL: str = "https://ark.cn-beijing.volces.com/api/v3"
     DOUBAO_SEEDREAM_MODEL: str = "doubao-seedream-5-0-260128"

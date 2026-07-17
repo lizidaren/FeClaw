@@ -182,6 +182,76 @@ class SearchService:
             logger.warning(f"[SEARCH] search_qwen FAILED: {_elapsed:.1f}s, {e}")
             return f"Error: Qwen联网搜索失败: {e}"
 
+    async def search_glm(self, query: str, on_progress: Optional[Callable[[str], Awaitable[None]]] = None) -> str:
+        """
+        L2 均衡搜索：GLM-4.7-Flash 联网搜索（流式，智谱 AI）
+        - 速度：~4s
+        - 返回：LLM 总结的搜索结果
+        - on_progress: 可选进度回调，接收逐字的搜索结果增量
+        """
+        if not settings.ZHIPU_API_KEY:
+            return "Error: ZHIPU_API_KEY 未配置"
+
+        _t0 = time.time()
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                async with client.stream(
+                    "POST",
+                    "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {settings.ZHIPU_API_KEY}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": "glm-4.7-flash",
+                        "messages": [
+                            {"role": "system", "content": '你是搜索助手。直接输出搜索结果中的核心事实，不要添加任何开场白。多源交叉验证：对关键信息标注来源数量（如「3个来源一致认为」、「仅1个来源提到」），有矛盾时指出分歧。不确定或信息存疑时明确标注。'},
+                            {"role": "user", "content": query},
+                        ],
+                        "tools": [
+                            {
+                                "type": "web_search",
+                                "web_search": {
+                                    "enable": True,
+                                    "search_result": True,
+                                    "search_engine": "search_pro",
+                                    "count": 5,
+                                },
+                            }
+                        ],
+                        "stream": True,
+                    },
+                ) as resp:
+                    resp.raise_for_status()
+                    full_content = ""
+                    async for line in resp.aiter_lines():
+                        if line and line.startswith("data: "):
+                            data_str = line[6:]
+                            if data_str.strip() == "[DONE]":
+                                break
+                            try:
+                                chunk = json.loads(data_str)
+                                choices = chunk.get("choices", [])
+                                if not choices:
+                                    continue
+                                # GLM 联网搜索结果文本位于 delta.content（不走 tool_calls）
+                                delta = choices[0].get("delta", {}).get("content", "")
+                                if delta:
+                                    full_content += delta
+                                    if on_progress:
+                                        await on_progress(delta)
+                            except json.JSONDecodeError:
+                                continue
+                _elapsed = time.time() - _t0
+                logger.info(f"[SEARCH] search_glm: {_elapsed:.1f}s for query={query[:50]}")
+                if full_content:
+                    return f"🔍 搜索「{query}」(GLM-4.7-Flash)\n\n{full_content}"
+                return "(搜索结果为空)"
+        except Exception as e:
+            _elapsed = time.time() - _t0
+            logger.warning(f"[SEARCH] search_glm FAILED: {_elapsed:.1f}s, {e}")
+            return f"Error: GLM联网搜索失败: {e}"
+
     async def search_kimi(self, query: str) -> str:
         """
         L3 深度研究：Kimi

@@ -634,16 +634,31 @@ class WebToolsMixin(AgentToolsServiceBase):
 
         if level == "balanced":
             # 并行：文本搜索 + 可选图片搜索
-            tasks = [self.search.search_qwen(query, on_progress=on_progress)]
-            if allow_images:
+            # 文本搜索后端由 settings.DEFAULT_SEARCH_ENGINE 决定
+            search_engine = (settings.DEFAULT_SEARCH_ENGINE or "qwen").lower()
+            if search_engine == "glm":
+                text_search_task = self.search.search_glm(query, on_progress=on_progress)
+                service_name = "GLM-4.7-Flash"
+            elif search_engine == "kimi":
+                text_search_task = self.search.search_kimi(query)
+                service_name = "Kimi"
+            else:
+                # qwen（默认）以及 auto（未来实现：按 API Key 可用性自动选择）均走 Qwen
+                text_search_task = self.search.search_qwen(query, on_progress=on_progress)
+                service_name = "Qwen3.5-Flash"
+
+            tasks = [text_search_task]
+            # 图片搜索目前仅 Qwen 提供；非 Qwen 后端时跳过（避免 Qwen 隐式依赖）
+            if allow_images and search_engine in ("qwen", "auto"):
                 tasks.append(self._search_qwen_images(query))
+            elif allow_images:
+                logger.info(f"[web_search] allow_images=True 但文本后端={search_engine} 非 Qwen，跳过图片搜索")
             gathered = await asyncio.gather(*tasks, return_exceptions=True)
             text_result = gathered[0]
             if isinstance(text_result, Exception):
                 result = f"Error: 文本搜索异常: {text_result}"
             else:
                 result = text_result
-            service_name = "Qwen3.5-Flash"
 
             # 处理图片搜索结果
             if allow_images and len(gathered) > 1:
