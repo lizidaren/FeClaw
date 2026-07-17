@@ -58,6 +58,17 @@ class AdminPayload(BaseModel):
     password: str = ""                      # 可选；为空表示不修改
 
 
+class CompletePayload(BaseModel):
+    """Step 4 提交：用户为每个能力选择的模型 + 搜索后端。
+
+    所有字段都可选 —— 前端即使没选也允许提交（保留 config.py 中的默认值）。
+    """
+    default_llm_model: str = ""
+    default_vision_model: str = ""
+    default_embedding_model: str = ""
+    default_search_engine: str = ""        # qwen | glm | kimi
+
+
 # ───────────────────────────────────────────────────────────
 # API 路由（仅 admin 可访问）
 # ───────────────────────────────────────────────────────────
@@ -127,11 +138,35 @@ async def verify_one(
 
 @router.post("/complete")
 async def complete(
+    payload: CompletePayload = CompletePayload(),
     user: User = Depends(get_admin_user),
 ):
-    """标记 SETUP_COMPLETE=true。前端在 Step 4 调一次。"""
-    update_env({"SETUP_COMPLETE": "true"})
-    return {"status": "ok", "setup_complete": True}
+    """标记 SETUP_COMPLETE=true，同时把用户在 Step 4 选择的模型写入 .env。
+
+    空字符串字段不会覆盖已有 .env 值（由 update_env 内部处理）。
+    """
+    updates: Dict[str, str] = {"SETUP_COMPLETE": "true"}
+    if payload.default_llm_model:
+        updates["DEFAULT_LLM_MODEL"] = payload.default_llm_model.strip()
+    if payload.default_vision_model:
+        updates["DEFAULT_VISION_MODEL"] = payload.default_vision_model.strip()
+    if payload.default_embedding_model:
+        updates["DEFAULT_EMBEDDING_MODEL"] = payload.default_embedding_model.strip()
+    if payload.default_search_engine:
+        updates["DEFAULT_SEARCH_ENGINE"] = payload.default_search_engine.strip().lower()
+    update_env(updates)
+    logger.info(
+        f"[Setup] admin={user.username} 完成配置: "
+        f"llm={updates.get('DEFAULT_LLM_MODEL')!r}, "
+        f"vision={updates.get('DEFAULT_VISION_MODEL')!r}, "
+        f"embedding={updates.get('DEFAULT_EMBEDDING_MODEL')!r}, "
+        f"search={updates.get('DEFAULT_SEARCH_ENGINE')!r}"
+    )
+    return {
+        "status": "ok",
+        "setup_complete": True,
+        "saved": {k: v for k, v in updates.items() if k != "SETUP_COMPLETE"},
+    }
 
 
 @router.post("/admin")

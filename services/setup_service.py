@@ -43,6 +43,10 @@ _env_lock = threading.Lock()
 
 # 注意：与 services/model_registry.PROVIDER_META 保持一致。
 # 但本表为面向用户的元数据（名称、描述、能力、推荐模型），更丰富。
+#
+# capability_models: 把每个能力映射到该 provider 中能用于该能力的具体模型列表。
+# 缺失的 capability 键表示该 provider 不提供该能力。
+# Step 4 模型下拉框直接消费此字段；Step 1-3 不读此字段（向后兼容）。
 PROVIDER_LIST: List[Dict[str, Any]] = [
     {
         "id": "qwen",
@@ -52,6 +56,11 @@ PROVIDER_LIST: List[Dict[str, Any]] = [
         "api_key_name": "QWEN_API_KEY",
         "covers": ["text", "vision", "embedding", "search"],
         "models": ["qwen3.6-flash", "qwen3.6-plus", "qwen3.7-plus", "qwen3.7-max", "qwen3.6-35b-a3b", "qwen3-vl-flash", "qwen3-vl-plus", "text-embedding-v4"],
+        "capability_models": {
+            "text": ["qwen3.6-flash", "qwen3.6-plus", "qwen3.7-plus", "qwen3.7-max"],
+            "vision": ["qwen3.6-35b-a3b", "qwen3-vl-flash", "qwen3-vl-plus"],
+            "embedding": ["text-embedding-v4"],
+        },
     },
     {
         "id": "deepseek",
@@ -61,6 +70,9 @@ PROVIDER_LIST: List[Dict[str, Any]] = [
         "api_key_name": "DEEPSEEK_API_KEY",
         "covers": ["text"],
         "models": ["deepseek-v4-flash"],
+        "capability_models": {
+            "text": ["deepseek-v4-flash"],
+        },
     },
     {
         "id": "zhipuai",
@@ -70,6 +82,10 @@ PROVIDER_LIST: List[Dict[str, Any]] = [
         "api_key_name": "ZHIPU_API_KEY",
         "covers": ["text", "vision"],
         "models": ["glm-4.7", "glm-4.7-flash", "glm-4.6v", "glm-4.5-air", "glm-5-turbo", "glm-5"],
+        "capability_models": {
+            "text": ["glm-4.7", "glm-4.7-flash", "glm-4.5-air", "glm-5-turbo", "glm-5"],
+            "vision": ["glm-4.6v"],
+        },
     },
     {
         "id": "kimi",
@@ -79,6 +95,9 @@ PROVIDER_LIST: List[Dict[str, Any]] = [
         "api_key_name": "KIMI_API_KEY",
         "covers": ["search", "text"],
         "models": ["kimi-k2.5", "kimi-k2.6"],
+        "capability_models": {
+            "text": ["kimi-k2.5", "kimi-k2.6"],
+        },
     },
     {
         "id": "mimo",
@@ -88,6 +107,9 @@ PROVIDER_LIST: List[Dict[str, Any]] = [
         "api_key_name": "MIMO_API_KEY",
         "covers": ["text"],
         "models": ["mimo-v2.5", "mimo-v2.5-pro", "mimo-v2.5-pro-ultraspeed"],
+        "capability_models": {
+            "text": ["mimo-v2.5", "mimo-v2.5-pro", "mimo-v2.5-pro-ultraspeed"],
+        },
     },
     {
         "id": "doubao",
@@ -97,6 +119,9 @@ PROVIDER_LIST: List[Dict[str, Any]] = [
         "api_key_name": "DOUBAO_API_KEY",
         "covers": ["vision", "image_generation"],
         "models": ["doubao-seed-2-0-lite-260215", "doubao-seed-2-1-turbo-260628", "doubao-seed-2-1-pro-260628", "doubao-seedream-5-0-260128"],
+        "capability_models": {
+            "vision": ["doubao-seed-2-0-lite-260215"],
+        },
     },
 ]
 

@@ -503,6 +503,37 @@ body {
     margin-bottom: 12px;
 }
 
+/* ─── Step 4 模型下拉框 ─── */
+
+.setup-select {
+    background: rgba(255, 255, 255, 0.04);
+    color: var(--text-primary);
+    border: 1px solid var(--card-border);
+    border-radius: 6px;
+    padding: 6px 10px;
+    font-size: 13px;
+    font-family: "SF Mono", Consolas, monospace;
+    min-width: 220px;
+    cursor: pointer;
+    transition: border-color 0.15s;
+}
+
+.setup-select:hover {
+    border-color: rgba(255, 255, 255, 0.2);
+}
+
+.setup-select:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+
+.setup-select option,
+.setup-select optgroup {
+    background: #1a1a1a;
+    color: var(--text-primary);
+    font-family: "SF Mono", Consolas, monospace;
+}
+
 /* ─── 按钮 ─── */
 
 .step-actions {

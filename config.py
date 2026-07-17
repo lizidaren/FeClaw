@@ -43,6 +43,8 @@ class Settings(BaseSettings):
     MINIMAX_API_KEY: str = ""
     DEFAULT_LLM_PROVIDER: str = "zhipuai"
     DEFAULT_LLM_MODEL: str = "glm-4.7"
+    DEFAULT_VISION_MODEL: str = ""        # 默认视觉模型；为空由 SmartRouter 自动选
+    DEFAULT_EMBEDDING_MODEL: str = ""     # 默认嵌入模型；为空由 SmartRouter 自动选
     DEFAULT_FORMATTING_PROVIDER: str = "deepseek"
 
     # ─── 主模型配置（新） ───
