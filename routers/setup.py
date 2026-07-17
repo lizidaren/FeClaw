@@ -48,6 +48,24 @@ from services.setup_service import (
 )
 from utils.auth_dependencies import get_admin_user
 
+
+async def _get_setup_auth(
+    request: Request,
+    token: str = Query("", alias="token"),
+):
+    """冷启动用 token 鉴权，正常模式用 JWT 管理员鉴权。"""
+    if _is_cold_start():
+        # 冷启动：验证 setup token
+        expected = (settings.SETUP_TOKEN or "").strip()
+        if not expected or not token or token.strip() != expected:
+            from fastapi.responses import HTMLResponse
+            return HTMLResponse(INVALID_TOKEN_HTML, status_code=403)
+        return None  # 无 user 对象
+    else:
+        # 正常模式：走 JWT 管理员鉴权
+        return await get_admin_user(request)
+
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/setup", tags=["Setup"])
@@ -172,7 +190,8 @@ def _render_setup_page(request: Request, token: str = "") -> HTMLResponse:
     """实际渲染 setup.html。"""
     from fastapi.templating import Jinja2Templates
     # 模板目录 = FeClaw/templates/
-    templates = Jinja2Templates(directory="/home/lch/Projects/FeClaw/templates")
+    import os
+    templates = Jinja2Templates(directory=os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "templates"))
     resp = templates.TemplateResponse(
         request,
         "setup.html",
@@ -250,7 +269,7 @@ async def setup_admin(
 
 @router.get("/api/providers")
 async def api_providers(
-    user: User = Depends(get_admin_user),
+    _setup_user = Depends(_get_setup_auth),
 ):
     """返回 provider 列表 + 当前 .env 中各 key 的设置状态。"""
     return get_provider_list()
@@ -259,7 +278,7 @@ async def api_providers(
 @router.post("/api-keys")
 async def save_api_keys(
     payload: APIKeysPayload,
-    user: User = Depends(get_admin_user),
+    _setup_user = Depends(_get_setup_auth),
 ):
     """保存用户填写的 LLM API key 到 .env。空值不覆盖。"""
     updates: Dict[str, str] = {}
@@ -268,14 +287,14 @@ async def save_api_keys(
             updates[k.strip()] = v.strip()
     if updates:
         update_env(updates)
-        logger.info(f"[Setup] admin={user.username} 更新了 {len(updates)} 个 API key")
+        logger.info(f"[Setup] admin={(_setup_user.username if _setup_user else "admin")} 更新了 {len(updates)} 个 API key")
     return {"status": "ok", "updated": list(updates.keys())}
 
 
 @router.post("/storage")
 async def save_storage(
     payload: StoragePayload,
-    user: User = Depends(get_admin_user),
+    _setup_user = Depends(_get_setup_auth),
 ):
     """保存存储模式 + 数据库 + COS 凭证 + 向量后端配置。"""
     updates: Dict[str, str] = {}
@@ -295,13 +314,14 @@ async def save_storage(
         updates["VECTOR_STORAGE_BACKEND"] = payload.vector_storage_backend.strip().lower()
     if updates:
         update_env(updates)
-        logger.info(f"[Setup] admin={user.username} 更新了存储配置: {list(updates.keys())}")
+        logger.info(f"[Setup] admin={(_setup_user.username if _setup_user else "admin")} 更新了存储配置: {list(updates.keys())}")
     return {"status": "ok", "updated": list(updates.keys())}
 
 
 @router.post("/verify")
 async def verify(
-    user: User = Depends(get_admin_user),
+    _setup_user = Depends(_get_setup_auth),
+    
     db: Session = Depends(get_db),
 ):
     """测试当前配置是否可用。"""
@@ -311,7 +331,7 @@ async def verify(
 @router.post("/verify/{provider_id}")
 async def verify_one(
     provider_id: str,
-    user: User = Depends(get_admin_user),
+    _setup_user = Depends(_get_setup_auth),
 ):
     """测试某个 provider 的 API key。"""
     return await verify_provider(provider_id)
@@ -320,24 +340,24 @@ async def verify_one(
 @router.post("/complete")
 async def complete(
     payload: CompletePayload = CompletePayload(),
-    user: User = Depends(get_admin_user),
+    _setup_user = Depends(_get_setup_auth),
 ):
     """标记 SETUP_COMPLETE=true，同时把模型选择写入 .env。"""
     updates: Dict[str, str] = {"SETUP_COMPLETE": "true"}
     if payload.default_llm_model:
-        updates["DEFAULT_LLM_MODEL"] = payload.default_llm_model.strip()
+        updates["MAIN_TEXT_MODEL"] = payload.default_llm_model.strip()
     if payload.default_vision_model:
-        updates["DEFAULT_VISION_MODEL"] = payload.default_vision_model.strip()
+        updates["MAIN_VISION_MODEL"] = payload.default_vision_model.strip()
     if payload.default_embedding_model:
-        updates["DEFAULT_EMBEDDING_MODEL"] = payload.default_embedding_model.strip()
+        updates["MAIN_EMBEDDING_MODEL"] = payload.default_embedding_model.strip()
     if payload.default_search_engine:
         updates["DEFAULT_SEARCH_ENGINE"] = payload.default_search_engine.strip().lower()
     update_env(updates)
     logger.info(
-        f"[Setup] admin={user.username} 完成配置: "
-        f"llm={updates.get('DEFAULT_LLM_MODEL')!r}, "
-        f"vision={updates.get('DEFAULT_VISION_MODEL')!r}, "
-        f"embedding={updates.get('DEFAULT_EMBEDDING_MODEL')!r}, "
+        f"[Setup] admin={(_setup_user.username if _setup_user else "admin")} 完成配置: "
+        f"llm={updates.get('MAIN_TEXT_MODEL')!r}, "
+        f"vision={updates.get('MAIN_VISION_MODEL')!r}, "
+        f"embedding={updates.get('MAIN_EMBEDDING_MODEL')!r}, "
         f"search={updates.get('DEFAULT_SEARCH_ENGINE')!r}"
     )
     return {
@@ -351,7 +371,8 @@ async def complete(
 @router.post("/admin-update")
 async def update_admin_info(
     payload: AdminUpdatePayload,
-    user: User = Depends(get_admin_user),
+    _setup_user = Depends(_get_setup_auth),
+    
     db: Session = Depends(get_db),
 ):
     """更新管理员邮箱 / 密码。"""
@@ -377,7 +398,8 @@ async def update_admin_info(
 
 @router.get("/api/state")
 async def state(
-    user: User = Depends(get_admin_user),
+    _setup_user = Depends(_get_setup_auth),
+    
     db: Session = Depends(get_db),
 ):
     """前端 Step 1 进入时拉取一次：用于预填邮箱 + 判断是否仍需 setup。"""

@@ -4,7 +4,7 @@
 """
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Query
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from sqlalchemy.orm import Session
 from datetime import datetime, date
 from pydantic import BaseModel
@@ -724,7 +724,7 @@ async def login_user(
             # 配置检测失败不影响登录
             logger.debug(f"[User] setup 检测异常（忽略）: {_e}")
 
-        return JSONResponse(content={
+        resp = JSONResponse(content={
             "status": "success",
             "token": token,
             "user_id": user.id,
@@ -732,6 +732,15 @@ async def login_user(
             "is_admin": user.is_admin,
             "redirect": redirect_to,
         })
+        resp.set_cookie(
+            key="feclaw_jwt",
+            value=token,
+            httponly=True,
+            max_age=86400 * 30,  # 30 天
+            samesite="lax",
+            path="/",
+        )
+        return resp
 
     except HTTPException:
         raise

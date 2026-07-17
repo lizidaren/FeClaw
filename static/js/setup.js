@@ -675,7 +675,7 @@
         const cosDisabled = s.storageMode !== 'cos';
         const cosPlaceholder = s.tencentCosBucket
             ? s.tencentCosBucket
-            : 'firstentrance-gz01-1257148458';
+            : '';
 
         const html = `
             <div class="storage-section">
@@ -692,7 +692,7 @@
                     '需填写腾讯云 SecretId 和 SecretKey。',
                     s.storageMode === 'cos'
                 )}
-                <div class="storage-cos-fields" id="storage-cos-fields" ${cosDisabled ? 'hidden' : ''}>
+                <div class="storage-cos-fields" id="storage-cos-fields" ${(cosDisabled && s.vectorStorageBackend !== 'cos') ? 'hidden' : ''}>
                     <div class="form-group">
                         <label>SecretId</label>
                         <input type="text" class="cos-input" data-cos-field="secret_id" placeholder="AKIDxxxxxxxxxxxxxxxxxxxx" value="${escapeHtml(s.tencentCosSecretId)}" autocomplete="off" spellcheck="false">
@@ -702,7 +702,7 @@
                         <input type="password" class="cos-input" data-cos-field="secret_key" placeholder="••••••••" value="${escapeHtml(s.tencentCosSecretKey)}" autocomplete="off" spellcheck="false">
                     </div>
                     <div class="form-group">
-                        <label>Bucket <span class="optional-hint">（可选，默认为 firstentrance-gz01-1257148458）</span></label>
+                        <label>Bucket <span class="optional-hint">（可选，不填则不使用 COS）</span></label>
                         <input type="text" class="cos-input" data-cos-field="bucket" placeholder="${escapeHtml(cosPlaceholder)}" value="${escapeHtml(s.tencentCosBucket)}" autocomplete="off" spellcheck="false">
                     </div>
                 </div>
@@ -825,7 +825,7 @@
                 <div class="restart-section">
                     <div class="restart-section-title">手动重启</div>
                     <pre><code># 方式 1: systemd
-sudo systemctl restart feclaw
+sudo systemctl restart feclaw  # 如无自启服务，请使用方式 2
 
 # 方式 2: 直接 uvicorn
 pkill -f uvicorn

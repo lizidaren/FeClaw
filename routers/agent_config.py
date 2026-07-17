@@ -328,18 +328,21 @@ async def save_agent_config(
     persona_parts.append(f"===BOOTSTRAP===\n{default_bootstrap}")
     persona = "\n\n".join(persona_parts)
 
-    # Write COS VFS files (权威源——Agent 运行时从此读取)
-    from services.storage_service import get_storage_service as s
-    storage = s()
-    prefix = f"feclaw/agents/{agent_hash}/workspace/agent/"
+    # Write VFS files (权威源——Agent 运行时从此读取)
+    from services.file_storage import create_file_storage
+    from config import settings
+    storage = create_file_storage()
+    # COS 存储时有 feclaw/ 前缀用于路径隔离，本地存储无此前缀
+    _cos_prefix = "feclaw/" if getattr(settings, "TENCENT_COS_SECRET_ID", None) else ""
+    prefix = f"{_cos_prefix}agents/{agent_hash}/workspace/agent/"
     try:
         storage.put_object(f"{prefix}soul.md", soul.encode("utf-8"))
         storage.put_object(f"{prefix}identity.md", identity.encode("utf-8"))
         storage.put_object(f"{prefix}user.md", user_content.encode("utf-8"))
         storage.put_object(f"{prefix}BOOTSTRAP.md", default_bootstrap.encode("utf-8"))
-    except Exception as cos_err:
-        logger.error(f"COS write failed for agent {agent_hash}: {cos_err}")
-        raise HTTPException(status_code=502, detail=f"COS 写入失败: {str(cos_err)}")
+    except Exception as write_err:
+        logger.error(f"VFS write failed for agent {agent_hash}: {write_err}")
+        raise HTTPException(status_code=502, detail=f"文件写入失败: {str(write_err)}")
 
     # Note: soul/identity/user 不再写入 AgentConfig。
     # Agent 运行时全部从 COS 读取 (chat_service.py, agent_executor.py)。

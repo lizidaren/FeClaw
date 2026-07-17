@@ -565,7 +565,7 @@ def init_database(
         # 主 models.database 已包含大部分表
         from models import database as _db_models  # noqa: F401
         from models.agent_profile import AgentProfile  # noqa: F401
-        from models.chat import ChatHistory, ChatInput  # noqa: F401
+        from models.database import ChatHistory  # noqa: F401
         from models.agent_buffer import AgentBuffer  # noqa: F401
         from models.fehub import FePublish, AppData  # noqa: F401
         from models.zentrim import (  # noqa: F401
