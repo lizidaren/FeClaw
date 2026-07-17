@@ -1063,7 +1063,20 @@ async def agent_configure(agent_hash: str, request: Request):
         return RedirectResponse(url=f"/login?redirect_to=/agent/{agent_hash}/configure", status_code=302)
     if not _verify_agent_ownership(agent_hash, user_id):
         raise HTTPException(status_code=403, detail="无权访问")
-    return templates.TemplateResponse(request, "agent_configure.html", {"request": request, "agent_hash": agent_hash, "feclaw_domain": settings.FECLAW_DOMAIN})
+    from urllib.parse import urlparse
+    # 有域名用子域名，无域名 fallback 到当前请求 host
+    if settings.FECLAW_DOMAIN:
+        agent_base_url = f"https://{agent_hash}.{settings.FECLAW_DOMAIN}"
+    else:
+        # 从请求中提取 host（兼容 IP:port 和域名）
+        host = request.headers.get("host", "localhost:8080")
+        agent_base_url = f"http://{host}/agent/{agent_hash}"
+    return templates.TemplateResponse(request, "agent_configure.html", {
+        "request": request,
+        "agent_hash": agent_hash,
+        "feclaw_domain": settings.FECLAW_DOMAIN,
+        "agent_base_url": agent_base_url,
+    })
 
 
 # ==================== Agent 初始化 API ====================
