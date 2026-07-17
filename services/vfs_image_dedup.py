@@ -24,7 +24,7 @@ from typing import Optional, Tuple, Dict
 from datetime import datetime, timezone
 
 from config import settings
-from services.storage_service import get_storage_service
+from services.file_storage import create_file_storage
 
 logger = logging.getLogger(__name__)
 
@@ -80,7 +80,7 @@ class VFSImageDeduplicationService:
     @property
     def storage(self):
         if self._storage is None:
-            self._storage = get_storage_service()
+            self._storage = create_file_storage()
         return self._storage
 
     def _manifest_key(self) -> str:

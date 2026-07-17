@@ -14,7 +14,6 @@ from sqlalchemy.orm import Session
 from config import settings
 from models.database import AgentProfile, AgentConfig, SessionLocal
 from services.totp_service import TOTPService
-from services.storage_service import StorageService
 
 logger = logging.getLogger(__name__)
 
@@ -138,13 +137,13 @@ class AgentInitService:
 
     @property
     def storage(self):
-        """懒加载 StorageService"""
+        """懒加载 FileStorage（自动选择 COS / LocalStorage）"""
         if self._storage is None:
             try:
-                from services.storage_service import StorageService
-                self._storage = StorageService()
-            except ValueError as e:
-                logger.warning(f"StorageService initialization skipped: {e}")
+                from services.file_storage import create_file_storage
+                self._storage = create_file_storage()
+            except Exception as e:
+                logger.warning(f"FileStorage initialization skipped: {e}")
                 self._storage = None
         return self._storage
 

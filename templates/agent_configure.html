@@ -582,10 +582,10 @@
                     FeClaw
                 </a>
                 <div class="navbar-nav">
-                    <a href="https://{{ agent_hash }}.feclaw.lizidaren.cn" class="nav-link">控制台</a>
-                    <a href="https://{{ agent_hash }}.feclaw.lizidaren.cn/chat" class="nav-link">聊天</a>
-                    <a href="https://{{ agent_hash }}.feclaw.lizidaren.cn/files" class="nav-link">文件</a>
-                    <a href="https://{{ agent_hash }}.feclaw.lizidaren.cn/settings" class="nav-link">设置</a>
+                    <a href="https://{{ agent_hash }}.{{ feclaw_domain }}" class="nav-link">控制台</a>
+                    <a href="https://{{ agent_hash }}.{{ feclaw_domain }}/chat" class="nav-link">聊天</a>
+                    <a href="https://{{ agent_hash }}.{{ feclaw_domain }}/files" class="nav-link">文件</a>
+                    <a href="https://{{ agent_hash }}.{{ feclaw_domain }}/settings" class="nav-link">设置</a>
                 </div>
             </div>
         </nav>
@@ -719,6 +719,7 @@
 
     <script>
         const AGENT_HASH = '{{ agent_hash }}';
+        const FECLAW_DOMAIN = '{{ feclaw_domain }}';
         const STORAGE_EDITOR_KEY = 'config_editor_' + AGENT_HASH;
 
         // ========== Message state ==========
@@ -1656,7 +1657,7 @@
                     localStorage.removeItem(STORAGE_EDITOR_KEY);
                     showStatus('✅ 初始化完成！正在跳转...', 'success');
                     setTimeout(() => {
-                        window.location.href = `https://${AGENT_HASH}.feclaw.lizidaren.cn`;
+                        window.location.href = `https://${AGENT_HASH}.${FECLAW_DOMAIN}`;
                     }, 1200);
                 } else {
                     showStatus('❌ 保存失败: ' + (data.detail || '未知错误'), 'error');
@@ -1689,7 +1690,7 @@
 
         // ========== Cancel ==========
         function cancelConfig() {
-            window.location.href = `https://${AGENT_HASH}.feclaw.lizidaren.cn`;
+            window.location.href = `https://${AGENT_HASH}.${FECLAW_DOMAIN}`;
         }
 
         // ========== Render log for ordered replay ==========

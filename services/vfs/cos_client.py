@@ -1,5 +1,8 @@
 """
-COS client for VirtualFileSystem - COS 的 get/put/delete/list 封装
+COS client for VirtualFileSystem - 统一存储后端 get/put/delete/list 封装
+
+通过 services.file_storage.create_file_storage() 自动选择 COS 或 LocalStorage，
+使 VFS 在无 COS 配置时也能开箱即用。
 """
 import logging
 from typing import Dict, List, Optional
@@ -9,7 +12,8 @@ logger = logging.getLogger(__name__)
 
 class CosClient:
     """
-    封装 COS 存储操作，提供统一的 get/put/delete/list 接口
+    封装统一存储后端（COS / LocalStorage），提供 get/put/delete/list 接口。
+    类名保留 CosClient 是为了与既有调用方兼容 — 实际后端由 create_file_storage 决定。
     """
 
     def __init__(self, storage_service=None):
@@ -17,10 +21,10 @@ class CosClient:
 
     @property
     def storage(self):
-        """懒加载 StorageService"""
+        """懒加载 FileStorage（COS / LocalStorage 自动选择）"""
         if self._storage is None:
-            from services.storage_service import StorageService
-            self._storage = StorageService()
+            from services.file_storage import create_file_storage
+            self._storage = create_file_storage()
         return self._storage
 
     def set_storage(self, storage_service):
@@ -54,7 +58,7 @@ class CosClient:
             return False
 
     def list_objects(self, prefix: str) -> List[Dict]:
-        """列出 COS prefix 下的对象"""
+        """列出 prefix 下的对象"""
         try:
             objects = self.storage.list_objects(prefix)
             return objects if objects else []
@@ -63,7 +67,7 @@ class CosClient:
             return []
 
     def list_objects_raw(self, bucket: str, prefix: str, max_keys: int = 1000) -> List[Dict]:
-        """列出 COS 对象（通过抽象接口）"""
+        """列出 prefix 下的对象（通过抽象接口，bucket 参数仅做兼容）"""
         try:
             objects = self.storage.list_objects(prefix, max_keys)
             return objects if objects else []

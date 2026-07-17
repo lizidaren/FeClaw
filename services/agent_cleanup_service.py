@@ -21,7 +21,7 @@ from models.database import (
     WeChatBinding,
     WeChatMessage,
 )
-from services.storage_service import get_storage_service
+from services.file_storage import create_file_storage
 
 logger = logging.getLogger(__name__)
 
@@ -34,12 +34,12 @@ class AgentCleanupService:
 
     @property
     def storage(self):
-        """懒加载 StorageService"""
+        """懒加载 FileStorage（自动选择 COS / LocalStorage）"""
         if self._storage is None:
             try:
-                self._storage = get_storage_service()
+                self._storage = create_file_storage()
             except Exception as e:
-                logger.warning(f"StorageService initialization skipped: {e}")
+                logger.warning(f"FileStorage initialization skipped: {e}")
                 self._storage = None
         return self._storage
 

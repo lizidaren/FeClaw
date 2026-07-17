@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from config import settings
-from services.storage_service import get_storage_service
+from services.file_storage import create_file_storage
 from services.vfs_image_dedup import VFSImageDeduplicationService
 
 logger = logging.getLogger(__name__)
@@ -65,7 +65,7 @@ class VFSMediaService:
     @property
     def storage(self):
         if self._storage is None:
-            self._storage = get_storage_service()
+            self._storage = create_file_storage()
         return self._storage
 
     @staticmethod
@@ -86,7 +86,7 @@ class VFSMediaService:
         return ".bin"
 
     def _cos_key(self, agent_hash: str, relative_path: str) -> str:
-        """构建 COS 存储 key"""
+        """构建存储 key（COS / LocalStorage 通用，统一保留 prefix）"""
         normalized = relative_path.lstrip("/")
         return f"{settings.TENCENT_COS_PREFIX}agents/{agent_hash}/{normalized}"
 

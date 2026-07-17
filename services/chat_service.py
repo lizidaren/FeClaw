@@ -673,11 +673,11 @@ class ChatService:
             return result
 
         # 只拉取缓存失效的文件
-        # 用 COS 预签名 URL + httpx 并行下载，避免 COS SDK 的 SSL/TLS 握手开销
-        import httpx
-        from services.storage_service import get_storage_service
-
-        storage_svc = get_storage_service()
+        # 使用统一的 FileStorage 抽象（COS 或 LocalStorage），避免 COS SDK 握手开销
+        # 与 httpx 网络下载。key 始终是 _resolve_path 返回的 COS key（如
+        # "feclaw/agents/{hash}/..."），FileStorage 内部按存储后端解析到正确路径。
+        from services.file_storage import create_file_storage
+        storage = create_file_storage()
 
         async def _read_one(path):
             try:
@@ -685,13 +685,11 @@ class ChatService:
                 if err or not cos_key:
                     return (path, None)
 
-                cos_url = f"https://{settings.TENCENT_COS_BUCKET}.cos.{settings.TENCENT_COS_REGION}.myqcloud.com/{cos_key}"
-                presigned = storage_svc.generate_presigned_get_url(cos_url, expired=3600)
-
-                async with httpx.AsyncClient(timeout=10.0) as client:
-                    resp = await client.get(presigned)
-                    resp.raise_for_status()
-                    content = resp.text.strip()
+                # get_file_content 是同步 IO，放到 executor 避免阻塞事件循环
+                loop = asyncio.get_event_loop()
+                raw = await loop.run_in_executor(None, storage.get_file_content, cos_key)
+                if raw:
+                    content = raw.decode("utf-8", errors="ignore").strip()
                     if content:
                         cache_key = f"{self.agent_hash}:{path}"
                         _VFS_FILE_CACHE[cache_key] = (content, now + _VFS_CACHE_TTL)

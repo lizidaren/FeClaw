@@ -24,7 +24,7 @@ from services.workspace_service import (
     delete_workspace_file,
 )
 from services.totp_service import totp_service
-from services.storage_service import get_storage_service as s
+from services.file_storage import create_file_storage as s
 
 
 router = APIRouter(prefix="/api/workspace", tags=["工作区管理"])
@@ -397,9 +397,9 @@ async def upload_file_jwt(
     """
     content = await file.read()
     
-    # 上传到 COS
+    # 上传到存储后端
     cos_key = f"feclaw/user_workspaces/{user_id}/workspace/{path}"
-    s().upload_file(cos_key, content)
+    s().put_object(cos_key, content)
     
     return UploadResponse(
         path=path,

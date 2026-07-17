@@ -35,7 +35,7 @@ from models.database import WeChatBinding
 from utils.auth import get_current_user, decode_jwt_token
 from models.database import User as DbUser
 from utils.qr import generate_qr_data_url
-from services.storage_service import get_storage_service as s
+from services.file_storage import create_file_storage as s
 
 router = APIRouter(tags=["FeClaw 域名路由"])
 
@@ -1063,7 +1063,7 @@ async def agent_configure(agent_hash: str, request: Request):
         return RedirectResponse(url=f"/login?redirect_to=/agent/{agent_hash}/configure", status_code=302)
     if not _verify_agent_ownership(agent_hash, user_id):
         raise HTTPException(status_code=403, detail="无权访问")
-    return templates.TemplateResponse(request, "agent_configure.html", {"request": request, "agent_hash": agent_hash})
+    return templates.TemplateResponse(request, "agent_configure.html", {"request": request, "agent_hash": agent_hash, "feclaw_domain": settings.FECLAW_DOMAIN})
 
 
 # ==================== Agent 初始化 API ====================
