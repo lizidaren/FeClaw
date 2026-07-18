@@ -192,13 +192,13 @@
 
         // 退出登录
         document.getElementById('logout-btn').addEventListener('click', function() {
-            localStorage.removeItem('feclaw_jwt');
-            localStorage.removeItem('feclaw_jwt_expires');
-            localStorage.removeItem('feclaw_jwt_expires_at');
-            localStorage.removeItem('feclaw_agent_hash');
-            document.cookie = 'feclaw_jwt=; path=/; SameSite=Lax; max-age=0';
-            document.cookie = 'feclaw_jwt=; path=/; SameSite=Lax; max-age=0';
-            window.location.href = '/';
+            fetch('/api/auth/logout', { method: 'POST' }).then(function() {
+                localStorage.removeItem('feclaw_jwt');
+                localStorage.removeItem('feclaw_jwt_expires');
+                localStorage.removeItem('feclaw_jwt_expires_at');
+                localStorage.removeItem('feclaw_agent_hash');
+                window.location.href = '/';
+            });
         });
     </script>
 </body>

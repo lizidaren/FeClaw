@@ -180,6 +180,16 @@ async def get_user_for_page(request: Request) -> Optional[str]:
 
 # ==================== 认证选项端点 ====================
 
+@router.post("/api/auth/logout")
+async def logout_api(request: Request):
+    """退出登录：清除 JWT cookie 和 id_token cookie"""
+    resp = JSONResponse(content={"status": "ok", "message": "已退出登录"})
+    resp.delete_cookie("feclaw_jwt", path="/")
+    resp.delete_cookie("id_token", path="/")
+    resp.delete_cookie("platform_token", path="/")
+    return resp
+
+
 @router.get("/api/auth/options")
 async def auth_options(host: str = Query(None), request: Request = None):
     """
