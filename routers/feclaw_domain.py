@@ -1070,9 +1070,26 @@ async def settings_page(request: Request):
         return RedirectResponse(url="/login", status_code=302)
     host = _get_domain(request)
     agent_hash = extract_hash_from_host(host)
+
+    # 解析 is_admin（用于在导航栏显示「管理后台」入口）
+    is_admin = False
+    try:
+        from utils.auth import get_current_user_id
+        uid = get_current_user_id(request)
+        if uid:
+            from models.database import SessionLocal, User
+            db = SessionLocal()
+            try:
+                u = db.query(User).filter(User.id == int(uid)).first()
+                is_admin = bool(u and getattr(u, "is_admin", False))
+            finally:
+                db.close()
+    except Exception:
+        pass
+
     if agent_hash:
-        return templates.TemplateResponse(request, "agent_settings_main.html", {"request": request, "agent_hash": agent_hash})
-    return templates.TemplateResponse(request, "settings.html", {"request": request})
+        return templates.TemplateResponse(request, "agent_settings_main.html", {"request": request, "agent_hash": agent_hash, "is_admin": is_admin})
+    return templates.TemplateResponse(request, "settings.html", {"request": request, "is_admin": is_admin})
 
 
 # ==================== Agent 路径 fallback 路由 ====================
