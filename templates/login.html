@@ -323,7 +323,7 @@
     </div>
 
     <script>
-        // 已登录且页面没有错误/特殊参数时，跳 dashboard
+        // 已登录时跳 dashboard（但需验证 token 有效性，避免 localStorage 脏数据导致死循环）
         (function() {
             var params = new URLSearchParams(window.location.search);
             if (params.has('error') || params.has('totp') || params.has('code')) return;
@@ -333,7 +333,11 @@
                 if (m) tk = m[1];
             }
             if (tk) {
-                window.location.href = '/dashboard';
+                fetch('/api/user/me', { headers: { 'Authorization': 'Bearer ' + tk } })
+                    .then(function(r) {
+                        if (r.ok) window.location.href = '/dashboard';
+                    })
+                    .catch(function() {});
                 return;
             }
         })();
