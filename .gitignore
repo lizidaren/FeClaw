@@ -91,3 +91,4 @@ claude-tasks/
 # One-shot test / migration scripts
 scripts/compliance-prompt-iter.py
 scripts/migrate_passwords.py
+feclaw-storage/
