@@ -182,11 +182,16 @@ async def get_user_for_page(request: Request) -> Optional[str]:
 
 @router.post("/api/auth/logout")
 async def logout_api(request: Request):
-    """退出登录：清除 JWT cookie 和 id_token cookie"""
+    """退出登录：多重策略清除所有认证 cookie"""
     resp = JSONResponse(content={"status": "ok", "message": "已退出登录"})
+    # Starlette delete_cookie（Max-Age=0 + 过期时间）
     resp.delete_cookie("feclaw_jwt", path="/")
     resp.delete_cookie("id_token", path="/")
     resp.delete_cookie("platform_token", path="/")
+    # 额外显式覆盖（某些浏览器对 Max-Age=0 的 httponly cookie 处理不一致）
+    resp.set_cookie("feclaw_jwt", value="", max_age=0, path="/", httponly=True, samesite="lax")
+    resp.set_cookie("id_token", value="", max_age=0, path="/", httponly=True, samesite="lax")
+    resp.set_cookie("platform_token", value="", max_age=0, path="/", httponly=True, samesite="lax")
     return resp
 
 
