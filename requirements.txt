@@ -16,6 +16,9 @@ qrcode[pil]     # QR code generation
 numpy>=1.26.0
 bcrypt>=4.0.0   # 密码哈希（自 2026-07 起逐步替代 SHA-256+salt）
 
+jinja2>=3.1.0           # 模板引擎（FastAPI Jinja2Templates）
+nest_asyncio>=1.5.0     # 嵌套事件循环支持
+apscheduler>=3.10.0     # 定时任务调度
 # ─── 部署就绪性补全（可选：pyfuse3 在 requirements-fuse.txt） ───
 redis>=5.0.0                # Redis 缓存/会话
 aiofiles>=24.0.0            # 异步文件 I/O
