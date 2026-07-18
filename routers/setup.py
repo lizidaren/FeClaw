@@ -160,6 +160,7 @@ class AdminWithDbPayload(BaseModel):
 
 class CompletePayload(BaseModel):
     """最后一步：用户为每个能力选择的模型 + 搜索后端。"""
+    feclaw_domain: str = ""
     default_llm_model: str = ""
     default_vision_model: str = ""
     default_embedding_model: str = ""
@@ -184,6 +185,9 @@ async def setup_page(
     if _is_cold_start():
         verify_setup_token(token=token)
     return _render_setup_page(request, token=token if _is_cold_start() else "")
+
+
+INVALID_TOKEN_HTML = """<!DOCTYPE html><html lang=zh-CN><head><meta charset=utf-8><title>无效令牌</title><style>body{background:#050510;color:#e0e0e0;display:flex;align-items:center;justify-content:center;min-height:100vh;font-family:sans-serif;text-align:center;margin:0}h1{color:#f87171;font-size:2em}p{color:#888;margin-top:12px}.hint{color:#666;font-size:0.9em;margin-top:8px}a{color:#667eea}</style></head><body><div><h1>🔒 无效的配置令牌</h1><p>请使用控制台打印的完整 URL 访问</p><p class=hint>首次启动时管理地址会打印在终端中</p></div></body></html>"""
 
 
 def _render_setup_page(request: Request, token: str = "") -> HTMLResponse:

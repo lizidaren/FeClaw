@@ -60,13 +60,17 @@ async def agent_config_chat(
 
     body = await request.json()
 
-    api_key = os.environ.get("DEEPSEEK_API_KEY") or getattr(settings, "DEEPSEEK_API_KEY", "")
-    if not api_key:
-        api_key = os.environ.get("INFINI_API_KEY", "")
-
-    # 读取 LLM 配置
-    llm_base = getattr(settings, "LLM_BASE_URL", "https://api.deepseek.com")
-    llm_model = body.get("model", getattr(settings, "AGENT_LLM_MODEL", "deepseek-v4-flash"))
+    # 从配置好的模型注册表解析 LLM（支持 MiMo / DeepSeek / Qwen / GLM 等）
+    from services.model_registry import resolve
+    llm_model = body.get("model", getattr(settings, "MAIN_TEXT_MODEL", "mimo-v2.5-pro-ultraspeed"))
+    model_info = resolve(llm_model)
+    if model_info:
+        api_key_env = model_info.get("api_key_attr")
+        api_key = getattr(settings, api_key_env, "") if api_key_env else ""
+        llm_base = model_info.get("base_url", "https://api.deepseek.com")
+    else:
+        api_key = ""
+        llm_base = "https://api.deepseek.com" 
 
     async def proxy_stream():
         async with httpx.AsyncClient(timeout=120) as client:

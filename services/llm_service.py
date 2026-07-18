@@ -324,7 +324,7 @@ class ZhipuAIProvider(LLMProvider):
         }
 
         payload = {
-            "model": model or settings.DEFAULT_LLM_MODEL,
+            "model": model or settings.MAIN_TEXT_MODEL,
             "messages": messages,
             "stream": stream,
         }
@@ -763,7 +763,7 @@ class LLMService:
 
         provider_name = provider or settings.DEFAULT_LLM_PROVIDER
         provider_instance = self.get_provider(provider_name)
-        actual_model = model or settings.DEFAULT_LLM_MODEL
+        actual_model = model or settings.MAIN_TEXT_MODEL
 
         # P0.5: per-call usage 接收器（单元素 list）—— 解决 last_usage 跨实例竞态
         # 每个 chat 调用独立持有，互不污染；provider 在收到 usage 时 append 进来
