@@ -635,7 +635,7 @@ async def register_user(
         logger.info(f"[User] 新用户注册成功: {username} (id={user.id})")
 
         # 生成 JWT Token（注册后自动登录）
-        token = create_jwt_token({"user_id": user.id})
+        token = create_jwt_token({"user_id": user.id, "username": user.username})
 
         return JSONResponse(content={
             "status": "success",
@@ -710,7 +710,7 @@ async def login_user(
             logger.info(f"[User] 密码 hash 懒迁移到 bcrypt: username={username}")
 
         # 生成 Token
-        token = create_jwt_token({"user_id": user.id})
+        token = create_jwt_token({"user_id": user.id, "username": user.username})
 
         logger.info(f"[User] 用户登录成功: {username} (id={user.id})")
 
