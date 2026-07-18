@@ -7,12 +7,14 @@ Web 渠道服务 - ChatService 的 Web 适配层
 - 图片处理（保存到 VFS，通知 Agent）
 - 不重复实现聊天逻辑，调用统一的 ChatService
 """
+import asyncio
 import json
 import base64
 import time
 import logging
+import uuid
 from datetime import datetime
-from typing import AsyncGenerator, Optional, Tuple
+from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple, Union
 from sqlalchemy.orm import Session
 
 import httpx
@@ -33,6 +35,18 @@ CHANNEL_WEB = "web"
 CHANNEL_MOBILE = "mobile"
 
 logger = logging.getLogger(__name__)
+
+
+class AgentNotSpecifiedError(ValueError):
+    """请求没有显式指定 Agent。"""
+
+
+class AgentOwnershipError(PermissionError):
+    """请求的 Agent 不属于当前用户（不存在时也使用此错误，避免信息泄露）。"""
+
+
+class SessionNotFoundError(LookupError):
+    """会话不存在，或会话的 Agent / channel 与当前请求不匹配。"""
 
 
 async def _download_and_save_image_to_vfs(image_url: str, user_id: int, agent_hash: str = None) -> Tuple[Optional[str], Optional[bytes]]:
@@ -99,27 +113,56 @@ async def _download_and_save_image_to_vfs(image_url: str, user_id: int, agent_ha
 
 
 class WebChannelService:
-    """Web 渠道服务 - ChatService 的 Web 适配层"""
+    """Web / Mobile 渠道服务 - ChatService 的 HTTP/SSE 适配层。"""
 
-    def __init__(self, db: Session, user_id: int, agent_hash: str = None):
+    def __init__(
+        self,
+        db: Session,
+        user_id: int,
+        agent_hash: Optional[str] = None,
+        channel: str = CHANNEL_WEB,
+    ):
         self.db = db
         self.user_id = user_id
-        self._agent_hash = agent_hash
+        self._agent_hash = agent_hash.strip() if agent_hash else None
+        self.channel = channel
+        self._agent = None
+
+    def _get_owned_agent(self):
+        """解析并缓存当前用户拥有的 Agent；绝不回退到默认 Agent。"""
+        if not self._agent_hash:
+            raise AgentNotSpecifiedError("agent_hash required")
+        if self._agent is None:
+            from models.database import AgentProfile
+
+            self._agent = self.db.query(AgentProfile).filter(
+                AgentProfile.hash == self._agent_hash,
+                AgentProfile.user_id == self.user_id,
+            ).first()
+            if self._agent is None:
+                raise AgentOwnershipError("agent not owned by user")
+        return self._agent
+
+    async def resolve_agent(
+        self,
+        query_agent_hash: Optional[str] = None,
+        body_agent_hash: Optional[str] = None,
+        channel: Optional[str] = None,
+    ):
+        """按 body > query 的优先级解析 Agent，并校验归属。"""
+        selected_hash = (body_agent_hash or query_agent_hash or "").strip()
+        if not selected_hash:
+            raise AgentNotSpecifiedError("agent_hash required")
+        self._agent_hash = selected_hash
+        self._agent = None
+        if channel:
+            self.channel = channel
+        return self._get_owned_agent()
 
     @property
     def agent_hash(self) -> str:
-        """获取 agent_hash（懒加载）"""
-        if self._agent_hash is None:
-            from models.database import AgentProfile
-            agent = self.db.query(AgentProfile).filter(
-                AgentProfile.user_id == self.user_id,
-                AgentProfile.status == "initialized"
-            ).order_by(AgentProfile.updated_at.desc()).first()
-            if agent:
-                self._agent_hash = agent.hash
-            else:
-                raise ValueError(f"No initialized agent found for user {self.user_id}")
-        return self._agent_hash
+        """返回已通过 ownership 校验的 Agent hash。"""
+        return self._get_owned_agent().hash
     
     async def chat_stream(
         self,
@@ -128,6 +171,7 @@ class WebChannelService:
         image_url: Optional[str] = None,
         file_path: Optional[str] = None,
         file_name: Optional[str] = None,
+        channel: Optional[str] = None,
     ) -> AsyncGenerator[str, None]:
         """
         流式聊天 - 调用统一的 ChatService
@@ -138,12 +182,18 @@ class WebChannelService:
             image_url: 图片 URL（可选，支持 base64 data URL）
             file_path: 文件 VFS 路径（可选，前端上传后）
             file_name: 原始文件名（可选）
-        
+            channel: 请求渠道（web / mobile）；必须与已有会话的 topic 前缀一致
+
         Yields:
             SSE 格式的字符串: "event: token\ndata: {...}\n\n"
         """
-        # 获取或创建会话
-        session = self.get_or_create_session(session_id)
+        effective_channel = channel or self.channel
+        if not effective_channel:
+            raise ValueError("channel required")
+        self.channel = effective_channel
+
+        # 获取或创建会话；已有 session 必须同时匹配 user / agent / channel。
+        session = self.get_or_create_session(session_id, channel=effective_channel)
         
         # 图片处理（与微信端相同的逻辑）
         # 如果有图片，保存到 VFS，然后告诉 Agent 图片路径和快速描述
@@ -415,37 +465,63 @@ class WebChannelService:
                     actual_user_input = file_prefix
                 logger.info(f"[FeClaw] File attached: {file_path}" + (f" (parsed {len(parsed_content)} chars)" if parsed_content else ""))
         
-        # 保存用户消息（如果有图片，记录图片信息）
-        if image_url:
-            self.add_message(session, "user", f"{user_input} [图片]")
-        else:
-            self.add_message(session, "user", user_input)
+        # 在持久化本轮用户消息之前截取历史，避免 ChatService 再次收到当前输入。
+        session_messages = self._parse_messages(session.messages)
+        persisted_images = (
+            [{"url": vfs_path or image_url}]
+            if image_url
+            else None
+        )
+        persisted_files = (
+            [{"path": file_path, "name": file_name or file_path.rsplit("/", 1)[-1]}]
+            if file_path
+            else None
+        )
 
         # ── IM Agent 路由：直接走 IRQ → WorkLoop（异步处理）──
-        # IM Agent 收到消息后应自主决策（不再一问一答），所以 web 私聊也走 IRQ。
-        # WorkLoop 处理完后通过 WebSocket 把回复 push 回来（前端需要监听 WS）。
+        # IM Agent 收到消息后应自主决策（不再一问一答），所以 web/mobile 私聊也走 IRQ。
         if self._is_im_agent():
-            yield self._build_queued_sse(actual_user_input, session)
+            self.add_message(
+                session,
+                "user",
+                user_input,
+                images=persisted_images,
+                files=persisted_files,
+            )
+            yield self._build_queued_sse(actual_user_input, session, effective_channel)
             return
 
-        # 调用统一的 ChatService（不传递 image_url，因为已经保存到 VFS）
-        chat_service = ChatService(agent_hash=self.agent_hash, channel=CHANNEL_WEB)
+        # 调用统一的 ChatService，并把请求 channel/session 原样透传。
+        chat_service = ChatService(
+            agent_hash=self.agent_hash,
+            channel=effective_channel,
+            session_id=session.session_id,
+        )
 
-        # 从 ConversationSession 加载历史消息并注入 ChatContext（解决会话管理双轨制）
-        session_messages = self._parse_messages(session.messages)
+        # 从 ConversationSession 加载“本轮之前”的历史消息并注入 ChatContext。
         if session_messages:
             chat_service.context.history = [
                 {"role": m.get("role", "user"), "content": m.get("content", "")}
                 for m in session_messages
+                if m.get("role") in {"user", "assistant", "tool"}
             ]
             logger.info(f"[FeClaw] Loaded {len(session_messages)} messages from session {session.session_id}")
-        # Web 渠道通过 ConversationSession 管理历史，跳过 ChatService 的 _load_history
-        # 即使新会话也要设置此标志，防止 _load_history 加载跨会话历史
+        # ConversationSession 已提供当前会话历史，禁止 ChatService 再加载跨会话历史。
         chat_service._history_loaded_from_session = True
         logger.info(f"[FeClaw] history_loaded_from_session=True (session={session.session_id}, messages={len(session_messages)})")
-        
+
+        # 历史装载完成后才持久化当前用户消息，确保模型只接收一次本轮输入。
+        self.add_message(
+            session,
+            "user",
+            user_input,
+            images=persisted_images,
+            files=persisted_files,
+        )
+
         full_response = ""
         usage = {"input_tokens": 0, "output_tokens": 0}
+        tool_calls: List[Dict[str, Any]] = []
 
         # 构建 ChatInput（新签名，含附件信息）
         chat_attachments = []
@@ -463,14 +539,49 @@ class WebChannelService:
                 yield f"event: thinking\ndata: {json.dumps({'content': event.content}, ensure_ascii=False)}\n\n"
             
             elif event.type == ChatEventType.TOOL_CALL:
-                # 工具调用
-                yield f"event: tool\ndata: {json.dumps({'content': event.content, 'tool_name': event.tool_name}, ensure_ascii=False)}\n\n"
+                # Web 协议要求每次工具调用都有稳定 ID，供 tool_result 和历史记录关联。
+                tool_call_id = uuid.uuid4().hex
+                tool_call = {
+                    "id": tool_call_id,
+                    "name": event.tool_name or "",
+                    "args": event.tool_args if event.tool_args is not None else event.content,
+                    "status": "pending",
+                }
+                tool_calls.append(tool_call)
+                yield f"event: tool\ndata: {json.dumps({
+                    'content': event.content,
+                    'tool_name': event.tool_name,
+                    'tool_args': event.tool_args,
+                    'tool_call_id': tool_call_id,
+                }, ensure_ascii=False)}\n\n"
                 # 工具调用后可能长时间无数据（工具执行中），加填充强制 CDN flush 已输出的内容
                 yield f": flush {' ' * 2048}\n\n"
-            
+
             elif event.type == ChatEventType.TOOL_RESULT:
-                # 工具结果
-                yield f"event: tool_result\ndata: {json.dumps({'content': event.content, 'tool_name': event.tool_name}, ensure_ascii=False)}\n\n"
+                # 优先关联最近一个同名且尚未完成的调用。
+                matched_call = next(
+                    (
+                        call for call in reversed(tool_calls)
+                        if call["status"] == "pending"
+                        and (not event.tool_name or call["name"] == event.tool_name)
+                    ),
+                    None,
+                )
+                if matched_call is None:
+                    matched_call = {
+                        "id": uuid.uuid4().hex,
+                        "name": event.tool_name or "",
+                        "args": None,
+                        "status": "pending",
+                    }
+                    tool_calls.append(matched_call)
+                matched_call["result"] = event.tool_result or event.content
+                matched_call["status"] = "done"
+                yield f"event: tool_result\ndata: {json.dumps({
+                    'content': event.tool_result or event.content,
+                    'tool_name': event.tool_name,
+                    'tool_call_id': matched_call['id'],
+                }, ensure_ascii=False)}\n\n"
             
             elif event.type == ChatEventType.DONE:
                 usage = {
@@ -509,47 +620,61 @@ class WebChannelService:
                 yield f"event: error\ndata: {json.dumps({'code': 'LLM_ERROR', 'message': event.error_message}, ensure_ascii=False)}\n\n"
                 return
         
-        # 保存 AI 回复
-        self.add_message(session, "assistant", full_response)
+        # 保存 AI 回复及结构化工具调用，供 session detail 完整恢复。
+        self.add_message(
+            session,
+            "assistant",
+            full_response,
+            tool_calls=tool_calls or None,
+        )
 
         # 返回完成事件
         yield f"event: done\ndata: {json.dumps({'session_id': session.session_id, 'usage': usage}, ensure_ascii=False)}\n\n"
 
     def get_or_create_session(
         self,
-        session_id: Optional[str] = None
+        session_id: Optional[str] = None,
+        channel: Optional[str] = None,
     ) -> ConversationSession:
-        """获取或创建会话"""
+        """获取或创建会话，并严格校验 user / agent / channel 绑定。"""
+        effective_channel = channel or self.channel
+        expected_topic_prefix = f"[{effective_channel}]"
+
         if session_id:
             session = self.db.query(ConversationSession).filter(
                 ConversationSession.session_id == session_id,
-                ConversationSession.user_id == self.user_id
+                ConversationSession.user_id == self.user_id,
             ).first()
-            
-            if session:
-                return session
-        
+
+            if (
+                session is None
+                or session.agent_hash != self.agent_hash
+                or not (session.topic or "").startswith(expected_topic_prefix)
+            ):
+                raise SessionNotFoundError("Session not found")
+            return session
+
         # 创建新会话
-        import uuid
-        new_session_id = session_id or f"sess_{uuid.uuid4().hex[:16]}"
-        
+        new_session_id = f"sess_{uuid.uuid4().hex[:16]}"
+        now = datetime.utcnow()
+
         session = ConversationSession(
             session_id=new_session_id,
             agent_hash=self.agent_hash,
             user_id=self.user_id,
             messages="[]",
-            created_at=datetime.utcnow(),
-            updated_at=datetime.utcnow(),
-            message_count=0
+            created_at=now,
+            updated_at=now,
+            message_count=0,
         )
-        
-        # 渠道信息存储在 topic 字段
-        session.topic = f"[{CHANNEL_WEB}]"
-        
+
+        # classic 会话不写 channel 列（该列受 IM Agent 唯一约束），渠道存在 topic 前缀。
+        session.topic = expected_topic_prefix
+
         self.db.add(session)
         self.db.commit()
         self.db.refresh(session)
-        
+
         return session
     
     def _parse_messages(self, messages_json: str) -> list:
@@ -627,14 +752,43 @@ class WebChannelService:
         self.db.commit()
         return True
     
-    def add_message(self, session: ConversationSession, role: str, content: str) -> None:
-        """添加消息到会话"""
+    def add_message(
+        self,
+        session: ConversationSession,
+        message_or_role: Union[Dict[str, Any], str],
+        content: Optional[str] = None,
+        *,
+        timestamp: Optional[str] = None,
+        images: Optional[List[Dict[str, Any]]] = None,
+        files: Optional[List[Dict[str, Any]]] = None,
+        tool_calls: Optional[List[Dict[str, Any]]] = None,
+    ) -> None:
+        """添加消息，并完整保留附件与工具调用等结构化字段。"""
+        if isinstance(message_or_role, dict):
+            source = message_or_role
+            message: Dict[str, Any] = {
+                "role": source.get("role", "user"),
+                "content": source.get("content", ""),
+                "timestamp": source.get("timestamp") or datetime.utcnow().isoformat(),
+            }
+            for key in ("images", "files", "tool_calls"):
+                if source.get(key) is not None:
+                    message[key] = source[key]
+        else:
+            message = {
+                "role": message_or_role,
+                "content": content or "",
+                "timestamp": timestamp or datetime.utcnow().isoformat(),
+            }
+            if images is not None:
+                message["images"] = images
+            if files is not None:
+                message["files"] = files
+            if tool_calls is not None:
+                message["tool_calls"] = tool_calls
+
         messages = self._parse_messages(session.messages)
-        messages.append({
-            "role": role,
-            "content": content,
-            "timestamp": datetime.utcnow().isoformat()
-        })
+        messages.append(message)
         session.messages = json.dumps(messages, ensure_ascii=False)
         session.message_count = len(messages)
         session.updated_at = datetime.utcnow()
@@ -650,7 +804,7 @@ class WebChannelService:
         ).first()
         return bool(agent and getattr(agent, "agent_mode", "classic") == "im")
 
-    def _build_queued_sse(self, user_input: str, session) -> str:
+    def _build_queued_sse(self, user_input: str, session, channel: str) -> str:
         """构造 IM Agent 占位 SSE 事件并投递 IRQ。
 
         - 前端 SSE 流立刻以 queued 事件结束
@@ -669,7 +823,7 @@ class WebChannelService:
             agent_hash=self.agent_hash,
             priority=Priority.HIGH,
             payload={
-                "channel": "web",
+                "channel": channel,
                 "user_id": self.user_id,
                 "agent_hash": self.agent_hash,
                 "session_id": session.session_id,
@@ -685,7 +839,7 @@ class WebChannelService:
         payload = {
             "status": "queued",
             "agent_hash": self.agent_hash,
-            "channel": "web",
+            "channel": channel,
             "session_id": session.session_id,
             "message": "IM Agent 收到消息，将在 WorkLoop 中异步处理。回复将通过 WebSocket 推送。",
         }
@@ -782,6 +936,7 @@ class WebChannelService:
 
         # 2. 图片/文件预处理（与经典路径同源，未来可下沉复用）
         actual_user_input = user_input
+        vfs_path = None
         if image_url:
             vfs_path, _ = await _download_and_save_image_to_vfs(
                 image_url, self.user_id, agent_hash=self.agent_hash
@@ -800,8 +955,18 @@ class WebChannelService:
                     f"【图片上传失败】\n\n{user_input}" if user_input else "【图片上传失败】"
                 )
 
-        # 3. 记录用户消息到会话
-        self.add_message(session, "user", f"{user_input} [图片]" if image_url else user_input)
+        # 3. 记录用户消息到会话，保留附件结构化元数据。
+        self.add_message(
+            session,
+            "user",
+            user_input,
+            images=([{"url": vfs_path or image_url}] if image_url else None),
+            files=(
+                [{"path": file_path, "name": file_name or file_path.rsplit("/", 1)[-1]}]
+                if file_path
+                else None
+            ),
+        )
 
         # 4. 投递 IRQ → Coprocessor WorkLoop（不调用 ChatService 直接 chat）
         ic = InterruptController.instance()

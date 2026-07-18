@@ -434,17 +434,24 @@ class InterruptController:
                 except Exception:
                     _ws_manager = None
 
-            async def _push_draft(payload: Dict[str, Any]) -> None:
-                """把 draft 推给前端（失败静默，不影响 LLM 流）。
-
-                只推给当前连着的客户端：桌面端/移动端均可接收 draft 灰字流，客户端按 session_id 路由。
-                """
-                if not _ws_manager or not _ws_manager.is_connected:
+            async def _push_draft(
+                draft_user_id: Optional[int],
+                draft_session_id: Optional[str],
+                payload: Dict[str, Any],
+            ) -> None:
+                """只把 draft 推给触发本轮 IRQ 的用户和会话。"""
+                if (
+                    not _ws_manager
+                    or draft_user_id is None
+                    or not draft_session_id
+                ):
                     return
-                # draft 推给当前连着的客户端，客户端按 session_id 路由
-                # 注：ClientConnectionManager 是单连接管理器，一个设备只连一个 WS
                 try:
-                    await _ws_manager.send(payload)
+                    await _ws_manager.send_to(
+                        draft_user_id,
+                        draft_session_id,
+                        payload,
+                    )
                 except Exception as _e:
                     logger.debug(f"[WorkLoop] draft push failed: {_e}")
 
@@ -458,7 +465,7 @@ class InterruptController:
                             ws.draft_buffers[session_id] = (
                                 ws.draft_buffers.get(session_id, "") + _chunk
                             )
-                            await _push_draft({
+                            await _push_draft(user_id, session_id, {
                                 "type": "draft",
                                 "event": "draft",
                                 "channel": channel,
@@ -476,7 +483,7 @@ class InterruptController:
                             ws.draft_buffers[session_id] = (
                                 ws.draft_buffers.get(session_id, "") + _arg
                             )
-                            await _push_draft({
+                            await _push_draft(user_id, session_id, {
                                 "type": "draft",
                                 "event": "draft",
                                 "channel": channel,

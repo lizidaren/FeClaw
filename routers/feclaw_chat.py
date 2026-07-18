@@ -12,15 +12,20 @@ import asyncio
 import logging
 from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
-from typing import Optional, List
+from pydantic import BaseModel, ConfigDict, Field
+from typing import Any, Dict, Optional, List
 from datetime import datetime
 
 from sqlalchemy.orm import Session
 from models.database import SessionLocal, get_db
 from config import settings
 from routers.feclaw_domain import extract_hash_from_host
-from services.web_channel_service import WebChannelService
+from services.web_channel_service import (
+    AgentNotSpecifiedError,
+    AgentOwnershipError,
+    SessionNotFoundError,
+    WebChannelService,
+)
 from utils.auth import get_current_user_id, decode_jwt_token
 
 
@@ -37,14 +42,17 @@ ALLOWED_STREAM_CHANNELS = {"web", "mobile"}
 
 class ChatRequest(BaseModel):
     """聊天请求"""
+
+    model_config = ConfigDict(extra="forbid")
+
     content: str
     session_id: Optional[str] = None
     image_url: Optional[str] = None  # 图片 URL（支持 base64 data URL）
     file_path: Optional[str] = None  # 文件 VFS 路径（前端上传后）
     file_name: Optional[str] = None  # 原始文件名
     group_id: Optional[str] = None  # 群聊 ID（P0-2 fix：非空时走群聊逻辑）
-    channel: Optional[str] = None  # Gen 2: 渠道标识（白名单 {web, mobile}）；classic Agent 忽略
-    agent_hash: Optional[str] = None  # Gen 2: IM Agent 标识（query/header 无法带时走 body）
+    channel: str = Field(..., min_length=1)  # 白名单 {web, mobile}
+    agent_hash: str = Field(..., min_length=1)  # body 优先于同名 query 参数
 
 
 class SessionResponse(BaseModel):
@@ -55,6 +63,12 @@ class SessionResponse(BaseModel):
     updated_at: Optional[datetime] = None
     topic: Optional[str] = None
     last_message: Optional[str] = None
+    agent_id: Optional[str] = None
+    agent_name: Optional[str] = None
+    type: str = "private"
+    group_name: Optional[str] = None
+    agent_hash: Optional[str] = None
+    agent_mode: Optional[str] = None
 
 
 class CreateSessionRequest(BaseModel):
@@ -77,6 +91,9 @@ class MessageResponse(BaseModel):
     role: str
     content: str
     timestamp: Optional[str] = None
+    images: Optional[List[Dict[str, Any]]] = None
+    files: Optional[List[Dict[str, Any]]] = None
+    tool_calls: Optional[List[Dict[str, Any]]] = None
 
 
 class SessionDetailResponse(BaseModel):
@@ -86,7 +103,87 @@ class SessionDetailResponse(BaseModel):
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
     topic: Optional[str] = None
-    messages: List[MessageResponse] = []  # Pydantic v2 handles this correctly in model_post_init
+    agent_id: Optional[str] = None
+    agent_name: Optional[str] = None
+    type: str = "private"
+    group_name: Optional[str] = None
+    agent_hash: Optional[str] = None
+    agent_mode: Optional[str] = None
+    messages: List[MessageResponse] = Field(default_factory=list)
+
+
+def _message_content_as_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if content is None:
+        return ""
+    try:
+        return json.dumps(content, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return str(content)
+
+
+def _parse_session_messages(session) -> List[Dict[str, Any]]:
+    try:
+        parsed = json.loads(session.messages or "[]")
+        return parsed if isinstance(parsed, list) else []
+    except (TypeError, json.JSONDecodeError):
+        return []
+
+
+def serialize_session(session, agent=None) -> SessionResponse:
+    """序列化会话列表项，并携带 Agent 绑定元数据。"""
+    messages = _parse_session_messages(session)
+    last_message = ""
+    if messages:
+        last = messages[-1] if isinstance(messages[-1], dict) else {}
+        last_message = _message_content_as_text(last.get("content"))[:50]
+    agent_hash = session.agent_hash
+    return SessionResponse(
+        session_id=session.session_id,
+        message_count=session.message_count or 0,
+        created_at=session.created_at,
+        updated_at=session.updated_at,
+        topic=session.topic or "[web]",
+        last_message=last_message,
+        agent_id=agent_hash,
+        agent_name=(agent.name if agent else None),
+        type="private",
+        group_name=None,
+        agent_hash=agent_hash,
+        agent_mode=(getattr(agent, "agent_mode", None) if agent else None),
+    )
+
+
+def serialize_session_detail(session, agent=None) -> SessionDetailResponse:
+    """序列化会话详情，保留附件和工具调用字段。"""
+    messages = _parse_session_messages(session)
+    agent_hash = session.agent_hash
+    return SessionDetailResponse(
+        session_id=session.session_id,
+        message_count=session.message_count or 0,
+        created_at=session.created_at,
+        updated_at=session.updated_at,
+        topic=session.topic or "[web]",
+        agent_id=agent_hash,
+        agent_name=(agent.name if agent else None),
+        type="private",
+        group_name=None,
+        agent_hash=agent_hash,
+        agent_mode=(getattr(agent, "agent_mode", None) if agent else None),
+        messages=[
+            MessageResponse(
+                role=msg.get("role", "user"),
+                content=_message_content_as_text(msg.get("content")),
+                timestamp=msg.get("timestamp"),
+                images=msg.get("images"),
+                files=msg.get("files"),
+                tool_calls=msg.get("tool_calls"),
+            )
+            for msg in messages
+            if isinstance(msg, dict)
+        ],
+    )
 
 
 # ========== 路由 ==========
@@ -121,8 +218,8 @@ async def chat_stream(
     import logging
     logger = logging.getLogger(__name__)
 
-    # ===== 渠道白名单校验 (Gen 2 channel-driven) =====
-    if request.channel and request.channel not in ALLOWED_STREAM_CHANNELS:
+    # ===== 渠道与 Agent 绑定校验（classic / IM / group 共用） =====
+    if request.channel not in ALLOWED_STREAM_CHANNELS:
         raise HTTPException(
             status_code=400,
             detail=(
@@ -131,47 +228,51 @@ async def chat_stream(
             ),
         )
 
-    # ===== Gen 2 (IM Agent) 分支 =====
-    # 经典路径保持完全不变：有 group_id 走群聊；否则走旧的私聊逻辑。
-    # 仅当 client 同时指明 (channel, agent_hash) 且目标 Agent 为 IM 模式时才进 Gen 2。
-    if request.channel and (agent_hash or request.agent_hash):
-        target_hash = agent_hash or request.agent_hash
-        from models.database import AgentProfile  # 局部导入，避免循环
-        target_agent = (
-            db.query(AgentProfile)
-            .filter(AgentProfile.hash == target_hash, AgentProfile.user_id == user_id)
-            .first()
+    # body 优先，query 仅作为兼容输入。WebChannelService 负责统一 ownership 校验，
+    # 不再回退到用户默认 Agent。
+    chat_service = WebChannelService(
+        db,
+        user_id=user_id,
+        channel=request.channel,
+    )
+    try:
+        target_agent = await chat_service.resolve_agent(
+            query_agent_hash=agent_hash,
+            body_agent_hash=request.agent_hash,
+            channel=request.channel,
         )
-        if target_agent is None:
-            raise HTTPException(status_code=404, detail="Agent not found")
-        if getattr(target_agent, "agent_mode", "classic") == "im":
-            # Gen 2 不允许显式 session_id —— 服务端按 (agent_hash, channel) 自动组合
-            if request.session_id:
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        "IM Agent (Gen 2) ignores client-provided session_id; "
-                        "session is derived from (agent_hash, channel)."
-                    ),
-                )
-            chat_service = WebChannelService(
-                db, user_id=user_id, agent_hash=target_hash
-            )
-            return StreamingResponse(
-                chat_service._im_chat_stream(
-                    user_input=request.content,
-                    channel=request.channel,
-                    image_url=request.image_url,
-                    file_path=request.file_path,
-                    file_name=request.file_name,
+    except AgentNotSpecifiedError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except AgentOwnershipError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    target_hash = target_agent.hash
+
+    # ===== Gen 2 (IM Agent) 分支 =====
+    if getattr(target_agent, "agent_mode", "classic") == "im":
+        # Gen 2 不允许显式 session_id —— 服务端按 (agent_hash, channel) 自动组合
+        if request.session_id:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "IM Agent (Gen 2) ignores client-provided session_id; "
+                    "session is derived from (agent_hash, channel)."
                 ),
-                media_type="text/event-stream",
-                headers={
-                    "Cache-Control": "no-cache",
-                    "Connection": "keep-alive",
-                    "X-Accel-Buffering": "no",
-                },
             )
+        return StreamingResponse(
+            chat_service._im_chat_stream(
+                user_input=request.content,
+                channel=request.channel,
+                image_url=request.image_url,
+                file_path=request.file_path,
+                file_name=request.file_name,
+            ),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
 
     # P0-2: 群聊分支 —— 校验群存在/所有权、保存用户消息、流式生成、回复保存为群消息
     if request.group_id:
@@ -179,16 +280,32 @@ async def chat_stream(
             request=request,
             user_id=user_id,
             db=db,
-            agent_hash=agent_hash,
+            agent_hash=target_hash,
             logger=logger,
         )
 
     logger.info(f"[chat_stream] user_id={user_id}, content={request.content[:50]}..., image_url={request.image_url[:50] if request.image_url else None}...")
 
-    chat_service = WebChannelService(db, user_id=user_id, agent_hash=agent_hash)
+    # 在 StreamingResponse 启动前校验 session 绑定，让 mismatch 返回明确 404，
+    # 而不是先返回 200 再在生成器内部失败。
+    if request.session_id:
+        try:
+            chat_service.get_or_create_session(
+                request.session_id,
+                channel=request.channel,
+            )
+        except SessionNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="Session not found") from exc
 
     return StreamingResponse(
-        chat_service.chat_stream(request.content, request.session_id, request.image_url, request.file_path, request.file_name),
+        chat_service.chat_stream(
+            request.content,
+            session_id=request.session_id,
+            image_url=request.image_url,
+            file_path=request.file_path,
+            file_name=request.file_name,
+            channel=request.channel,
+        ),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -294,7 +411,12 @@ async def _chat_stream_group(
             headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
         )
 
-    chat_service = WebChannelService(db, user_id=user_id, agent_hash=selected_agent_hash)
+    chat_service = WebChannelService(
+        db,
+        user_id=user_id,
+        agent_hash=selected_agent_hash,
+        channel=request.channel,
+    )
 
     # 3. 流式生成 + 收集完整回复
     full_response = ""
@@ -304,7 +426,7 @@ async def _chat_stream_group(
         try:
             async for sse_str in chat_service.chat_stream(
                 request.content, request.session_id, request.image_url,
-                request.file_path, request.file_name,
+                request.file_path, request.file_name, channel=request.channel,
             ):
                 # 抓 token 内容用于持久化（不动 SSE 原文）
                 _evt, _data = _parse_sse(sse_str)
@@ -647,6 +769,7 @@ async def create_chat_session(
 @router.get("/api/chat/sessions", response_model=List[SessionResponse])
 async def get_sessions(
     agent_hash: Optional[str] = Query(None, description="Agent hash，筛选特定 Agent 的会话"),
+    before: Optional[datetime] = Query(None, description="updated_at 游标；返回此时间之前的会话"),
     user_id: int = Depends(get_current_user_id),
     db: Session = Depends(get_db)
 ):
@@ -657,7 +780,7 @@ async def get_sessions(
     列表渲染时按 topic 携带的真实文案展示。
     可选 agent_hash 参数筛选特定 Agent 的会话。
     """
-    from models.database import ConversationSession
+    from models.database import AgentProfile, ConversationSession
     from sqlalchemy import or_
 
     # 一次性查回 [web] 和 [mobile] 渠道的会话（避免两次往返 + 各自 sort）
@@ -714,7 +837,7 @@ async def get_session_detail(
     支持 Web 和 Mobile 两个渠道的会话。Mobile 渠道的会话不再走
     WebChannelService.get_session 那一套（被 topic 过滤掉了），这里直接查 ORM。
     """
-    from models.database import ConversationSession
+    from models.database import AgentProfile, ConversationSession
 
     # 直接查 ORM（避免 web_channel_service 内部只查 [web] 渠道的过滤）
     s = (
