@@ -167,6 +167,16 @@ async def get_config(_admin: User = Depends(get_admin_user)):
     # 8. 搜索后端
     search_engine = (env.get("DEFAULT_SEARCH_ENGINE", "") or settings.DEFAULT_SEARCH_ENGINE or "qwen").strip().lower()
 
+    # 9. OAuth / SSO
+    oauth_provider_name = (env.get("OAUTH_PROVIDER_NAME", "") or settings.OAUTH_PROVIDER_NAME or "").strip()
+    oauth_provider_url = (env.get("OAUTH_PROVIDER_URL", "") or settings.OAUTH_PROVIDER_URL or "").strip()
+    oauth_client_id = (env.get("OAUTH_CLIENT_ID", "") or settings.OAUTH_CLIENT_ID or "").strip()
+    oauth_client_secret = env.get("OAUTH_CLIENT_SECRET", "") or settings.OAUTH_CLIENT_SECRET or ""
+    oauth_redirect_uri = (env.get("OAUTH_REDIRECT_URI", "") or settings.OAUTH_REDIRECT_URI or "").strip()
+
+    # 10. Redis
+    redis_password = env.get("REDIS_PASSWORD", "") or settings.REDIS_PASSWORD or ""
+
     return {
         "deploy": {
             "mode": deploy_mode,
@@ -182,6 +192,7 @@ async def get_config(_admin: User = Depends(get_admin_user)):
         "storage": {
             "storage_mode": storage_mode,
             "local_storage_root": local_storage_root,
+            "storage_prefix": env.get("STORAGE_PREFIX", "feclaw/"),
             "vector_backend": vector_backend,
             "cos_secret_id_set": bool(cos_secret_id.strip()),
             "cos_secret_key_set": bool(cos_secret_key.strip()),
@@ -192,6 +203,18 @@ async def get_config(_admin: User = Depends(get_admin_user)):
         "providers": providers_out,
         "models": models,
         "search_engine": search_engine,
+        "oauth": {
+            "provider_name": oauth_provider_name,
+            "provider_url": oauth_provider_url,
+            "client_id": oauth_client_id,
+            "secret_set": bool(oauth_client_secret.strip()),
+            "redirect_uri": oauth_redirect_uri,
+            "configured": bool(oauth_provider_url and oauth_client_id and oauth_redirect_uri),
+        },
+        "redis": {
+            "password_set": bool(redis_password.strip()),
+            "configured": bool(redis_password.strip()),
+        },
     }
 
 
@@ -255,6 +278,20 @@ class StorageSection(BaseModel):
     tencent_cos_bucket: str = ""
 
 
+class OauthSection(BaseModel):
+    """OAuth / SSO section。空字符串视为保持现状；client_secret 留空 = 不更新。"""
+    provider_name: str = ""
+    provider_url: str = ""
+    client_id: str = ""
+    client_secret: str = ""
+    redirect_uri: str = ""
+
+
+class RedisSection(BaseModel):
+    """Redis section。空字符串视为保持现状。"""
+    password: str = ""
+
+
 class AdminConfigPayload(BaseModel):
     """统一入口：所有 section 合并在一个 payload 中。
 
@@ -265,6 +302,8 @@ class AdminConfigPayload(BaseModel):
     keys: Optional[KeysSection] = None
     models: Optional[ModelsSection] = None
     storage: Optional[StorageSection] = None
+    oauth: Optional[OauthSection] = None
+    redis: Optional[RedisSection] = None
     search_engine: Optional[str] = None
 
 
@@ -310,6 +349,10 @@ async def update_config(
             updates["STORAGE_MODE"] = payload.storage.storage_mode.strip()
         if payload.storage.local_storage_root:
             updates["LOCAL_STORAGE_ROOT"] = payload.storage.local_storage_root.strip()
+        if payload.storage.storage_prefix:
+            pfx = payload.storage.storage_prefix.strip()
+            updates["STORAGE_PREFIX"] = pfx
+            updates["STORAGE_PREFIX"] = pfx  # 同步
         if payload.storage.vector_backend:
             updates["VECTOR_STORAGE_BACKEND"] = payload.storage.vector_backend.strip().lower()
         if payload.storage.tencent_cos_secret_id and payload.storage.tencent_cos_secret_id.strip():
@@ -327,6 +370,34 @@ async def update_config(
             payload.storage.tencent_cos_bucket,
         ]):
             updated_sections.append("storage")
+
+    if payload.oauth is not None:
+        if payload.oauth.provider_name and payload.oauth.provider_name.strip():
+            updates["OAUTH_PROVIDER_NAME"] = payload.oauth.provider_name.strip()
+        if payload.oauth.provider_url and payload.oauth.provider_url.strip():
+            updates["OAUTH_PROVIDER_URL"] = payload.oauth.provider_url.strip()
+        if payload.oauth.client_id and payload.oauth.client_id.strip():
+            updates["OAUTH_CLIENT_ID"] = payload.oauth.client_id.strip()
+        # client_secret 留空 = 保持现状，仅当用户填了新值才更新
+        if payload.oauth.client_secret and payload.oauth.client_secret.strip():
+            updates["OAUTH_CLIENT_SECRET"] = payload.oauth.client_secret.strip()
+        if payload.oauth.redirect_uri and payload.oauth.redirect_uri.strip():
+            updates["OAUTH_REDIRECT_URI"] = payload.oauth.redirect_uri.strip()
+        if any([
+            payload.oauth.provider_name,
+            payload.oauth.provider_url,
+            payload.oauth.client_id,
+            payload.oauth.client_secret,
+            payload.oauth.redirect_uri,
+        ]):
+            updated_sections.append("oauth")
+
+    if payload.redis is not None:
+        # password 留空 = 保持现状
+        if payload.redis.password and payload.redis.password.strip():
+            updates["REDIS_PASSWORD"] = payload.redis.password.strip()
+        if payload.redis.password:
+            updated_sections.append("redis")
 
     # 搜索后端（顶层字段）
     if payload.search_engine is not None and payload.search_engine.strip():

@@ -88,7 +88,7 @@ class VFSMediaService:
     def _cos_key(self, agent_hash: str, relative_path: str) -> str:
         """构建存储 key（COS / LocalStorage 通用，统一保留 prefix）"""
         normalized = relative_path.lstrip("/")
-        return f"{settings.TENCENT_COS_PREFIX}agents/{agent_hash}/{normalized}"
+        return f"{settings.STORAGE_PREFIX}agents/{agent_hash}/{normalized}"
 
     def is_protected_path(self, path: str) -> bool:
         """去重目录标记为只读，Agent 工具不可操作"""

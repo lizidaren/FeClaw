@@ -119,7 +119,7 @@ class TestInitializeAgent:
                 svc._storage = MagicMock()
                 with patch("services.agent_init_service.settings") as mock_settings:
                     mock_settings.MAIN_TEXT_MODEL = "deepseek-v4-flash"
-                    mock_settings.TENCENT_COS_PREFIX = "feclaw/"
+                    mock_settings.STORAGE_PREFIX = "feclaw/"
                     with patch("services.vector_search_service.VectorSearchService") as mock_vs:
                         mock_vs.return_value.ensure_index.return_value = None
 
@@ -145,7 +145,7 @@ class TestInitializeAgent:
                 svc._storage = MagicMock()
                 with patch("services.agent_init_service.settings") as mock_settings:
                     mock_settings.MAIN_TEXT_MODEL = "deepseek-v4-flash"
-                    mock_settings.TENCENT_COS_PREFIX = "feclaw/"
+                    mock_settings.STORAGE_PREFIX = "feclaw/"
                     with patch("services.vector_search_service.VectorSearchService") as mock_vs:
                         mock_vs.return_value.ensure_index.return_value = None
 

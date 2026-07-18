@@ -87,7 +87,7 @@ async def upload_file(
     # 优先使用 COS（auto 模式下 create_file_storage 已自动选择）
     storage = create_file_storage(mode="auto")
 
-    cos_prefix = settings.TENCENT_COS_PREFIX or "feclaw/"
+    cos_prefix = settings.STORAGE_PREFIX or "feclaw/"
     if not cos_prefix.endswith("/"):
         cos_prefix = cos_prefix + "/"
     cos_key = f"{cos_prefix}uploads/{user_id}/{object_name}"

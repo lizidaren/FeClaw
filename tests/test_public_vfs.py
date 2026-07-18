@@ -65,10 +65,10 @@ class TestPublicVFSMock(unittest.TestCase):
         from services.virtual_filesystem import VirtualFileSystem
         
         # 直接测试静态路径逻辑
-        # _get_public_base_path 返回 f"{settings.TENCENT_COS_PREFIX}public/"
+        # _get_public_base_path 返回 f"{settings.STORAGE_PREFIX}public/"
         # 所以我们测试路径拼接逻辑
         with patch('services.virtual_filesystem.settings') as mock_settings:
-            mock_settings.TENCENT_COS_PREFIX = "feclaw/"
+            mock_settings.STORAGE_PREFIX = "feclaw/"
             expected = "feclaw/public/"
             # 验证路径格式正确
             self.assertTrue(expected.endswith("public/"))

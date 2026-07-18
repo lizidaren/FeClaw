@@ -118,7 +118,7 @@ async def save_original_to_cos(text, ref_id):
         from qcloud_cos import CosConfig, CosS3Client
         config = CosConfig(Region=settings.TENCENT_COS_REGION, SecretId=settings.TENCENT_COS_SECRET_ID, SecretKey=settings.TENCENT_COS_SECRET_KEY)
         cli = CosS3Client(config)
-        cos_key = (settings.TENCENT_COS_PREFIX or '') + f'textbook_originals/{ref_id}.txt'
+        cos_key = (settings.STORAGE_PREFIX or '') + f'textbook_originals/{ref_id}.txt'
         cli.put_object(Bucket=settings.TENCENT_COS_BUCKET, Key=cos_key, Body=text.encode('utf-8'))
         return cos_key
     except Exception as e:

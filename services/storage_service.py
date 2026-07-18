@@ -220,7 +220,7 @@ class CosStorage(FileStorage):
         """
         ext = filename.split('.')[-1] if '.' in filename else 'jpg'
         unique_name = f"{uuid.uuid4()}.{ext}"
-        return f"{settings.TENCENT_COS_PREFIX}user_{user_id}/original/{unique_name}"
+        return f"{settings.STORAGE_PREFIX}user_{user_id}/original/{unique_name}"
 
     def generate_cleaned_file_key(self, user_id: int, file_sha1: str) -> str:
         """
@@ -229,7 +229,7 @@ class CosStorage(FileStorage):
         格式: {prefix}user_{user_id}/cleaned/cleaned_{sha1}.jpg
         示例: firstentrance/mistakes/user_1/cleaned/cleaned_a1b2c3d4e5f6...jpg
         """
-        return f"{settings.TENCENT_COS_PREFIX}user_{user_id}/cleaned/cleaned_{file_sha1}.jpg"
+        return f"{settings.STORAGE_PREFIX}user_{user_id}/cleaned/cleaned_{file_sha1}.jpg"
 
     def generate_file_key(self, user_id: int, filename: str) -> str:
         """
@@ -239,7 +239,7 @@ class CosStorage(FileStorage):
         """
         ext = filename.split('.')[-1] if '.' in filename else 'jpg'
         unique_name = f"{uuid.uuid4()}.{ext}"
-        return f"{settings.TENCENT_COS_PREFIX}user_{user_id}/{unique_name}"
+        return f"{settings.STORAGE_PREFIX}user_{user_id}/{unique_name}"
 
     def get_user_id_from_key(self, key: str) -> Optional[int]:
         """
@@ -408,7 +408,7 @@ class CosStorage(FileStorage):
         """
         from qcloud_cos.cos_exception import CosClientError, CosServiceError
 
-        public_key = f"{settings.TENCENT_COS_PREFIX}public/{rel_path.lstrip('/')}"
+        public_key = f"{settings.STORAGE_PREFIX}public/{rel_path.lstrip('/')}"
 
         # 检查文件是否已存在
         try:

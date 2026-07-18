@@ -50,7 +50,7 @@ from qcloud_cos import CosConfig, CosS3Client
 cos_config = CosConfig(Region=settings.TENCENT_COS_REGION, SecretId=settings.TENCENT_COS_SECRET_ID, SecretKey=settings.TENCENT_COS_SECRET_KEY)
 cos_client = CosS3Client(cos_config)
 COS_BUCKET = settings.TENCENT_COS_BUCKET
-COS_PREFIX = settings.TENCENT_COS_PREFIX or ''
+COS_PREFIX = settings.STORAGE_PREFIX or ''
 COS_DOMAIN = 'https://firstentrance-gz01-1257148458.cos.ap-guangzhou.myqcloud.com'
 
 # API keys

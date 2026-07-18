@@ -720,7 +720,7 @@ class AgentInitService:
 
     def _get_vfs_base_path(self, user_id: int, agent_hash: str) -> str:
         """获取 Agent VFS base path"""
-        return f"{settings.TENCENT_COS_PREFIX}agents/{agent_hash}/"
+        return f"{settings.STORAGE_PREFIX}agents/{agent_hash}/"
 
 
 # 全局实例

@@ -165,7 +165,7 @@ class VirtualFileSystem:
         # 根据 agent_id 设置 base_path
         if self.agent_id:
             # Agent 绑定模式：路径格式为 agents/{agent_id}/
-            self.base_path = f"{settings.TENCENT_COS_PREFIX}agents/{self.agent_id}/"
+            self.base_path = f"{settings.STORAGE_PREFIX}agents/{self.agent_id}/"
         else:
             # 用户模式：路径格式为 user_workspaces/{user_id}/
             logger.warning("[DEPRECATED] VirtualFileSystem initialized without agent_id, using user_workspaces/ path. This path is deprecated, use agents/{hash}/ instead.")
@@ -252,7 +252,7 @@ class VirtualFileSystem:
             # 去掉前导 /
             path = path.lstrip("/")
             # 处理 /public/ 公共数据空间（只读共享目录）
-            # 返回实际 COS key: {TENCENT_COS_PREFIX}public/{relpath}
+            # 返回实际 COS key: {STORAGE_PREFIX}public/{relpath}
             if path == "public" or path.startswith("public/"):
                 subpath = normalized[7:] if normalized.startswith("public/") else ""
                 # 安全检查：防止 .. 路径遍历（与下方统一逻辑保持一致）
@@ -836,7 +836,7 @@ class VirtualFileSystem:
 
         # 处理公共数据空间路径
         if self._is_public_path(cos_key):
-            # cos_key = {TENCENT_COS_PREFIX}public/{relpath}
+            # cos_key = {STORAGE_PREFIX}public/{relpath}
             public_base = self._get_public_base_path()
             public_rel = cos_key[len(public_base):]
             return self._read_public_file(public_rel)
@@ -1026,7 +1026,7 @@ class VirtualFileSystem:
 
     def _get_public_base_path(self) -> str:
         """获取公共数据空间的 COS 前缀"""
-        return f"{settings.TENCENT_COS_PREFIX}public/"
+        return f"{settings.STORAGE_PREFIX}public/"
 
     def _is_public_path(self, cos_key: str) -> bool:
         """检查 cos_key 是否属于 /public/ 公共空间"""

@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 # COS 文件桶路径前缀映射
 SOURCE_PREFIX = {
-    "public": "feclaw/public/kb",      # 公共知识库（TENCENT_COS_PREFIX 已在路径中）
+    "public": "feclaw/public/kb",      # 公共知识库（STORAGE_PREFIX 已在路径中）
     "agent": "feclaw/kb/agent",  # Agent 私有知识库（预留）
     "shared": "feclaw/kb/shared",  # 共享知识库（预留）
 }

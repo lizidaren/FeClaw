@@ -151,9 +151,9 @@ class VFSImageDeduplicationService:
         normalized_path = vfs_path.lstrip("/")
 
         if self.agent_hash:
-            cos_key = f"{settings.TENCENT_COS_PREFIX}agents/{self.agent_hash}/{normalized_path}"
+            cos_key = f"{settings.STORAGE_PREFIX}agents/{self.agent_hash}/{normalized_path}"
         else:
-            cos_key = f"{settings.TENCENT_COS_PREFIX}{self.user_id}/{normalized_path}"
+            cos_key = f"{settings.STORAGE_PREFIX}{self.user_id}/{normalized_path}"
 
         return cos_key
 

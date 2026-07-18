@@ -794,7 +794,7 @@ async def setup_message_handler():
                                 from services.storage_service import StorageService
                                 _storage = StorageService()
                                 _rel = image_url.lstrip("/")
-                                _cos_key = f"{settings.TENCENT_COS_PREFIX}agents/{binding.agent_hash}/workspace/{_rel}"
+                                _cos_key = f"{settings.STORAGE_PREFIX}agents/{binding.agent_hash}/workspace/{_rel}"
                                 _img_data = _storage.get_file_content(_cos_key)
                                 if _img_data:
                                     _sr_on = False

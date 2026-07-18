@@ -332,9 +332,9 @@ async def save_agent_config(
     from services.file_storage import create_file_storage
     from config import settings
     storage = create_file_storage()
-    # COS 存储时有 feclaw/ 前缀用于路径隔离，本地存储无此前缀
-    _cos_prefix = "feclaw/" if getattr(settings, "TENCENT_COS_SECRET_ID", None) else ""
-    prefix = f"{_cos_prefix}agents/{agent_hash}/workspace/agent/"
+    # STORAGE_PREFIX = 实例隔离前缀（默认 feclaw/），本地/COS 均生效
+    _vfs_prefix = getattr(settings, "STORAGE_PREFIX", "feclaw/") or "feclaw/"
+    prefix = f"{_vfs_prefix.rstrip('/')}/agents/{agent_hash}/workspace/agent/"
     try:
         storage.put_object(f"{prefix}soul.md", soul.encode("utf-8"))
         storage.put_object(f"{prefix}identity.md", identity.encode("utf-8"))

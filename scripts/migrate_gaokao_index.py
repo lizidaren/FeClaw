@@ -292,7 +292,7 @@ def list_textbook_s3_keys() -> list:
     client = _get_cos_file_client()
     all_keys = []
     marker = ""
-    cos_prefix = (settings.TENCENT_COS_PREFIX or "")
+    cos_prefix = (settings.STORAGE_PREFIX or "")
     full_prefix = cos_prefix + TEXTBOOK_S3_PREFIX
     strip_prefix = cos_prefix + "public/kb/"
 
@@ -351,7 +351,7 @@ async def migrate_textbooks(batch_size: int = 50, dry_run: bool = False):
         vectors = get_vectors_batch(vec_client, batch_keys)
         if not vectors:
             logger.warning("Batch %d: no vectors returned, trying fallback", batch_num)
-            cos_prefix = settings.TENCENT_COS_PREFIX or ""
+            cos_prefix = settings.STORAGE_PREFIX or ""
             migrated = await _fallback_migrate_batch(batch_keys, TEXTBOOK_TARGET_INDEX, "textbook", cos_prefix=cos_prefix)
             total_migrated += migrated
             continue

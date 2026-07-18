@@ -97,7 +97,8 @@ class Settings(BaseSettings):
     TENCENT_COS_REGION: str = "ap-guangzhou"
     TENCENT_COS_BUCKET: str = ""
     TENCENT_COS_APPID: str = ""
-    TENCENT_COS_PREFIX: str = "feclaw/"
+    STORAGE_PREFIX: str = "feclaw/"  # 存储前缀，隔离多实例（本地/COS 均生效）
+    STORAGE_PREFIX: str = "feclaw/"  # 向下兼容，已由 STORAGE_PREFIX 取代
 
     # COS 向量存储桶自动扩容配置
     VECTOR_BUCKET_PREFIX: str = "feclaw-vec"    # 新建向量桶的前缀（不含-APPID）

@@ -50,8 +50,8 @@ def _vfs_path_to_cos_key(agent_hash: str, vfs_path: str) -> str:
     """
     normalized = vfs_path.lstrip("/")
     if normalized:
-        return f"{settings.TENCENT_COS_PREFIX}agents/{agent_hash}/{normalized}"
-    return f"{settings.TENCENT_COS_PREFIX}agents/{agent_hash}/"
+        return f"{settings.STORAGE_PREFIX}agents/{agent_hash}/{normalized}"
+    return f"{settings.STORAGE_PREFIX}agents/{agent_hash}/"
 
 
 class VFSEntry(BaseModel):

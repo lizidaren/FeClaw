@@ -769,6 +769,52 @@
                 <div class="status-msg" id="msg-keys"></div>
             </div>
 
+            <!-- OAuth / SSO -->
+            <div class="section-card">
+                <h3>OAuth / SSO</h3>
+                <p class="section-desc">配置 OIDC Provider 后可启用第三方登录（默认使用本地注册/登录）。修改后建议重启服务。</p>
+                <div class="form-row">
+                    <label>
+                        Provider 显示名
+                        <span class="hint">登录页面展示的按钮文字</span>
+                    </label>
+                    <input type="text" id="oauth-provider-name" placeholder="OAuth/OIDC 认证服务">
+                </div>
+                <div class="form-row">
+                    <label>
+                        Provider URL
+                        <span class="hint">OIDC Issuer，如 https://sso.example.com</span>
+                    </label>
+                    <input type="text" id="oauth-provider-url" placeholder="https://sso.example.com">
+                </div>
+                <div class="form-row">
+                    <label>Client ID</label>
+                    <input type="text" id="oauth-client-id" placeholder="feclaw">
+                </div>
+                <div class="form-row">
+                    <label>
+                        Client Secret
+                        <span class="hint">空值表示保持现状；已设置仅显示是否已设</span>
+                    </label>
+                    <input type="password" id="oauth-client-secret" placeholder="保留现状请留空">
+                </div>
+                <div class="form-row">
+                    <label>
+                        Redirect URI
+                        <span class="hint">形如 https://feclaw.example.com/api/oauth/callback</span>
+                    </label>
+                    <input type="text" id="oauth-redirect-uri" placeholder="https://feclaw.example.com/api/oauth/callback">
+                </div>
+                <div class="form-row">
+                    <label>状态</label>
+                    <span class="key-display" id="oauth-status">未配置</span>
+                </div>
+                <div class="section-actions">
+                    <button class="btn btn-primary" id="btn-save-oauth">保存 OAuth 配置</button>
+                </div>
+                <div class="status-msg" id="msg-oauth"></div>
+            </div>
+
             <!-- 模型选择 -->
             <div class="section-card">
                 <h3>模型选择</h3>
@@ -818,6 +864,13 @@
                     <input type="text" id="storage-local-root" placeholder="./feclaw-storage">
                 </div>
                 <div class="form-row">
+                    <label>
+                        存储前缀 (STORAGE_PREFIX)
+                        <span class="hint">隔离多实例数据，路径示例：<code id="prefix-example" style="color:#667eea">feclaw/agents/xxx/file.md</code></span>
+                    </label>
+                    <input type="text" id="storage-prefix" placeholder="feclaw/">
+                </div>
+                <div class="form-row">
                     <label>向量后端</label>
                     <select id="vector-backend">
                         <option value="cos">COS Vectors (推荐)</option>
@@ -845,6 +898,27 @@
                     <button class="btn btn-primary" id="btn-save-storage">保存存储配置</button>
                 </div>
                 <div class="status-msg" id="msg-storage"></div>
+            </div>
+
+            <!-- Redis 缓存 -->
+            <div class="section-card">
+                <h3>Redis 缓存</h3>
+                <p class="section-desc">可选。配置后用于缓存与会话持久化。修改后建议重启服务。</p>
+                <div class="form-row">
+                    <label>
+                        Password
+                        <span class="hint">空值表示保持现状；已设置仅显示是否已设</span>
+                    </label>
+                    <input type="password" id="redis-password" placeholder="保留现状请留空">
+                </div>
+                <div class="form-row">
+                    <label>状态</label>
+                    <span class="key-display" id="redis-status">未配置</span>
+                </div>
+                <div class="section-actions">
+                    <button class="btn btn-primary" id="btn-save-redis">保存 Redis 配置</button>
+                </div>
+                <div class="status-msg" id="msg-redis"></div>
             </div>
 
             <!-- 数据库 (只读) -->
@@ -932,6 +1006,10 @@
         // ─── 加载配置 ───
         let providersData = [];
 
+        function updatePrefixExample(val) {
+            var el = document.getElementById('prefix-example');
+            if (el) el.textContent = (val || 'feclaw/') + 'agents/xxx/file.md';
+        }
         async function loadConfig() {
             const data = await api('/admin/config');
             renderConfig(data);
@@ -957,11 +1035,36 @@
             document.getElementById('vector-backend').value = data.storage.vector_backend;
             document.getElementById('cos-bucket').value = data.storage.cos_bucket;
 
+            // Redis
+            const redisStatus = document.getElementById('redis-status');
+            if (data.redis && data.redis.configured) {
+                redisStatus.textContent = '已配置';
+                redisStatus.className = 'key-display set';
+            } else {
+                redisStatus.textContent = '未配置';
+                redisStatus.className = 'key-display empty';
+            }
+
             // 搜索
             document.getElementById('search-engine').value = data.search_engine || 'qwen';
 
             // Providers
             renderProviders(data.providers);
+
+            // OAuth / SSO
+            const oauth = data.oauth || {};
+            document.getElementById('oauth-provider-name').value = oauth.provider_name || '';
+            document.getElementById('oauth-provider-url').value = oauth.provider_url || '';
+            document.getElementById('oauth-client-id').value = oauth.client_id || '';
+            document.getElementById('oauth-redirect-uri').value = oauth.redirect_uri || '';
+            const oauthStatus = document.getElementById('oauth-status');
+            if (oauth.configured) {
+                oauthStatus.textContent = '已配置 (secret ' + (oauth.secret_set ? '已设' : '未设') + ')';
+                oauthStatus.className = 'key-display set';
+            } else {
+                oauthStatus.textContent = '未配置';
+                oauthStatus.className = 'key-display empty';
+            }
 
             // 模型下拉框
             renderModelDropdowns(data.providers, data.models);
@@ -1210,6 +1313,34 @@
             }
         });
 
+        // ─── 保存：OAuth / SSO ───
+        document.getElementById('btn-save-oauth').addEventListener('click', async () => {
+            const btn = document.getElementById('btn-save-oauth');
+            btn.disabled = true; btn.textContent = '保存中…';
+            try {
+                await api('/admin/config', {
+                    method: 'POST',
+                    body: JSON.stringify({
+                        oauth: {
+                            provider_name: document.getElementById('oauth-provider-name').value.trim(),
+                            provider_url: document.getElementById('oauth-provider-url').value.trim(),
+                            client_id: document.getElementById('oauth-client-id').value.trim(),
+                            client_secret: document.getElementById('oauth-client-secret').value,
+                            redirect_uri: document.getElementById('oauth-redirect-uri').value.trim(),
+                        }
+                    })
+                });
+                showMsg('msg-oauth', true, '✓ OAuth 配置已保存（需重启后端生效）');
+                // 清空 secret 输入框（避免回显）
+                document.getElementById('oauth-client-secret').value = '';
+                setTimeout(loadConfig, 500);
+            } catch (e) {
+                showMsg('msg-oauth', false, '✗ ' + e.message);
+            } finally {
+                btn.disabled = false; btn.textContent = '保存 OAuth 配置';
+            }
+        });
+
         // ─── 保存：模型 ───
         document.getElementById('btn-save-models').addEventListener('click', async () => {
             const btn = document.getElementById('btn-save-models');
@@ -1257,6 +1388,30 @@
                 showMsg('msg-storage', false, '✗ ' + e.message);
             } finally {
                 btn.disabled = false; btn.textContent = '保存存储配置';
+            }
+        });
+
+        // ─── 保存：Redis ───
+        document.getElementById('btn-save-redis').addEventListener('click', async () => {
+            const btn = document.getElementById('btn-save-redis');
+            btn.disabled = true; btn.textContent = '保存中…';
+            try {
+                await api('/admin/config', {
+                    method: 'POST',
+                    body: JSON.stringify({
+                        redis: {
+                            password: document.getElementById('redis-password').value,
+                        }
+                    })
+                });
+                showMsg('msg-redis', true, '✓ Redis 配置已保存（需重启后端生效）');
+                // 清空 password 输入框（避免回显）
+                document.getElementById('redis-password').value = '';
+                setTimeout(loadConfig, 500);
+            } catch (e) {
+                showMsg('msg-redis', false, '✗ ' + e.message);
+            } finally {
+                btn.disabled = false; btn.textContent = '保存 Redis 配置';
             }
         });
 

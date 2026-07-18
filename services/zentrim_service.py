@@ -565,7 +565,7 @@ class ZentrimService:
             if ext_from_name and len(ext_from_name) <= 5:
                 ext = ext_from_name
 
-        key = f"{settings.TENCENT_COS_PREFIX}zentrim/user_{user_id}/attachments/{entry_id}_{file_type}.{ext}"
+        key = f"{settings.STORAGE_PREFIX}zentrim/user_{user_id}/attachments/{entry_id}_{file_type}.{ext}"
 
         storage = self._storage()
         storage.put_object(key, file_bytes)

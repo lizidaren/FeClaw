@@ -34,7 +34,7 @@ class PublicFileManager:
     
     def __init__(self):
         self.storage = StorageService()
-        self.public_prefix = f"{settings.TENCENT_COS_PREFIX}public/"
+        self.public_prefix = f"{settings.STORAGE_PREFIX}public/"
     
     def list_files(self, prefix: str = "") -> list:
         """

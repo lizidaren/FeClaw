@@ -432,7 +432,7 @@ class AIToolsMixin(AgentToolsServiceBase):
 
         if image_path and not image_base64:
             normalized = image_path if image_path.startswith("/") else f"/{image_path}"
-            cos_key = f"{settings.TENCENT_COS_PREFIX}agents/{self.agent_hash}{normalized}"
+            cos_key = f"{settings.STORAGE_PREFIX}agents/{self.agent_hash}{normalized}"
             try:
                 from services.storage_service import StorageService
                 storage = StorageService()

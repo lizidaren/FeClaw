@@ -29,7 +29,7 @@ def get_cos_client():
         from config import settings
         from qcloud_cos import CosConfig, CosS3Client
         config = CosConfig(Region=settings.TENCENT_COS_REGION, SecretId=settings.TENCENT_COS_SECRET_ID, SecretKey=settings.TENCENT_COS_SECRET_KEY)
-        return CosS3Client(config), settings.TENCENT_COS_BUCKET, (settings.TENCENT_COS_PREFIX or '') + 'textbook_originals/'
+        return CosS3Client(config), settings.TENCENT_COS_BUCKET, (settings.STORAGE_PREFIX or '') + 'textbook_originals/'
     except Exception as e:
         print(f'WARN: Cannot init COS: {e}')
         return None, None, None

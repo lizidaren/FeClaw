@@ -273,7 +273,7 @@ class AgentCleanupService:
             return results
 
         # VFS 基础路径: feclaw/agents/{agent_hash}/
-        vfs_prefix = f"{settings.TENCENT_COS_PREFIX}agents/{agent_hash}/"
+        vfs_prefix = f"{settings.STORAGE_PREFIX}agents/{agent_hash}/"
 
         try:
             # 列出所有对象
