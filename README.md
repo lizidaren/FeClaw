@@ -277,7 +277,7 @@ python -m uvicorn main:app --host 0.0.0.0 --port 8080 --reload
 
 | 依赖 | 版本 | 说明 |
 |:----|:-----|:------|
-| Python | 3.12+ | 3.10 可能因 type hint 语法报错 |
+| Python | 3.10+ | 3.12 推荐，3.10-3.11 可能缺少部分类型语法 |
 | MySQL | 8.0+ | 硬依赖（不支持 SQLite） |
 | pip | (最新) | Ubuntu 24.04 需 `apt install python3-pip python3-venv` |
 | Docker | (可选) | 用于快速启动 MySQL 开发实例 |

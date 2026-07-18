@@ -26,7 +26,7 @@ certifi>=2024.0.0           # SSL 证书
 psutil>=5.9.0               # 系统指标监控
 python-docx>=1.0.0          # .docx 文档解析
 openpyxl>=3.0.0             # .xlsx 表格解析
-\nPyJWT>=2.0.0            # JWT 编解码（feclaw_domain.py）
+PyJWT>=2.0.0            # JWT 编解码（feclaw_domain.py）
 
 # ─── 可选依赖（按功能分组，不安装不影响核心启动） ───
 # 文档/媒体解析
@@ -41,6 +41,12 @@ dashscope>=1.14.0           # 阿里云百炼 SDK（CosyVoice TTS）
 cairosvg>=2.7.0             # SVG → PNG 转换
 svglib>=1.5.0               # SVG → 其他格式
 reportlab>=4.0.0            # PDF/图像生成
+
+# SSE 服务端（B1 R 代理 2026-07-18: 群聊 SSE 订阅）
+# sse-starlette 提供 EventSourceResponse + 完整 SSE 协议帧；目前 routers/group.py
+# 优先用 FastAPI 内置 StreamingResponse(text/event-stream) 走最小实现，引入本包
+# 是为后续补全 retry/id 等 SSE 字段预留依赖。
+sse-starlette>=2.0.0        # 群聊 SSE 订阅端点（routers/group.py:GET /api/groups/{id}/stream）
 
 # 浏览器自动化（仅某些高级功能需要）
 playwright>=1.40.0          # 浏览器自动化（需额外 npx playwright install）
