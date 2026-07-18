@@ -47,8 +47,8 @@ class WSRoom:
         ws: WebSocket,
         user_id: int,
         session_id: str,
-        channel: str = "desktop",
         agent_hash: Optional[str] = None,
+        channel: str = "desktop",
     ) -> None:
         await ws.accept()
         key = (user_id, session_id)
@@ -281,6 +281,16 @@ async def client_websocket(
                 message="agent_session_mismatch",
             )
             return
+        if channel in ("web", "mobile") and not (
+            (bound_session.topic or "").startswith(f"[{channel}]")
+        ):
+            await _reject_ws(
+                ws,
+                close_code=4004,
+                code="session_not_found",
+                message="session_channel_mismatch",
+            )
+            return
         agent_hash = bound_session.agent_hash
 
     # 3. agent 归属校验（session 解析或 query 显式提供时校验）
@@ -497,6 +507,7 @@ async def _handle_chat_message(
                         "id": msg_id,
                         "text": full_response,
                         "agent": agent_hash,
+                        "session_id": session_id or "",
                         "timestamp": __import__("datetime").datetime.utcnow().isoformat() + "Z",
                     }
                     await send_to_client(
@@ -510,7 +521,7 @@ async def _handle_chat_message(
                         "type": "chat_event",
                         "id": msg_id,
                         "kind": "done",
-                        "data": {"session_id": data_str} if data_str else {},
+                        "data": {"session_id": session_id or ""},
                         "timestamp": __import__("datetime").datetime.utcnow().isoformat() + "Z",
                     }
                     await send_to_client(
@@ -530,7 +541,12 @@ async def _handle_chat_message(
             "agent": agent_hash,
             "timestamp": __import__("datetime").datetime.utcnow().isoformat() + "Z",
         }
-        await send_to_client(error_reply)
+        await send_to_client(
+            error_reply,
+            user_id=user_id,
+            session_id=session_id,
+            agent_hash=agent_hash,
+        )
 
 
 # 提供给其他模块调用的发送接口

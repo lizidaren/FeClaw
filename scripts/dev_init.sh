@@ -69,6 +69,8 @@ VECTOR_STORAGE_BACKEND=numpy
 STORAGE_MODE=local
 FUSE_ENABLED=false
 ENVEOF
+    # 修复权限（dev_init.sh 可能用 sudo 运行）
+    sudo chown $(whoami) .env 2>/dev/null || true
     echo "✅ .env 已生成（需填入 API Key）"
 else
     echo "✅ .env 已存在"

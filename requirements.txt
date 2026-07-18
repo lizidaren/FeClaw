@@ -26,3 +26,4 @@ certifi>=2024.0.0           # SSL 证书
 psutil>=5.9.0               # 系统指标监控
 python-docx>=1.0.0          # .docx 文档解析
 openpyxl>=3.0.0             # .xlsx 表格解析
+\nPyJWT>=2.0.0            # JWT 编解码（feclaw_domain.py）

@@ -35,8 +35,7 @@ router = APIRouter(tags=["FeClaw Chat"])
 # ========== 请求模型 ==========
 
 # /api/chat/stream 允许的渠道白名单（Gen 2 channel-driven 路由）
-# - `wechat` 由 routers/wechat.py 接管，与 SSE 路由隔离
-# - classic Agent 不强制带 channel，传则走相同白名单
+# - 所有 classic / IM 路径都要求显式 `channel`，`wechat` 由 routers/wechat.py 接管，与 SSE 路由隔离
 ALLOWED_STREAM_CHANNELS = {"web", "mobile"}
 
 
@@ -795,34 +794,23 @@ async def get_sessions(
     )
     if agent_hash:
         q = q.filter(ConversationSession.agent_hash == agent_hash)
+    if before:
+        q = q.filter(ConversationSession.updated_at < before)
     rows = q.order_by(
         ConversationSession.updated_at.desc()
     ).limit(50).all()
 
-    result: List[SessionResponse] = []
-    for s in rows:
-        # 解析 messages 拿首条 user 消息
-        first_message = ""
-        try:
-            msgs = json.loads(s.messages or "[]")
-            for m in msgs:
-                if m.get("role") == "user":
-                    first_message = (m.get("content") or "")[:50]
-                    break
-        except Exception:
-            first_message = ""
-        # topic 字段：保留渠道前缀（"[web]" / "[mobile]"）让前端按原值展示
-        result.append(
-            SessionResponse(
-                session_id=s.session_id,
-                message_count=s.message_count or 0,
-                created_at=s.created_at,
-                updated_at=s.updated_at,
-                topic=s.topic or "[web]",
-                last_message=first_message,
-            )
-        )
-    return result
+    agent_hashes = {row.agent_hash for row in rows if row.agent_hash}
+    agents = (
+        db.query(AgentProfile).filter(
+            AgentProfile.hash.in_(agent_hashes),
+            AgentProfile.user_id == user_id,
+        ).all()
+        if agent_hashes
+        else []
+    )
+    agents_by_hash = {agent.hash: agent for agent in agents}
+    return [serialize_session(row, agents_by_hash.get(row.agent_hash)) for row in rows]
 
 
 @router.get("/api/chat/sessions/{session_id}", response_model=SessionDetailResponse)
@@ -851,27 +839,11 @@ async def get_session_detail(
     if not s:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    # 解析 messages
-    try:
-        messages_raw = json.loads(s.messages or "[]")
-    except Exception:
-        messages_raw = []
-
-    return SessionDetailResponse(
-        session_id=s.session_id,
-        message_count=s.message_count or 0,
-        created_at=s.created_at,
-        updated_at=s.updated_at,
-        topic=s.topic or "[web]",
-        messages=[
-            MessageResponse(
-                role=msg.get("role", "user"),
-                content=msg.get("content", ""),
-                timestamp=msg.get("timestamp"),
-            )
-            for msg in messages_raw
-        ],
-    )
+    agent = db.query(AgentProfile).filter(
+        AgentProfile.hash == s.agent_hash,
+        AgentProfile.user_id == user_id,
+    ).first()
+    return serialize_session_detail(s, agent)
 
 
 @router.delete("/api/chat/sessions/{session_id}")
