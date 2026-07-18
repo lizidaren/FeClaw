@@ -51,5 +51,4 @@ sse-starlette>=2.0.0        # 群聊 SSE 订阅端点（routers/group.py:GET /ap
 # 浏览器自动化（仅某些高级功能需要）
 playwright>=1.40.0          # 浏览器自动化（需额外 npx playwright install）
 
-# 沙箱（可选）
-pyfuse3>=1.4.0              # FUSE 文件系统（需要系统 libfuse3-dev）
+# 沙箱（可选，pyfuse3 在 requirements-fuse.txt）

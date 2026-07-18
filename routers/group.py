@@ -2,18 +2,24 @@
 Group Chat REST API - Phase 4 Engine
 """
 
+import asyncio
+import json
+import logging
+import time
 from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from typing import Optional, List
 from datetime import datetime
 
-from models.database import get_db, AgentProfile
+from models.database import get_db, AgentProfile, SessionLocal
 from models.group import Group, GroupMember, GroupMessage
 from utils.auth import get_current_user_id
 from services.group_service import group_dispatch_service, GroupDispatchService
 from config import settings
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/groups", tags=["Groups"])
 
@@ -362,6 +368,104 @@ async def send_message(
     )
 
     return JSONResponse(content={"status": "ok", "msg_id": msg_id})
+
+
+# ==========================================
+# SSE Stream — B1 (R 代理 2026-07-18)
+# ==========================================
+#
+# 设计目标：解决 classic agent fire-and-forget 异步 dispatch 的回复
+# 前端收不到的问题。前端在 sendGroupMessage 成功后调用本端点，长连
+# 接（≤ 5 min）持续收 agent 回复；断开即自动重连。
+#
+# 协议：
+#   event: message  → data: <json MessageResponse>  (新消息)
+#   event: ping     → data: {}                       (心跳，5s 一次)
+#   event: done     → data: {"last_id": "..."}       (5 min 到时或客户端断)
+#
+# 鉴权：owner 或群成员（其名下 agent 在群内）均可订阅。比 send_message
+# 的 owner-only 更宽松，便于多端订阅同一群。
+
+@router.get("/{group_id}/stream")
+async def stream_group_messages(
+    group_id: str,
+    after: Optional[str] = Query(None, description="仅返严格晚于此 message_id 的新消息；缺省=该群最新 limit 条"),
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+):
+    """SSE 订阅群消息 — fire-and-forget agent 回复也能收到。"""
+    svc = GroupDispatchService()
+    if not svc.is_member_or_owner(db, group_id, user_id):
+        raise HTTPException(status_code=403, detail="not a member of this group")
+
+    max_duration = 300  # 5 min
+    heartbeat_every = 5  # 每 5 次空轮询发一次 ping
+    poll_interval = 1.0
+
+    async def event_generator():
+        # 长轮询要自管 DB session —— Depends 注入的 db 会在响应后关闭。
+        poll_db = SessionLocal()
+        last_id = after or ""
+        start = time.monotonic()
+        idle_count = 0
+        try:
+            while time.monotonic() - start < max_duration:
+                try:
+                    new_messages = svc.get_new_messages_since(
+                        poll_db, group_id, last_id, limit=50
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"[GroupStream] poll error group={group_id} "
+                        f"user={user_id}: {e}"
+                    )
+                    yield f"event: error\ndata: {json.dumps({'message': str(e)}, ensure_ascii=False)}\n\n"
+                    await asyncio.sleep(poll_interval)
+                    continue
+
+                if new_messages:
+                    for msg in new_messages:
+                        payload = {
+                            "id": msg.id,
+                            "sender_type": msg.sender_type,
+                            "sender_hash": msg.sender_hash,
+                            "content": msg.content or "",
+                            "message_type": msg.message_type,
+                            "attachments": msg.attachments,
+                            "mentions": msg.mentions or [],
+                            "round": msg.round,
+                            "created_at": int(msg.created_at.timestamp()),
+                        }
+                        yield (
+                            f"event: message\n"
+                            f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                        )
+                        last_id = msg.id
+                    idle_count = 0
+                else:
+                    idle_count += 1
+                    if idle_count >= heartbeat_every:
+                        yield f"event: ping\ndata: {json.dumps({})}\n\n"
+                        idle_count = 0
+
+                await asyncio.sleep(poll_interval)
+
+            yield f"event: done\ndata: {json.dumps({'last_id': last_id}, ensure_ascii=False)}\n\n"
+        finally:
+            try:
+                poll_db.close()
+            except Exception:
+                pass
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 # ==========================================

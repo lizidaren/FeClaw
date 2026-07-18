@@ -1114,6 +1114,80 @@ class GroupDispatchService:
             .all()
         )
 
+    def get_new_messages_since(
+        self,
+        db: Session,
+        group_id: str,
+        after_message_id: Optional[str] = None,
+        limit: int = 50,
+    ) -> List[GroupMessage]:
+        """
+        B1 (R 代理): 获取严格晚于 `after_message_id` 的群消息（按时间正序）。
+
+        UUID 字符串不保证字典序=时间序，所以这里先查 reference 消息的
+        created_at，再用 (created_at > ref) || (== & id > ref) 过滤，
+        最后按 (created_at asc, id asc) 排序。同毫秒批次也能稳定排序。
+
+        若 `after_message_id` 为空或未找到：返回该群最近的 limit 条。
+        """
+        query = db.query(GroupMessage).filter(GroupMessage.group_id == group_id)
+        if after_message_id:
+            ref = (
+                db.query(GroupMessage)
+                .filter(
+                    GroupMessage.id == after_message_id,
+                    GroupMessage.group_id == group_id,
+                )
+                .first()
+            )
+            if ref is not None:
+                query = query.filter(
+                    (GroupMessage.created_at > ref.created_at)
+                    | (
+                        (GroupMessage.created_at == ref.created_at)
+                        & (GroupMessage.id > after_message_id)
+                    )
+                )
+        return (
+            query.order_by(GroupMessage.created_at.asc(), GroupMessage.id.asc())
+            .limit(limit)
+            .all()
+        )
+
+    def is_member_or_owner(
+        self,
+        db: Session,
+        group_id: str,
+        user_id: int,
+    ) -> bool:
+        """
+        B1 (R 代理): 判定 user 是不是群的 owner，或拥有群内某个 agent 成员。
+
+        与现有 `_get_group_or_404` 的 owner-only 校验不同：SSE 订阅允许
+        群成员（通过其名下 agent）也接入，便于多端订阅同一群。
+        """
+        group = (
+            db.query(Group)
+            .filter(Group.id == group_id, Group.deleted_at.is_(None))
+            .first()
+        )
+        if not group:
+            return False
+        if group.owner_user_id == user_id:
+            return True
+        # 拥有群内任一 agent 成员 = 群成员
+        has_member = (
+            db.query(GroupMember)
+            .join(AgentProfile, AgentProfile.hash == GroupMember.agent_hash)
+            .filter(
+                GroupMember.group_id == group_id,
+                GroupMember.agent_hash != "",
+                AgentProfile.user_id == user_id,
+            )
+            .first()
+        )
+        return has_member is not None
+
     def get_group(self, db: Session, group_id: str) -> Optional[Group]:
         return db.query(Group).filter(Group.id == group_id).first()
 

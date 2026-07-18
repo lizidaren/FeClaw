@@ -1636,3 +1636,175 @@ class ChatService:
             except Exception as e:
                 self._user_profile_tool_calls_since = 0
                 logger.error("[ChatService] User profile extraction error: %s", e, exc_info=True)
+
+    # ========== 会话消息分页 API（P1-C-4 私聊消息分页） ==========
+    #
+    # 历史：`load_recent_history`（原 cap 200，按时间升序拉所有历史）是早期
+    # 给 AI context 用的内部分页接口，对外暴露的 `GET /api/chat/sessions/{id}`
+    # 端点则是一次性 JSON 反序列化所有 messages。
+    #
+    # 问题（fix P1-C-4）：
+    # - 会话长达数千条时，一次性返 JSON 体积大，移动端 hydrate 慢、内存压力高
+    # - 前端应改为"按需 cursor 分页"——首屏拉最新 N 条 + 滚动到底再拉更早
+    # - 这里新增 `get_messages_paginated`，前端新增 GET 端点；
+    #   `load_recent_history`（若未来再有人用）保持原行为，仅加 deprecation 注释。
+    #
+    # 语义（与 routers/group.py:317-333 对齐）：
+    # - `before` 缺：返最新 `limit` 条（newest-first 后转 oldest-first 返回）
+    # - `before` 给：返 `timestamp < before` 中最新 `limit` 条
+    # - 始终按时序正序（oldest → newest）返回，方便前端 prepend
+
+    @staticmethod
+    def get_messages_paginated(
+        session_id: str,
+        user_id: int,
+        before: Optional[datetime] = None,
+        limit: int = 30,
+    ) -> List[Dict[str, Any]]:
+        """Cursor 分页拉取私聊会话消息。
+
+        Args:
+            session_id: 会话 ID
+            user_id: 当前用户 ID（鉴权 + 防越权）
+            before: 仅返此时间戳之前的消息（ISO 8601 或 datetime）。
+                    缺省/None 表示从最新向前取。
+            limit: 上限，默认 30，硬上限 200（与群聊保持一致）。
+
+        Returns:
+            消息 dict 列表（oldest → newest），每条含
+            `role/content/timestamp` + 可选 `images/files/tool_calls`。
+            会话不存在或不属于当前用户时返回空列表（不抛错，由 router 决定 404）。
+
+        实现要点：
+        - 数据源：ConversationSession.messages (TEXT/JSON)
+        - 时间戳字段：消息自身 `timestamp` 字段（ISO 8601 字符串）。
+          老消息可能没有 `timestamp`（fallback：视为会话 updated_at）。
+        - 不修改数据库，纯读。
+        """
+        # 1) 防御性 limit 截断 —— 与 group.py Query 行为一致（上限 200）
+        try:
+            safe_limit = int(limit) if limit is not None else 30
+        except (TypeError, ValueError):
+            safe_limit = 30
+        if safe_limit < 1:
+            safe_limit = 1
+        if safe_limit > 200:
+            safe_limit = 200
+
+        # 2) 解析 before —— 支持 datetime / 数字时间戳 / ISO 字符串
+        before_dt: Optional[datetime] = None
+        if before is not None:
+            if isinstance(before, datetime):
+                before_dt = before
+            elif isinstance(before, (int, float)):
+                before_dt = datetime.utcfromtimestamp(float(before))
+            elif isinstance(before, str) and before.strip():
+                try:
+                    # ISO 8601 字符串（带/不带 Z 都尝试）
+                    s = before.strip()
+                    if s.endswith("Z"):
+                        s = s[:-1] + "+00:00"
+                    before_dt = datetime.fromisoformat(s)
+                    # 统一按 UTC-naive 比较（DB 存的是 naive）
+                    if before_dt.tzinfo is not None:
+                        before_dt = before_dt.replace(tzinfo=None)
+                except (TypeError, ValueError):
+                    before_dt = None
+
+        with get_session() as db:
+            from models.database import ConversationSession
+
+            session = (
+                db.query(ConversationSession)
+                .filter(
+                    ConversationSession.session_id == session_id,
+                    ConversationSession.user_id == int(user_id),
+                )
+                .first()
+            )
+            if not session:
+                return []
+
+            # 3) 解析 messages JSON
+            try:
+                parsed = json.loads(session.messages or "[]")
+            except (TypeError, json.JSONDecodeError):
+                parsed = []
+            if not isinstance(parsed, list):
+                parsed = []
+
+            # 4) 过滤 + 排序
+            # 每条消息保留原始结构；过滤时按 timestamp 决定是否在 before 之前
+            def _ts_of(msg: Dict[str, Any]) -> Optional[datetime]:
+                ts = msg.get("timestamp")
+                if not ts:
+                    return None
+                if isinstance(ts, datetime):
+                    return ts.replace(tzinfo=None) if ts.tzinfo else ts
+                if isinstance(ts, (int, float)):
+                    return datetime.utcfromtimestamp(float(ts))
+                if isinstance(ts, str) and ts.strip():
+                    s = ts.strip()
+                    try:
+                        if s.endswith("Z"):
+                            s = s[:-1] + "+00:00"
+                        d = datetime.fromisoformat(s)
+                        return d.replace(tzinfo=None) if d.tzinfo else d
+                    except (TypeError, ValueError):
+                        return None
+                return None
+
+            if before_dt is not None:
+                # 仅保留 timestamp < before_dt 的消息
+                filtered: List[Dict[str, Any]] = []
+                for m in parsed:
+                    if not isinstance(m, dict):
+                        continue
+                    mt = _ts_of(m)
+                    if mt is None:
+                        # 无时间戳：保守起见排除，避免把更老的消息算入"before now"
+                        continue
+                    if mt < before_dt:
+                        filtered.append(m)
+            else:
+                filtered = [m for m in parsed if isinstance(m, dict)]
+
+            # 5) 按时间升序排，截前 limit —— 然后只取最后 limit 条（newest）
+            def _sort_key(m: Dict[str, Any]):
+                t = _ts_of(m)
+                # 无时间戳排到最前（老数据兜底）
+                return (t is None, t or datetime.min)
+
+            filtered.sort(key=_sort_key)
+            page = filtered[-safe_limit:]
+
+            # 6) 时序正序（oldest → newest）返回
+            return page
+
+    @staticmethod
+    def get_recent_history(
+        session_id: str,
+        user_id: int,
+        limit: int = 200,
+    ) -> List[Dict[str, Any]]:
+        """Legacy: 一次性返最近 `limit` 条（按时间升序），仍按原 cap=200 默认。
+
+        Deprecated: P1-C-4 起前端应改用 cursor 端点（`get_messages_paginated`）
+        按需拉取；此方法保留以兼容直接调用方，返回值会通过新端点的"全量"
+        分支兼容旧 detail 接口。
+        """
+        # 保留旧 cap=200 默认值（与原 _load_history:705 一致）
+        try:
+            safe_limit = int(limit) if limit is not None else 200
+        except (TypeError, ValueError):
+            safe_limit = 200
+        if safe_limit < 1:
+            safe_limit = 1
+        if safe_limit > 2000:
+            safe_limit = 2000
+        return ChatService.get_messages_paginated(
+            session_id=session_id,
+            user_id=user_id,
+            before=None,
+            limit=safe_limit,
+        )

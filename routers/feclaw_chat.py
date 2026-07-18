@@ -824,6 +824,9 @@ async def get_session_detail(
 
     支持 Web 和 Mobile 两个渠道的会话。Mobile 渠道的会话不再走
     WebChannelService.get_session 那一套（被 topic 过滤掉了），这里直接查 ORM。
+
+    P1-C-4：前端应改用 cursor 端点 `GET /api/chat/sessions/{id}/messages`
+    按需拉取；本端点仍保留以兼容老客户端（一次性返全量历史）。
     """
     from models.database import AgentProfile, ConversationSession
 
@@ -844,6 +847,41 @@ async def get_session_detail(
         AgentProfile.user_id == user_id,
     ).first()
     return serialize_session_detail(s, agent)
+
+
+# ==========================================
+# 消息分页（P1-C-4 私聊消息分页 + 前端轻量化）
+# ==========================================
+#
+# 行为与 routers/group.py:317-333 (GET /{group_id}/messages) 对齐：
+# - before 缺：返最新 limit 条（newest-first 后转 oldest-first）
+# - before 给：返 timestamp < before 的最新 limit 条
+# - 时序正序（oldest → newest）返回，方便前端 prepend
+# - 鉴权：会话语义上属于 user_id 拥有；不存在或越权返 404
+# - 返 {messages: [...]} 形式，方便扩展 metadata 字段
+#
+# 路由注册位置：本端点放在 `/sessions/{id}/messages`，必须放在
+# `/sessions/{id}` 之后，确保 FastAPI 路由匹配正确（否则会被 detail 端点吞掉）。
+@router.get("/api/chat/sessions/{session_id}/messages")
+async def get_session_messages(
+    session_id: str,
+    before: Optional[str] = Query(
+        None,
+        description="ISO 8601 时间戳；仅返此时间之前的消息（缺省 = 最新）",
+    ),
+    limit: int = Query(30, ge=1, le=200, description="上限 200，默认 30"),
+    user_id: int = Depends(get_current_user_id),
+):
+    """Cursor 分页拉取私聊会话消息。"""
+    from services.chat_service import ChatService
+
+    messages = ChatService.get_messages_paginated(
+        session_id=session_id,
+        user_id=int(user_id),
+        before=before,
+        limit=limit,
+    )
+    return {"messages": messages}
 
 
 @router.delete("/api/chat/sessions/{session_id}")
