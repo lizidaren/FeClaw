@@ -18,7 +18,7 @@ import logging
 from typing import Optional
 from config import settings
 from fastapi import APIRouter, Request, Depends, HTTPException, Query, UploadFile, File
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 from sqlalchemy import func
