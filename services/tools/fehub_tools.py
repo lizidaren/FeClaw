@@ -93,7 +93,7 @@ class FeHubToolsMixin(AgentToolsServiceBase):
         fe publish <tag> [--public]
 
         将当前工作区发布为指定版本的快照。
-        - 自动生成访问地址（https://{agent_hash}.feclaw.lizidaren.cn/apps/{agent_hash}-{tag}/）
+        - 自动生成访问地址（<部署域名>/apps/{agent_hash}-{tag}/）
         - 如果指定 --public，则发布为公开应用
         - 发布后可在 Agent 个人主页看到
         """

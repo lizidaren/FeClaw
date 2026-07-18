@@ -218,7 +218,7 @@ def create_share_link(
         try:
             # 生成友好短链 slug
             slug = get_unique_slug(db)
-            # 子域名 URL：{agent_hash}.feclaw.lizidaren.cn/s/{slug}
+            # 子域名 URL（取决于 FECLAW_PUBLIC_URL）
             _sub = f"{agent_hash}." if agent_hash else ""
             url = f"https://{_sub}{settings.FECLAW_PUBLIC_URL}/s/{slug}"
 

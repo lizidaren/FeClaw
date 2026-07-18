@@ -232,7 +232,7 @@ async def upload_agent_avatar(
     storage.put_object(cos_key, contents)
 
     # 4. Return VFS view URL
-    avatar_url = f"https://feclaw.lizidaren.cn/api/vfs/view?path={cos_key}"
+    avatar_url = ""  # avatar URL 需在部署时配置
 
     # 5. Update agent profile
     agent.avatar_url = avatar_url

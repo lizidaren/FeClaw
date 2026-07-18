@@ -74,7 +74,7 @@ def _build_allowed_suffixes():
     domain = settings.FECLAW_PUBLIC_URL
     if domain:
         return [f".{domain}", domain]
-    return [f".feclaw.lizidaren.cn", "feclaw.lizidaren.cn", ".firstentrance.net", "firstentrance.net"]
+    return []  # 无 PUBLIC_URL 时不进行子域名匹配
 
 _ALLOWED_DOMAIN_SUFFIXES = _build_allowed_suffixes()
 

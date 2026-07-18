@@ -37,7 +37,7 @@ def _is_safe_redirect(url: str) -> str:
     parsed = urlparse(url)
     if not parsed.netloc:
         return url
-    allowed_hosts = {'localhost', '127.0.0.1', '::1', 'feclaw.chat', 'firstentrance.net', 'app.firstentrance.net', 'feclaw.lizidaren.cn'}
+    allowed_hosts = {'localhost', '127.0.0.1', '::1'}
     if parsed.netloc.split(':')[0] in allowed_hosts:
         return url
     return '/'
@@ -91,7 +91,7 @@ async def oauth_callback(
     # 用户取消授权
     if error:
         logger.info(f"OAuth callback with error: {error} ({error_description})")
-        domain = settings.FECLAW_PUBLIC_URL or "feclaw.lizidaren.cn"
+        domain = settings.FECLAW_PUBLIC_URL or ""
         base = f"https://{domain}"
         redirect_url = f"{base}/login?error={error}"
         return RedirectResponse(url=redirect_url)

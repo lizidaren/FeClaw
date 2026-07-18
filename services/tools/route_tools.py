@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 class RouteToolsMixin(AgentToolsServiceBase):
     """路由管理工具集"""
 
-    @tool(description="注册一个 App。在 /workspace/apps/{app_id}/routes.json 已存在的情况下将其上线。用户可通过 https://{agent_hash}.feclaw.lizidaren.cn/apps/{app_id}/ 访问。", category="agent")
+    @tool(description="注册一个 App。在 /workspace/apps/{app_id}/routes.json 已存在的情况下将其上线。用户可通过部署域名访问。", category="agent")
     def route_register(self, app_id: str) -> str:
         """
         注册一个 App，使其可以通过浏览器访问。

@@ -26,6 +26,7 @@ from models.database import get_db, AgentProfile
 from models.fehub import FePublish, AppData
 from utils.auth import get_current_user_id
 from services.fehub_service import FeHubService
+from config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -112,7 +113,7 @@ async def list_fehub_apps(
             "tag": p.tag,
             "is_public": p.is_public,
             "created_at": p.created_at.isoformat() if p.created_at else None,
-            "url": f"https://{p.agent_hash}.feclaw.lizidaren.cn/apps/{app_id}/",
+            "url": settings.FECLAW_PUBLIC_URL and f"https://{p.agent_hash}.{settings.FECLAW_PUBLIC_URL}/apps/{app_id}/" or f"/apps/{app_id}/",
         })
 
     return {"apps": apps}
@@ -151,7 +152,7 @@ async def get_fehub_app(
         "manifest": publish.manifest or {},
         "snapshot_path": publish.snapshot_path,
         "created_at": publish.created_at.isoformat() if publish.created_at else None,
-        "url": f"https://{publish.agent_hash}.feclaw.lizidaren.cn/apps/{app_id}/",
+        "url": settings.FECLAW_PUBLIC_URL and f"https://{publish.agent_hash}.{settings.FECLAW_PUBLIC_URL}/apps/{app_id}/" or f"/apps/{app_id}/",
     }
 
 

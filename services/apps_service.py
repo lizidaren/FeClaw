@@ -1,7 +1,7 @@
 """
 App Service — Agent 自部署 Web 应用系统
 
-Agent 通过 route_register 注册路由端点，将 Web 应用部署到 `https://{agent_hash}.feclaw.lizidaren.cn/apps/{app_id}/`。
+Agent 通过 route_register 注册路由端点，将 Web 应用部署到部署域名下。
 
 三种路由类型：
 - static: 直接返回文件内容

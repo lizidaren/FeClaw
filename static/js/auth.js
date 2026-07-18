@@ -13,7 +13,7 @@ const Auth = {
   EXPIRES_KEY: 'feclaw_jwt_expires_at',
 
   // 根域名（SSO 同步用）
-  ROOT_DOMAIN: window.ROOT_DOMAIN || 'feclaw.lizidaren.cn',
+  ROOT_DOMAIN: window.ROOT_DOMAIN || ''
 
   // API 端点
   API_BASE: '/api/workspace',
@@ -271,14 +271,14 @@ const Auth = {
     localStorage.removeItem('feclaw_agent_hash');
     // 清除主 cookie
     document.cookie = 'feclaw_jwt=; path=/; SameSite=Lax; max-age=0';
-    document.cookie = 'feclaw_jwt=; path=/; domain=window.ROOT_DOMAIN || 'feclaw.lizidaren.cn'; SameSite=Lax; max-age=0';
+    document.cookie = 'feclaw_jwt=; path=/; SameSite=Lax; max-age=0';
     // 清除所有 TOTP Agent 专属 cookie
     var cookies = document.cookie.split('; ');
     for (var i = 0; i < cookies.length; i++) {
       var parts = cookies[i].split('=');
       if (parts[0].startsWith('feclaw_jwt_totp_')) {
         document.cookie = parts[0] + '=; path=/; max-age=0';
-        document.cookie = parts[0] + '=; path=/; domain=window.ROOT_DOMAIN || 'feclaw.lizidaren.cn'; SameSite=Lax; max-age=0';
+        document.cookie = parts[0] + '=; path=/; SameSite=Lax; max-age=0';
       }
     }
 
@@ -550,7 +550,7 @@ const Auth = {
   setToken(token) {
     localStorage.setItem(this.JWT_KEY, token);
     // 同时设置 cookie，供服务端页面路由认证使用
-    document.cookie = `feclaw_jwt=${token}; path=/; domain=window.ROOT_DOMAIN || 'feclaw.lizidaren.cn'; SameSite=Lax; max-age=${60*60*24*7}`;
+    document.cookie = `feclaw_jwt=${token}; path=/; SameSite=Lax; max-age=${60*60*24*7}`;
   },
 
   clearToken() {
@@ -558,7 +558,7 @@ const Auth = {
     localStorage.removeItem(this.USER_KEY);
     // 清除 cookie
     document.cookie = 'feclaw_jwt=; path=/; SameSite=Lax; max-age=0';
-    document.cookie = 'feclaw_jwt=; path=/; domain=window.ROOT_DOMAIN || 'feclaw.lizidaren.cn'; SameSite=Lax; max-age=0';
+    document.cookie = 'feclaw_jwt=; path=/; SameSite=Lax; max-age=0';
   },
 
   // ========== User 信息管理 ==========
@@ -712,7 +712,7 @@ const Auth = {
     if (host === this.ROOT_DOMAIN || host === 'localhost' || host === '127.0.0.1') {
       return false;
     }
-    // 匹配 *.feclaw.lizidaren.cn → 子域名
+    // 匹配子域名（如 5178.domain.com）
     if (host.endsWith('.' + this.ROOT_DOMAIN)) {
       return true;
     }

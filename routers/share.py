@@ -120,7 +120,7 @@ router = APIRouter(tags=["share"])
 async def resolve_share_by_slug(slug: str, request: Request, db: Session = Depends(get_db)):
     """通过友好短链 slug 解析分享链接（如 /s/sunset-oak-jupiter）
     
-    支持子域名隔离：abcdefgh.feclaw.lizidaren.cn/s/xxx → 仅查该 Agent 的链接
+    支持子域名隔离：子域名下的 /s/xxx → 仅查该 Agent 的分享链接
     无子域名 ⚏ 回退全局查找
     """
     from services.share_service import resolve_slug

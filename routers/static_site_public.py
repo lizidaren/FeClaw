@@ -25,6 +25,7 @@ from urllib.parse import unquote
 from models.database import SessionLocal, StaticSite
 from services.storage_service import StorageService
 from services.static_site_service import StaticSiteService
+from config import settings
 from routers.feclaw_domain import _get_domain, extract_hash_from_host
 
 
@@ -354,7 +355,7 @@ async def serve_static_file(request: Request, file_path: str = ""):
     
     if not subdomain:
         # 检查是否为 FeClaw 子域名（返回 FeClaw 品牌 404）
-        if extract_hash_from_host(host) or (host.endswith(".feclaw.lizidaren.cn") and host != "feclaw.lizidaren.cn"):
+        if extract_hash_from_host(host) or (settings.FECLAW_PUBLIC_URL and host.endswith(f".{settings.FECLAW_PUBLIC_URL}") and host != settings.FECLAW_PUBLIC_URL):
             return HTMLResponse(
                 content=FECLAW_NOT_FOUND_TEMPLATE,
                 status_code=404
