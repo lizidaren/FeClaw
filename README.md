@@ -277,40 +277,63 @@ python -m uvicorn main:app --host 0.0.0.0 --port 8080 --reload
 
 | 依赖 | 版本 | 说明 |
 |:----|:-----|:------|
-| Python | 3.10+ | 3.12 推荐，3.10-3.11 可能缺少部分类型语法 |
+| Python | 3.9+ | **推荐 3.12**；3.11 需修复 f-string 兼容性（代码已处理），3.9-3.10 需额外注意 |
 | MySQL | 8.0+ | 硬依赖（不支持 SQLite） |
 | pip | (最新) | Ubuntu 24.04 需 `apt install python3-pip python3-venv` |
 | Docker | (可选) | 用于快速启动 MySQL 开发实例 |
 
-### 快速启动（Ubuntu 24.04 示例）
+### 支持的系统
+
+| 系统 | Python | 验证状态 | 注意事项 |
+|:----|:------:|:--------:|:---------|
+| Ubuntu 24.04 LTS | 3.12 | ✅ 全流程通过 | 最佳体验，推荐 |
+| Ubuntu 22.04 LTS | 3.10 | ✅ 全流程通过 | 需 `sudo usermod -aG docker $USER` 后重新登录 |
+| Debian 12 | 3.11 | ✅ 全流程通过 | 提前安装 `python3-pip python3-venv` |
+| Rocky Linux 9 / CentOS 9 | 3.9 | ✅ 全流程通过 | 需 `dnf install python3-pip python3-devel`；SELinux 建议设为 permissive |
+
+> 国内部署建议使用腾讯云/阿里云镜像，详见下文。
+
+### 快速启动
+
+#### Ubuntu / Debian 系
 
 ```bash
 # 1. 系统依赖
 sudo apt update
 sudo apt install -y python3-pip python3-venv git
 
-# 2. 克隆
+# 2. 克隆（GFW 环境下使用镜像或 zip）
 git clone https://github.com/lizidaren/FeClaw.git
 cd FeClaw
 
-# 3. 虚拟环境（Python 3.12+）
+# 3. 虚拟环境
 python3 -m venv venv
 source venv/bin/activate
 
 # 4. 安装依赖
 pip install -r requirements.txt
 
-# 5. 配置数据库
-# 方案 A：使用 dev_init.sh（自动 Docker MySQL + 生成 .env）
-sudo bash scripts/dev_init.sh   # ⚠️ Docker 需提前安装
+# 5. 配置数据库（自动 Docker MySQL）
+sudo bash scripts/dev_init.sh
+```
 
-# 方案 B：手动配置
-cp .env.example .env
-# 编辑 .env，填入 JWT_SECRET、DATABASE_URL、API Key
+#### Rocky Linux / RHEL 系
+
+```bash
+# 1. 系统依赖
+dnf install -y python3-pip python3-devel git
+
+# 2-4. 同 Ubuntu（clone、venv、pip）
+
+# 5. Docker 需用阿里云镜像安装
+dnf config-manager --add-repo https://mirrors.aliyun.com/docker-ce/linux/centos/docker-ce.repo
+dnf install -y docker-ce docker-ce-cli containerd.io
+systemctl start docker
+bash scripts/dev_init.sh   # 不需要 sudo（root 用户）
 ```
 
 > **国内网络注意事项：**
-> - `git clone` 可能因 GFW 超时，重试或使用代理
+> - `git clone` 可能因 GFW 超时 → 用 zip 下载：`curl -sL -o feclaw.zip "https://github.com/lizidaren/FeClaw/archive/refs/heads/main.zip"`
 > - Docker Hub 被墙，配置镜像：`/etc/docker/daemon.json` → `{"registry-mirrors":["https://mirror.ccs.tencentyun.com"]}`
 > - pip 使用腾讯云镜像：`pip config set global.index-url https://mirrors.cloud.tencent.com/pypi/simple`
 
@@ -340,9 +363,11 @@ python main.py
 | `pip install` 报 PEP 668 错误 | Ubuntu 24.04 禁止系统 pip | 先 `python3 -m venv venv` 再 `source venv/bin/activate` |
 | `PermissionError: .env` | `.env` 归 root | `sudo chown $(whoami) .env` |
 | MySQL 连不上 | MySQL 未运行或密码不对 | 运行 `sudo bash scripts/dev_init.sh` 用 Docker 启动 |
-| `pyfuse3` 安装失败 | 缺少 `fuse3 libfuse3-dev` | `apt install fuse3 libfuse3-dev` 或删除 `requirements-fuse.txt` |
-
-### 项目结构
+| `Docker permission denied` | 用户不在 docker 组 | `sudo usermod -aG docker $USER` 后重新登录或 `newgrp docker` |
+| `pyfuse3` 安装失败 | 缺少 `fuse3 libfuse3-dev` | `apt install fuse3 libfuse3-dev`（或直接忽略，pyfuse3 可选） |
+| `eval_type_backport` 相关错误 | Python 3.9 运行时类型注解 | `pip install eval_type_backport`（requirements.txt 已包含） |
+| `datetime.UTC` ImportError | Python 3.9 / 3.10 不兼容 | 代码已自动处理，更新至最新版本即可 |
+| 浏览器登录死循环 | 缓存过期 JWT token | 清除站点数据（cookie + localStorage）或换无痕窗口 |
 
 ```
 FeClaw/
