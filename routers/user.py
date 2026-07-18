@@ -732,11 +732,24 @@ async def login_user(
             "is_admin": user.is_admin,
             "redirect": redirect_to,
         })
+        # 自动检测是否应设置 secure cookie：
+        # - COOKIE_SECURE 显式配置时直接使用
+        # - 否则自动检测：HTTPS 请求或 CDN 转发 (X-Forwarded-Proto)
+        # - 本地 HTTP 开发 → secure=False
+        _cookie_secure = getattr(settings, "COOKIE_SECURE", None)
+        if _cookie_secure is not None:
+            _is_secure = _cookie_secure
+        else:
+            _is_secure = (
+                str(request.url.scheme) == "https"
+                or request.headers.get("x-forwarded-proto", "").lower() == "https"
+            )
         resp.set_cookie(
             key="feclaw_jwt",
             value=token,
             httponly=True,
-            max_age=86400 * 30,  # 30 天
+            secure=_is_secure,
+            max_age=86400 * 30,
             samesite="lax",
             path="/",
         )
