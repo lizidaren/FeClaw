@@ -102,9 +102,11 @@ class BlocksPutRequest(BaseModel):
 
 
 class AppendixRequest(BaseModel):
-    # fix(P1-8): 配合 service 层 MAX_APPENDICES / MAX_APPENDIX_CONTENT 双层防御
+    # fix(P1-8 / P3-Z-3): 配合 service 层 MAX_APPENDICES / MAX_APPENDIX_CONTENT 双层防御
+    # Router 与 Service 上限对齐（200 KiB = 200 * 1024 bytes），避免双层错位导致
+    # 客户端按 router 限发但 service 层 silently 拒收。
     title: str = Field(..., max_length=512)
-    content: str = Field(..., max_length=1_000_000)
+    content: str = Field(..., max_length=200 * 1024)
     attachments: Optional[List[Dict[str, Any]]] = None
 
 
@@ -414,8 +416,25 @@ async def upload_attachment(
         file_type=file_type,
         original_filename=file.filename,
     )
+    # fix(P0-Z-2 后端): 响应中追加可访问 URL，前端不必自行拼 cos key
+    # 优先用 key（PUT blocks 写入 DB），url 用于前端展示 / 预览
+    try:
+        public_url = svc.make_public_url(
+            attachment["key"], mime=attachment.get("mime")
+        )
+    except Exception as e:
+        logger.warning(
+            f"[audit] zentrim.attachment.make_public_url_failed "
+            f"user={user_id} entry={entry_id} key={attachment.get('key')} err={e}"
+        )
+        public_url = attachment["key"]  # 退化：只回 key
+
     # fix(P0-1): 不再回写 entry.attachment（列已删除）；返回 COS key 供前端通过 PUT /blocks 写入 block 引用
-    return {"status": "ok", "entry_id": entry_id, "attachment": attachment}
+    return {
+        "status": "ok",
+        "entry_id": entry_id,
+        "attachment": {**attachment, "url": public_url},
+    }
 
 
 # ────────────────────────────────────────────────────────────────────

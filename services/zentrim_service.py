@@ -10,6 +10,7 @@ import os
 import re
 import secrets
 import time
+import uuid
 # fix(P1-11): datetime.utcnow() 已废弃，改用 timezone-aware 的 now(UTC)
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -20,8 +21,9 @@ _FILE_TYPE_RE = re.compile(r"^[a-z0-9_-]{1,32}$")
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 # fix(P1-4): 附录数量上限（防止单条目被滥用撑爆 JSON 列）
 MAX_APPENDICES = 200
-# fix(P1-4): 单条附录内容上限 64 KB（防 DoS / JSON 列膨胀）
-MAX_APPENDIX_CONTENT = 64 * 1024
+# fix(P1-4 / P3-Z-3): 单条附录内容上限 200 KB（防 DoS / JSON 列膨胀；
+# 与 routers/zentrim.py AppendixRequest.content 保持一致，避免双层防御错位）
+MAX_APPENDIX_CONTENT = 200 * 1024
 
 
 # fix(P1-1): 转义 LIKE 通配符 %/_，配合 SQLAlchemy .like(..., escape="\\") 使用
@@ -565,7 +567,13 @@ class ZentrimService:
             if ext_from_name and len(ext_from_name) <= 5:
                 ext = ext_from_name
 
-        key = f"{settings.STORAGE_PREFIX}zentrim/user_{user_id}/attachments/{entry_id}_{file_type}.{ext}"
+        # fix(P1-Z-3): 同一 (entry_id, file_type) 重复上传时也生成唯一 key，
+        # 避免后续上传覆盖历史文件 / PUT blocks 时旧 block 引用错乱。
+        # key 路径仍走 router 白名单模板 `feclaw/zentrim/user_{uid}/...`。
+        key = (
+            f"{settings.STORAGE_PREFIX}zentrim/user_{user_id}/attachments/"
+            f"{entry_id}/{uuid.uuid4().hex[:12]}_{file_type}.{ext}"
+        )
 
         storage = self._storage()
         storage.put_object(key, file_bytes)
@@ -576,6 +584,69 @@ class ZentrimService:
             "mime": mime,
             "size": len(file_bytes),
         }
+
+    # ════════════════════════════════════════
+    # Public URL 生成（P0-Z-2 后端 helper）
+    # ════════════════════════════════════════
+    # MIME → 公开访问策略：
+    #   - image/* / audio/* → 优先公开 CDN / 公共 bucket 直链（前端可长期引用）
+    #   - 其它（pdf/zip/...） → 1 小时 TTL 的 presigned GET URL（短期安全分享）
+    _PUBLIC_MIME_PREFIXES = ("image/", "audio/")
+    _PRESIGNED_TTL_SECONDS = 3600  # 1 小时
+
+    def make_public_url(self, key: str, mime: Optional[str] = None) -> str:
+        """根据 MIME 选择访问策略，生成可访问 URL。
+
+        - image/* / audio/* → 公开 CDN / 公共 bucket 直链
+            （前提：bucket 配了 CDN 或公共读权限；否则降级为 presigned GET）
+        - 其它 MIME → 1 小时 TTL 的 presigned GET URL
+
+        Args:
+            key:  COS 对象 key（已含 STORAGE_PREFIX）
+            mime: MIME 类型（决定公开 / 签名策略）
+
+        Returns:
+            可访问 URL 字符串。本地存储模式时退化为 key 本身（前端按相对路径处理）。
+        """
+        mime_normalized = (mime or "").lower().strip()
+        is_public_mime = mime_normalized.startswith(self._PUBLIC_MIME_PREFIXES)
+
+        try:
+            storage = self._storage()
+        except Exception as e:
+            logger.warning(f"[ZentrimService] make_public_url: storage unavailable: {e}")
+            return key  # 退化：返回 key，前端可决定如何处理
+
+        # ── COS 后端 ──
+        # CosStorage 实现了 get_object_public_url / generate_presigned_get_url
+        try:
+            if hasattr(storage, "get_object_public_url"):
+                public_url = storage.get_object_public_url(key)
+            else:
+                # LocalStorage / 其它：退回 key 本身
+                return key
+
+            if is_public_mime:
+                return public_url
+
+            # 非公开 MIME：签名 GET，1 小时 TTL
+            if hasattr(storage, "generate_presigned_get_url"):
+                try:
+                    return storage.generate_presigned_get_url(
+                        public_url, expired=self._PRESIGNED_TTL_SECONDS
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"[ZentrimService] make_public_url: presign failed, "
+                        f"fallback to public URL: {e}"
+                    )
+                    return public_url
+            return public_url
+        except Exception as e:
+            logger.warning(
+                f"[ZentrimService] make_public_url failed for key={key} mime={mime}: {e}"
+            )
+            return key
 
     # ════════════════════════════════════════
     # 搜索

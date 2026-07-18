@@ -1,0 +1,55 @@
+version: "3.9"
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: feclaw-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: feclaw_dev
+      MYSQL_DATABASE: FeClaw
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  feclaw:
+    build: .
+    container_name: feclaw-app
+    ports:
+      - "8080:8080"
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      # 数据库
+      DATABASE_URL: mysql+pymysql://root:feclaw_dev@mysql:3306/FeClaw
+      # 安全（首次启动时控制台会打印 SETUP_TOKEN）
+      JWT_SECRET: ""
+      # 存储（本地模式）
+      STORAGE_MODE: local
+      LOCAL_STORAGE_ROOT: /app/feclaw-storage
+      VECTOR_STORAGE_BACKEND: numpy
+      STORAGE_PREFIX: feclaw/
+      FUSE_ENABLED: "false"
+      # LLM（填入至少一个 API Key）
+      DEEPSEEK_API_KEY: ""
+      QWEN_API_KEY: ""
+      ZHIPU_API_KEY: ""
+      MIMO_API_KEY: ""
+      # 搜索
+      DEFAULT_SEARCH_ENGINE: qwen
+      # 调试
+      DEBUG: "true"
+      COOKIE_SECURE: "false"
+    volumes:
+      - feclaw_storage:/app/feclaw-storage
+    restart: unless-stopped
+
+volumes:
+  mysql_data:
+  feclaw_storage:

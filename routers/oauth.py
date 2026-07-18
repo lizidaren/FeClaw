@@ -1,14 +1,27 @@
 """
 OAuth 路由
 处理 OAuth 认证流程的 HTTP 接口
+
+包含：
+- Web OAuth flow：`/login`、`/callback`、`/logout`、`/me`
+- Mobile OAuth flow（P0-A-1 + P1-A-2 + P1-A-3）：
+    - `POST /api/oauth/exchange`     Platform access_token → FeClaw JWT pair
+    - `POST /api/oauth/refresh`      refresh_token → 新 access + refresh
+    - `GET  /api/oauth/mobile-login` 生成 Platform authorize URL（Mobile Linking.openURL 用）
+
+CSRF 校验（P0-A-2 修复）：`/callback` 不再静默 fallback；state cookie 缺失或与 query 不一致 → 400。
 """
 
 import secrets
 import time as _time
-from datetime import datetime
-from urllib.parse import urlparse
+from typing import Optional
+from urllib.parse import urlencode, urlparse
 from fastapi import APIRouter, Request, HTTPException, Depends, Query
 from fastapi.responses import RedirectResponse, JSONResponse
+from pydantic import BaseModel, Field
+from sqlalchemy.orm import Session
+import httpx
+import certifi
 import logging
 
 from config import settings
@@ -18,6 +31,13 @@ from models.database import get_db, SessionLocal, User
 from utils.auth_dependencies import (
     get_current_user,
     get_current_token_payload,
+)
+from utils.oauth_helpers import (
+    decode_refresh_token,
+    find_or_create_user_from_platform,
+    issue_token_pair_for_platform_user,
+    sign_access_token,
+    sign_refresh_token,
 )
 
 logger = logging.getLogger(__name__)
@@ -97,15 +117,22 @@ async def oauth_callback(
         return RedirectResponse(url=redirect_url)
 
     # 从 Cookie 读取 state，不依赖服务端内存
+    # P0-A-2 修复：缺 cookie 或不匹配都视为 CSRF 失败，**不再静默 fallback**
     cookie_name = f"oauth_state_{state[:16]}"
     cookie_state = request.cookies.get(cookie_name)
-    if cookie_state and cookie_state != state:
-        logger.warning(f"OAuth callback: state mismatch (cookie={cookie_state[:16] if cookie_state else 'missing'}, param={state[:16]}...)")
-        raise HTTPException(status_code=400, detail="Invalid state parameter")
-    if cookie_state:
-        logger.info(f"[PERF] state lookup (cookie): {(_time.time()-t0)*1000:.0f}ms")
-    else:
-        logger.warning(f"OAuth callback: no state cookie found (cross-site? cookie may be blocked). Skipping CSRF check.")
+    if not cookie_state:
+        logger.warning(f"OAuth callback: missing state cookie for state={state[:16]}... (cross-site? cookie blocked?)")
+        raise HTTPException(status_code=400, detail={
+            "status": "invalid_state",
+            "message": "Missing OAuth state cookie. 请从同站入口重新发起登录，确保浏览器允许第三方 cookie / SameSite=None Secure。"
+        })
+    if cookie_state != state:
+        logger.warning(f"OAuth callback: state mismatch (cookie={cookie_state[:16]}..., param={state[:16]}...)")
+        raise HTTPException(status_code=400, detail={
+            "status": "invalid_state",
+            "message": "Invalid state parameter (CSRF check failed)."
+        })
+    logger.info(f"[PERF] state lookup (cookie): {(_time.time()-t0)*1000:.0f}ms")
 
     # 授权码换 token
     t1 = _time.time()
@@ -267,26 +294,229 @@ async def oauth_callback(
     return response
 
 
-@router.post("/refresh")
-async def oauth_refresh(
-    payload: dict = Depends(get_current_token_payload),
+# ────────────────────────────────────────────────────────────
+# Mobile / API OAuth flow（P0-A-1 + P1-A-2 + P1-A-3）
+# ────────────────────────────────────────────────────────────
+
+
+class OAuthExchangeRequest(BaseModel):
+    """Mobile 用 Platform access_token 换 FeClaw JWT pair（P0-A-1）"""
+    platform_token: str = Field(..., description="Platform 登录后拿到的 access_token")
+    # 可选：客户端拿到 id_token 时一并传，服务端可选择验签（此处暂不强制）
+    id_token: Optional[str] = Field(default=None, description="可选 Platform id_token（OIDC）")
+
+
+class OAuthRefreshRequest(BaseModel):
+    """Mobile 用 FeClaw refresh_token 续 access_token（P1-A-2）"""
+    refresh_token: str = Field(..., description="OAuth /exchange 返回的 refresh_token")
+
+
+def _platform_base_url() -> str:
+    """
+    推导 Platform 内网 base（不走 CDN）。
+    与 desktop_api._verify_platform_token 同源。
+    """
+    if settings.OAUTH_TOKEN_URL:
+        return settings.OAUTH_TOKEN_URL.rsplit("/oauth/token", 1)[0].rstrip("/")
+    return settings.OAUTH_PROVIDER_URL.rstrip("/")
+
+
+async def _verify_platform_token_via_me(access_token: str) -> dict:
+    """
+    调 Platform `/api/auth/me` 验证 access_token，返回 user_info。
+    与 desktop_api 行为一致：失败 401。
+    """
+    me_url = f"{_platform_base_url()}/api/auth/me"
+    try:
+        async with httpx.AsyncClient(timeout=10.0, verify=certifi.where()) as client:
+            resp = await client.get(
+                me_url,
+                headers={"Authorization": f"Bearer {access_token}"},
+            )
+    except httpx.HTTPError as e:
+        logger.error(f"[oauth.exchange] Platform /api/auth/me unreachable: {e}")
+        raise HTTPException(status_code=502, detail="Platform 认证服务暂时不可用，请稍后重试")
+
+    if resp.status_code != 200:
+        logger.warning(f"[oauth.exchange] Platform /api/auth/me returned {resp.status_code}")
+        raise HTTPException(status_code=401, detail={
+            "status": "invalid_platform_token",
+            "message": "Invalid or expired Platform access_token",
+        })
+
+    data = resp.json()
+    user_info = data.get("user", data)
+    if not user_info or not user_info.get("id"):
+        raise HTTPException(status_code=401, detail={
+            "status": "invalid_platform_token",
+            "message": "Platform token valid but no user info",
+        })
+    return user_info
+
+
+@router.post("/exchange")
+async def oauth_exchange(
+    body: OAuthExchangeRequest,
+    db: Session = Depends(get_db),
 ):
     """
-    刷新 OAuth token
-    需要 Authorization header 或 cookie 中的 token
+    Mobile OAuth — 用 Platform access_token 换 FeClaw JWT pair（P0-A-1）。
+
+    请求: { "platform_token": "<Platform access_token>" }
+    响应: {
+      "status": "success",
+      "token": "<FeClaw access_token>",
+      "refresh_token": "<FeClaw refresh_token>",
+      "expires_in": <seconds>,
+      "refresh_expires_in": <seconds>,
+      "user_id": <int>,
+      "username": <str>,
+      "auth_method": "platform"
+    }
+
+    行为：
+    1. 调 Platform /api/auth/me 验证 platform_token
+    2. 按 platform_user_id 匹配/创建 FeClaw User（helper 抽自 desktop_api）
+    3. 签发 access_token (HS256, type=access) + refresh_token (HS256, type=refresh)
     """
-    # 创建新的 token
-    new_token = oauth_service.create_local_jwt({
-        "sub": payload.get("sub"),
-        "username": payload.get("username"),
-        "email": payload.get("email"),
-        "auth_method": payload.get("auth_method", "platform")
-    })
+    user_info = await _verify_platform_token_via_me(body.platform_token)
+    token_pair = issue_token_pair_for_platform_user(db, user_info)
+
+    logger.info(
+        f"[oauth.exchange] user_id={token_pair['user_id']} "
+        f"username={token_pair['username']} auth_method=platform"
+    )
 
     return JSONResponse(content={
         "status": "success",
-        "token": new_token
+        **token_pair,
     })
+
+
+@router.post("/refresh")
+async def oauth_refresh(body: OAuthRefreshRequest):
+    """
+    Mobile refresh — 用 refresh_token 换新 FeClaw access + refresh（P1-A-2）。
+
+    与原占位（依赖 access token）不同：本端点接收 refresh_token body，
+    验证 type=refresh 的 HS256 JWT，重新签发 access_token + 新 refresh_token。
+    返回结构同 `/exchange`。
+    """
+    user_id = decode_refresh_token(body.refresh_token)
+    if user_id is None:
+        raise HTTPException(status_code=401, detail={
+            "status": "invalid_refresh_token",
+            "message": "refresh_token 无效、过期或类型不匹配",
+        })
+
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter(User.id == user_id).first()
+        if not user:
+            logger.warning(f"[oauth.refresh] refresh_token 指向不存在的 user_id={user_id}")
+            raise HTTPException(status_code=401, detail={
+                "status": "invalid_refresh_token",
+                "message": "refresh_token 指向的用户已不存在",
+            })
+
+        new_access, access_expires = sign_access_token(
+            user_id=user.id,
+            username=user.username,
+            email=user.email,
+            auth_method="platform",
+        )
+        new_refresh, refresh_expires = sign_refresh_token(user_id=user.id)
+    finally:
+        db.close()
+
+    return JSONResponse(content={
+        "status": "success",
+        "token": new_access,
+        "refresh_token": new_refresh,
+        "expires_in": access_expires,
+        "refresh_expires_in": refresh_expires,
+        "user_id": user.id,
+        "username": user.username,
+        "auth_method": "platform",
+    })
+
+
+@router.get("/mobile-login")
+async def oauth_mobile_login(
+    request: Request,
+    scheme: str = Query(default="feclaw", description="Mobile app 自定义 URL scheme（如 feclaw）"),
+    state: str = Query(default="", description="Mobile 生成的 CSRF token（必填）"),
+):
+    """
+    Mobile 入口：302 跳转到 Platform authorize，redirect_uri 用 `<scheme>://oauth/callback`（P1-A-3）。
+
+    Mobile 端流程：
+      1. App 启动 → 调 `GET /api/oauth/mobile-login?scheme=feclaw&state=<random>`
+      2. 拿到 authorize URL → `Linking.openURL(url)`
+      3. 在系统浏览器完成 Platform 登录
+      4. Platform 302 → `feclaw://oauth/callback?code=...&state=...`
+      5. Mobile 捕获 deep link → 用 code 调 Platform `/api/oauth/token` 拿 access_token
+      6. 调 `POST /api/oauth/exchange` 拿 FeClaw token pair
+
+    本端点也会把 state 写到 cookie（domain 设为 mobile 域），但因为 redirect_uri 是
+    自定义 scheme，cookie 校验不可靠 —— **Mobile 必须自行在 /exchange 调用前用
+    state 做 CSRF 校验**。此处 cookie 仅作为可选 debug / 兼容校验。
+
+    校验：scheme 必须以字母开头且只含 [a-z0-9+.-]（RFC 3986 scheme 简化版），
+    state 长度 ≥ 8。
+    """
+    import re
+    if not re.match(r"^[a-z][a-z0-9+.\-]{1,63}$", scheme):
+        raise HTTPException(status_code=400, detail={
+            "status": "invalid_scheme",
+            "message": "scheme 不合法（必须以字母开头，仅含 [a-z0-9+.-]，长度 2-64）",
+        })
+    if not state or len(state) < 8:
+        raise HTTPException(status_code=400, detail={
+            "status": "invalid_state",
+            "message": "state 必填且长度 ≥ 8（防 CSRF）",
+        })
+
+    # 平台必须支持 mobile custom scheme 回调，否则 authorize 时 Platform 会拒绝
+    redirect_uri = f"{scheme}://oauth/callback"
+
+    if not settings.OAUTH_PROVIDER_URL or not settings.OAUTH_CLIENT_ID:
+        logger.warning("[oauth.mobile-login] OAuth 未配置")
+        raise HTTPException(status_code=503, detail={
+            "status": "oauth_not_configured",
+            "message": "OAuth provider 未配置，请联系管理员",
+        })
+
+    # 与 oauth_service.get_authorize_url 一致，但 redirect_uri 用 mobile scheme
+    base_authorize = settings.OAUTH_AUTHORIZE_URL or (
+        settings.OAUTH_PROVIDER_URL.rstrip("/") + "/authorize"
+    )
+    params = {
+        "response_type": "code",
+        "client_id": settings.OAUTH_CLIENT_ID,
+        "redirect_uri": redirect_uri,
+        "state": state,
+        "scope": "openid profile email",
+    }
+    authorize_url = f"{base_authorize}?{urlencode(params)}"
+
+    logger.info(
+        f"[oauth.mobile-login] 302 -> Platform authorize (scheme={scheme}, state={state[:8]}...)"
+    )
+
+    # 可选：在 cookie 里写一份 state（best-effort，对 mobile scheme 不保证可用）
+    response = RedirectResponse(url=authorize_url, status_code=302)
+    cookie_name = f"oauth_state_{state[:16]}"
+    response.set_cookie(
+        key=cookie_name,
+        value=state,
+        max_age=STATE_COOKIE_MAX_AGE,
+        path="/",
+        secure=True,
+        httponly=True,
+        samesite="none",
+    )
+    return response
 
 
 @router.post("/logout")

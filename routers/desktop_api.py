@@ -12,6 +12,7 @@ from config import settings
 from models.database import get_db, User, AgentProfile
 from utils.auth import get_current_user_id
 from services.oauth_service import oauth_service
+from utils.oauth_helpers import issue_token_pair_for_platform_user
 
 logger = logging.getLogger(__name__)
 
@@ -61,80 +62,29 @@ async def desktop_auth_exchange(
     db: Session = Depends(get_db),
 ):
     """
-    将 Platform access_token 兑换为 FeClaw JWT。
+    将 Platform access_token 兑换为 FeClaw JWT（Desktop client 兼容入口）。
 
-    Desktop 通过 Platform 的 /api/auth/login 登录后拿到 access_token，
-    此端点用该 token 调用 Platform 的 /api/auth/me 验证身份，
-    然后创建或关联本地 User 记录，最后签发 FeClaw JWT。
+    与 Mobile `POST /api/oauth/exchange` 共用同一套 helper（`utils/oauth_helpers`），
+    这里只返 access_token + user_id + username，**不**发 refresh_token —— 保留旧 Desktop
+    客户端契约，避免破坏现有版本。
     """
     # 1. 通过 Platform /api/auth/me 验证 access_token
     user_info = await _verify_platform_token(body.platform_token)
 
-    platform_user_id = str(user_info.get("id"))
-    username = user_info.get("username") or f"platform_{platform_user_id}"
+    # 2. 复用 Mobile /exchange 的 helper（含找/建用户 + 签 access+refresh）
+    #    Desktop 端契约只取 access / user_id / username，refresh_token 丢弃即可。
+    token_pair = issue_token_pair_for_platform_user(db, user_info)
 
-    # 2. 创建或匹配本地用户（与 oauth_callback 逻辑一致）
-    existing = db.query(User).filter(User.platform_user_id == platform_user_id).first()
+    logger.info(
+        f"Desktop auth_exchange: user_id={token_pair['user_id']} "
+        f"username={token_pair['username']} (helper 复用自 oauth.exchange)"
+    )
 
-    if existing:
-        existing.is_admin = user_info.get("is_admin", False)
-        if user_info.get("email"):
-            existing.email = user_info.get("email")
-        db.commit()
-        db.refresh(existing)
-        user = existing
-        logger.info(f"Desktop auth: updated user {username}")
-    else:
-        by_username = db.query(User).filter(User.username == username).first()
-        if by_username and by_username.platform_user_id is None:
-            by_username.platform_user_id = platform_user_id
-            by_username.is_admin = user_info.get("is_admin", False)
-            db.commit()
-            db.refresh(by_username)
-            user = by_username
-            logger.info(f"Desktop auth: linked local user {username}")
-        elif by_username and by_username.platform_user_id != platform_user_id:
-            from utils.auth import hash_password
-            dummy_password = hash_password(secrets.token_hex(32))
-            user = User(
-                username=f"{username}_{platform_user_id}",
-                platform_user_id=platform_user_id,
-                password_hash=dummy_password,
-                salt=None,
-                password_version=2,
-                is_admin=False,
-            )
-            db.add(user)
-            db.commit()
-            db.refresh(user)
-        else:
-            from utils.auth import hash_password
-            dummy_password = hash_password(secrets.token_hex(32))
-            user = User(
-                username=username,
-                platform_user_id=platform_user_id,
-                password_hash=dummy_password,
-                salt=None,
-                password_version=2,
-                is_admin=False,
-            )
-            db.add(user)
-            db.commit()
-            db.refresh(user)
-            logger.info(f"Desktop auth: created new user {username}")
-
-    # 3. 签发 FeClaw JWT
-    local_jwt = oauth_service.create_local_jwt({
-        "sub": user.id,
-        "username": user.username,
-        "email": user_info.get("email"),
-        "auth_method": "platform",
-    })
-
+    # 3. 保持 Desktop 旧契约字段
     return {
-        "token": local_jwt,
-        "user_id": user.id,
-        "username": user.username,
+        "token": token_pair["token"],
+        "user_id": token_pair["user_id"],
+        "username": token_pair["username"],
     }
 
 
