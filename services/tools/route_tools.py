@@ -30,7 +30,7 @@ class RouteToolsMixin(AgentToolsServiceBase):
         from services.apps_service import register_app_sync
         result = register_app_sync(self.agent_hash, app_id)
         if result:
-            return f"✅ App '{app_id}' 已注册。可访问 https://{self.agent_hash}.feclaw.lizidaren.cn/apps/{app_id}/"
+            return f"✅ App '{app_id}' 已注册。可访问 {{ settings.FECLAW_PUBLIC_URL }}/apps/{app_id}/"
         return f"❌ 注册失败：{app_id}（未找到 routes.json 或已达上限）"
 
     @tool(description="注销一个已注册的 App。App 文件不会被删除，可随时重新注册。", category="agent")
@@ -64,6 +64,6 @@ class RouteToolsMixin(AgentToolsServiceBase):
         
         lines = [f"📱 已注册 {len(apps)} 个 App："]
         for app_id in apps:
-            url = f"https://{self.agent_hash}.feclaw.lizidaren.cn/apps/{app_id}/"
+            url = f"{{ settings.FECLAW_PUBLIC_URL }}/apps/{app_id}/"
             lines.append(f"  - {app_id}: {url}")
         return "\n".join(lines)

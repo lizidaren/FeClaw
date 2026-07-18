@@ -249,16 +249,18 @@ async def oauth_callback(
             max_age=3600
         )
 
-    # 保存 Platform access_token 到 cookie（非 HttpOnly，设 domain=.lizidaren.cn），
+    # 保存 Platform access_token 到 cookie（非 HttpOnly），
     # 方便 Platform dashboard JS 跨域读取并调用 Platform API
     if access_token:
+        # 从 FECLAW_PUBLIC_URL 推导 cookie domain（子域名部署需跨域共享 cookie）
+        oauth_domain = settings.FECLAW_PUBLIC_URL or None
         response.set_cookie(
             key="platform_token",
             value=access_token,
             secure=True,
             samesite="lax",
             path="/",
-            domain=".lizidaren.cn",
+            domain=oauth_domain,
             max_age=settings.JWT_EXPIRE_HOURS * 3600,
         )
 
@@ -326,7 +328,8 @@ async def oauth_logout_get(
     # 检查 redirect 是否在白名单中
     safe_redirect = "/login"
     if redirect:
-        allowed_prefixes = ["https://platform.firstentrance.lizidaren.cn", "https://feclaw.lizidaren.cn"]
+        app_url = f"http://{settings.FECLAW_PUBLIC_URL}" if settings.FECLAW_PUBLIC_URL else "http://localhost:8080"
+        allowed_prefixes = [app_url]
         if any(redirect.startswith(p) for p in allowed_prefixes):
             safe_redirect = redirect
 

@@ -278,18 +278,24 @@ async def lifespan(app: FastAPI):
     try:
         admin = db.query(User).filter(User.username == "admin").first()
         if not admin:
-            import hashlib
-            default_password = hashlib.sha256("admin".encode()).hexdigest()
+            import os as _os, secrets
+            _random_pwd = secrets.token_hex(12)
+            _final_pwd = _os.environ.get("FECLAW_ADMIN_PASSWORD", _random_pwd)
             admin = User(
                 username="admin",
-                password_hash=hash_password(default_password),
+                password_hash=hash_password(_final_pwd),
                 salt=None,
                 password_version=2,
                 is_admin=True
             )
             db.add(admin)
             db.commit()
-            logger.info("Created default admin user (password: admin, bcrypt)")
+            logger.info("=" * 60)
+            logger.info("  🚀 初始管理员账户已创建")
+            logger.info(f"  用户名: admin")
+            logger.info(f"  密  码: {_final_pwd}")
+            logger.info("  ⚠️ 请立即登录并修改密码！")
+            logger.info("=" * 60)
 
         # 创建测试用户
         test_user = db.query(User).filter(User.username == "test").first()
@@ -484,10 +490,16 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# 配置 CORS
+# 配置 CORS — 动态根据 FECLAW_PUBLIC_URL 设置
+cors_origins = ["*"]
+if settings.FECLAW_PUBLIC_URL:
+    cors_origins = [
+        f"https://{settings.FECLAW_PUBLIC_URL}",
+        f"http://{settings.FECLAW_PUBLIC_URL}",
+    ]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 开发阶段允许所有来源；生产环境请按需限制
+    allow_origins=cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

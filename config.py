@@ -14,10 +14,10 @@ class Settings(BaseSettings):
     # 服务器配置
     HOST: str = "0.0.0.0"
     PORT: int = 8080
-    DEBUG: bool = True
+    DEBUG: bool = False
 
     # JWT 配置
-    JWT_SECRET: str = ""  # 必须通过 .env 设置，否则启动时报错
+    JWT_SECRET: str = ""  # ⚠️ 必须设置！用于 JWT 签名的密钥。首次启动会提示设置。  # 必须通过 .env 设置，否则启动时报错
     JWT_ALGORITHM: str = "HS256"
     JWT_EXPIRE_HOURS: int = 24 * 7  # 7天过期
 
@@ -107,7 +107,7 @@ class Settings(BaseSettings):
     PUBLIC_STORAGE_ROOT: str = "./feclaw-public"
 
     # 向量存储后端: "cos"（腾讯云）或 "numpy"（本地回退）
-    VECTOR_STORAGE_BACKEND: str = "cos"
+    VECTOR_STORAGE_BACKEND: str = "numpy"
 
     # TOTP 安全策略
     TOTP_STRICT_OWNERSHIP: bool = True  # TOTP 登录时严格检查 Agent 归属，True=仅能访问自己的 Agent；False=可以通过 TOTP 访问任何 Agent
@@ -203,11 +203,11 @@ class Settings(BaseSettings):
     SANDBOX_WRITE_RATE_LIMIT: int = 1 * 1024 * 1024     # 1 MB/s
     SANDBOX_MAX_FILE_SIZE: int = 100 * 1024 * 1024      # 100 MB
     # Python venv 路径（沙箱内绑定到 /venv），默认服务器路径
-    FECLAW_VENV_PATH: str = "/home/ubuntu/FeClaw/venv"
+    FECLAW_VENV_PATH: str = "./venv"
 
     # FUSE 文件系统配置
     FUSE_ENABLED: bool = True
-    FUSE_MOUNT_DIR: str = "/tmp/feclaw-fuse"  # 开发环境用 tmp，生产改 /mnt/feclaw
+    FUSE_MOUNT_DIR: str = "./feclaw-fuse"  # FUSE 挂载点目录（默认项目目录下）
     FUSE_CACHE_TTL: int = 60  # FUSE 属性缓存 TTL（秒）
     FUSE_AUTO_FALLBACK: bool = True  # FUSE 不可用时自动回退到仿真模式
 

@@ -141,7 +141,7 @@ async def list_apps_page(request: Request):
         <a href="{app_url}" class="app-card">
             <h3>{app_id}</h3>
             <p>{desc}</p>
-            <span class="url">{agent_hash}.feclaw.lizidaren.cn/apps/{app_id}/</span>
+            <span class="url">{agent_subdomain}/apps/{app_id}/</span>
         </a>"""
 
     if not cards_html:

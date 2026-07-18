@@ -13,6 +13,7 @@
     <link rel="stylesheet" href="/static/css/responsive.css">
     <link rel="stylesheet" href="/static/css/themes.css">
     <!-- 认证检查（必须在页面渲染前执行） -->
+    <script>window.ROOT_DOMAIN = "{{ feclaw_domain }}";</script>
     <script src="/static/js/auth.js"></script>
     <script>
         (async function() {
@@ -90,7 +91,7 @@
                             <div class="card-body">
                                 <p class="text-secondary mb-md">
                                     您当前正在使用 Platform 登录。如果您希望彻底退出，请
-                                    <a href="https://platform.firstentrance.lizidaren.cn/api/auth/logout-page"
+                                    <a href="/api/auth/logout-page"
                                        target="_blank" style="color:var(--accent-red,#ff6b6b);text-decoration:none;">
                                         退出 Platform 账号
                                     </a>

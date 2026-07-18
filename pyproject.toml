@@ -1,9 +1,9 @@
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-python_files = ["test_*.py"]
-asyncio_mode = "auto"
-markers = [
-    "slow: 慢测试（依赖外部服务）",
-    "unit: 纯单元测试（无外部依赖）",
-    "integration: 集成测试（需要数据库、C等依赖）",
-]
+[project]
+name = "feclaw"
+version = "1.0.0"
+description = "A living guide for every student — AI learning platform"
+requires-python = ">=3.10"
+
+[build-system]
+requires = ["setuptools>=64.0"]
+build-backend = "setuptools.backends._legacy:_Backend"

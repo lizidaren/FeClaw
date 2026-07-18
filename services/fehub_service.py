@@ -477,7 +477,7 @@ class FeHubService:
         finally:
             db.close()
 
-        publish_url = f"https://{self.agent_hash}.feclaw.lizidaren.cn/apps/{app_id}/"
+        publish_url = f"https://{settings.FECLAW_PUBLIC_URL}/apps/{app_id}/" if settings.FECLAW_PUBLIC_URL and settings.FECLAW_SUBDOMAIN_ENABLED else f"http://localhost:8080/apps/{app_id}/"
         return (
             f"✓ 已发布 {app_name}@{tag}\n"
             f"  访问地址: {publish_url}\n"

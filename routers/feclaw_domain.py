@@ -67,7 +67,16 @@ def extract_hash_from_host(host: str) -> Optional[str]:
 
 
 # 允许的域名后缀（防止 X-Forwarded-Host 头注入）
-_ALLOWED_DOMAIN_SUFFIXES = [".feclaw.lizidaren.cn", ".firstentrance.net", "feclaw.lizidaren.cn", "firstentrance.net"]
+# 从 FECLAW_PUBLIC_URL 动态推导
+# 如果 FECLAW_PUBLIC_URL=example.com，则允许 .example.com 和 example.com
+def _build_allowed_suffixes():
+    from config import settings
+    domain = settings.FECLAW_PUBLIC_URL
+    if domain:
+        return [f".{domain}", domain]
+    return [f".feclaw.lizidaren.cn", "feclaw.lizidaren.cn", ".firstentrance.net", "firstentrance.net"]
+
+_ALLOWED_DOMAIN_SUFFIXES = _build_allowed_suffixes()
 
 
 def _get_domain(request: Request) -> str:
@@ -178,7 +187,7 @@ async def auth_options(host: str = Query(None), request: Request = None):
     子域名在 SSO 失败时可调用此端点获取可用的认证方式。
 
     Query params:
-        host: 完整 hostname（如 5178.feclaw.lizidaren.cn）
+        host: 完整 hostname
 
     Returns:
         {
@@ -234,7 +243,7 @@ async def auth_sync(
 
     Query params:
         redirect: 验证成功后重定向到的路径（如 /agent/5178 或 /dashboard）
-        host: 原始请求的完整 hostname（如 5178.feclaw.lizidaren.cn）
+        host: 原始请求的完整 hostname
 
     流程：
     1. 检查 request 的 cookie 中是否有 feclaw_jwt

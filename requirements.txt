@@ -16,3 +16,11 @@ qrcode[pil]     # QR code generation
 pyfuse3>=1.4.0  # FUSE 3 filesystem in userspace
 numpy>=1.26.0
 bcrypt>=4.0.0   # 密码哈希（自 2026-07 起逐步替代 SHA-256+salt）
+
+# ─── 部署就绪性补全 ───
+redis>=5.0.0                # Redis 缓存/会话
+aiofiles>=24.0.0            # 异步文件 I/O
+certifi>=2024.0.0           # SSL 证书
+psutil>=5.9.0               # 系统指标监控
+python-docx>=1.0.0          # .docx 文档解析
+openpyxl>=3.0.0             # .xlsx 表格解析

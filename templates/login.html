@@ -7,6 +7,7 @@
 
 {% if is_subdomain %}
     {# 子域名：旧版 TOTP #}
+    <script>window.ROOT_DOMAIN = "{{ feclaw_domain }}";</script>
     <script src="/static/js/auth.js"></script>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }

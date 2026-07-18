@@ -113,6 +113,7 @@
         }
     </style>
     <!-- 认证检查（必须在页面渲染前执行） -->
+    <script>window.ROOT_DOMAIN = "{{ feclaw_domain }}";</script>
     <script src="/static/js/auth.js"></script>
     <script>
         // 阻塞式认证检查，未登录直接跳转

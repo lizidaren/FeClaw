@@ -5,7 +5,7 @@ FeClaw 数据库模型定义
 
 import logging
 from sqlalchemy import create_engine, Column, Integer, String, Text, Boolean, DateTime, Date, ForeignKey, Index, JSON, Numeric, UniqueConstraint
-from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship, Session
 from datetime import datetime
 
