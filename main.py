@@ -15,8 +15,11 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # 应用 COS SDK 补丁（StreamBody.read() 默认只读一个 1024 chunk）
-from services.cos_patch import apply_cos_patch
-apply_cos_patch()
+try:
+    from services.cos_patch import apply_cos_patch
+    apply_cos_patch()
+except ImportError:
+    pass  # COS SDK 补丁可选，无 COS 时跳过
 
 # 自定义日志过滤器：仅过滤 SQL 语句的 DEBUG 日志，保留 WARNING/ERROR
 class SQLFilter(logging.Filter):
