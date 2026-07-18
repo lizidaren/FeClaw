@@ -27,7 +27,7 @@ import logging
 from config import settings
 
 from services.oauth_service import oauth_service
-from models.database import get_db, SessionLocal, User
+from models.database import get_db, SessionLocal, User, UserLink
 from utils.auth_dependencies import (
     get_current_user,
     get_current_token_payload,
@@ -175,13 +175,19 @@ async def oauth_callback(
         platform_user_id = user_info.get("sub") or user_info.get("user_id")
         username = user_info.get("username") or user_info.get("name") or f"platform_{platform_user_id}"
 
-        # 安全匹配：先按 platform_user_id 精准查（P0-1 修复：禁止 or_ 条件）
-        existing = db.query(User).filter(User.platform_user_id == platform_user_id).first()
+        # 安全匹配：先按 UserLink(provider=platform) 精准查（P0-1 修复：禁止 or_ 条件）
+        existing_link = db.query(UserLink).filter(
+            UserLink.provider == "platform",
+            UserLink.provider_user_id == platform_user_id,
+        ).first()
+        existing = db.query(User).filter(User.id == existing_link.user_id).first() if existing_link else None
 
         if existing:
-            # 按 platform_user_id 精准匹配 → 更新
+            # 按 platform_user_id 精准匹配 -> 更新
             existing.email = user_info.get("email", existing.email)
             existing.is_admin = user_info.get("is_admin", False) or username == "admin"
+            if existing_link:
+                existing_link.provider_username = username
             db.commit()
             db.refresh(existing)
             user = existing
@@ -189,19 +195,29 @@ async def oauth_callback(
         else:
             # 按 username 查找（兼容本地注册后被 Platform 绑定的场景）
             by_username = db.query(User).filter(User.username == username).first()
-            if by_username and by_username.platform_user_id is None:
-                # username 存在但未绑定 Platform → 绑定为当前 Platform 用户
-                by_username.platform_user_id = platform_user_id
+            existing_links_count = (
+                db.query(UserLink).filter(UserLink.user_id == by_username.id).count()
+                if by_username else 0
+            )
+            if by_username and existing_links_count == 0:
+                # username 存在但无任何外部绑定 -> 绑定为当前 Platform 用户
+                link = UserLink(
+                    user_id=by_username.id,
+                    provider="platform",
+                    provider_user_id=platform_user_id,
+                    provider_username=username,
+                )
+                db.add(link)
                 by_username.email = user_info.get("email", by_username.email)
                 by_username.is_admin = user_info.get("is_admin", False) or username == "admin"
                 db.commit()
                 db.refresh(by_username)
                 user = by_username
                 logger.info(f"Linked local user to Platform: {username} (platform_user_id={platform_user_id})")
-            elif by_username and by_username.platform_user_id != platform_user_id:
-                # username 被占用且属于不同的 Platform 账号 → 强制创建新用户，避免账户劫持
+            elif by_username and existing_links_count > 0:
+                # username 被占用且已绑其他 Provider 账号 -> 强制创建新用户，避免账户劫持
                 logger.warning(
-                    f"Username collision: {username} is owned by platform_user_id={by_username.platform_user_id}, "
+                    f"Username collision: {username} is already linked to other provider(s), "
                     f"but login attempt from platform_user_id={platform_user_id}. Creating separate account."
                 )
                 from utils.auth import hash_password
@@ -209,30 +225,44 @@ async def oauth_callback(
                 is_admin = user_info.get("is_admin", False) or username == "admin"
                 user = User(
                     username=f"{username}_{platform_user_id}",
-                    platform_user_id=platform_user_id,
                     password_hash=dummy_password,
                     salt=None,
                     password_version=2,
                     is_admin=is_admin
                 )
                 db.add(user)
+                db.flush()
+                link = UserLink(
+                    user_id=user.id,
+                    provider="platform",
+                    provider_user_id=platform_user_id,
+                    provider_username=username,
+                )
+                db.add(link)
                 db.commit()
                 db.refresh(user)
                 logger.info(f"Created new user from OAuth (username collision): {username}_{platform_user_id}")
             else:
-                # 全新用户 → 创建
+                # 全新用户 -> 创建
                 from utils.auth import hash_password
                 dummy_password = hash_password(secrets.token_hex(32))
                 is_admin = user_info.get("is_admin", False) or username == "admin"
                 user = User(
                     username=username,
-                    platform_user_id=platform_user_id,
                     password_hash=dummy_password,
                     salt=None,
                     password_version=2,
                     is_admin=is_admin
                 )
                 db.add(user)
+                db.flush()
+                link = UserLink(
+                    user_id=user.id,
+                    provider="platform",
+                    provider_user_id=platform_user_id,
+                    provider_username=username,
+                )
+                db.add(link)
                 db.commit()
                 db.refresh(user)
                 logger.info(f"Created new user from OAuth: {username}")

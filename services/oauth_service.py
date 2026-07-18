@@ -211,7 +211,7 @@ class OAuthService:
             "user_id": user_id,  # get_current_user 依赖此 key
             "username": user_info.get("username") or user_info.get("name"),
             "email": user_info.get("email"),
-            "platform_user_id": user_info.get("sub"),
+            # platform_user_id 已移除：外部身份绑定改由 UserLink 表维护（见 models.database.UserLink）
             "auth_method": user_info.get("auth_method", "local"),
             "iat": datetime.utcnow(),
             "exp": datetime.utcnow() + timedelta(hours=settings.JWT_EXPIRE_HOURS)

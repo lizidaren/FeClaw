@@ -35,7 +35,9 @@ class User(Base):
     id = Column(Integer, primary_key=True, index=True)
     username = Column(String(64), unique=True, index=True, nullable=False)
     email = Column(String(128), unique=True, index=True, nullable=True)  # 可选邮箱
-    platform_user_id = Column(String(64), nullable=True, unique=True)  # Platform OAuth 用户 ID
+    # DEPRECATED: 保留以向后兼容；新逻辑请用 UserLink 关联表（多 Provider 支持）。
+    # 迁移脚本 scripts/migrate-user-links.py 会把此列数据复制到 user_links 表。
+    platform_user_id = Column(String(64), nullable=True, unique=True)  # Platform OAuth 用户 ID（deprecated）
     password_hash = Column(String(128), nullable=False)
     salt = Column(String(64), nullable=True)  # 仅 SHA-256 legacy 用户需要；bcrypt 用户为 NULL
     password_version = Column(Integer, default=1)  # 1=SHA-256+salt, 2=bcrypt；详见 utils.auth
@@ -46,6 +48,30 @@ class User(Base):
     # 关系
     chat_histories = relationship("ChatHistory", back_populates="user")
     uploaded_files = relationship("UploadedFile", back_populates="user")
+    user_links = relationship("UserLink", back_populates="user")
+
+
+class UserLink(Base):
+    """用户外部身份关联表（OAuth/OIDC 多 Provider 支持）
+
+    取代单字段 User.platform_user_id：一个 FeClaw User 可绑定多个外部身份
+    （platform / google / github / 本地登录 ...），每个 (provider, provider_user_id)
+    全局唯一。
+    """
+    __tablename__ = "user_links"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    provider = Column(String(32), nullable=False)  # 如 "platform", "google", "github"
+    provider_user_id = Column(String(128), nullable=False)  # 外部 Provider 中的用户 ID
+    provider_username = Column(String(128), nullable=True)  # 外部用户名缓存
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("provider", "provider_user_id", name="uq_provider_user"),
+    )
+
+    user = relationship("User", back_populates="user_links")
 
 
 class UserWorkspace(Base):

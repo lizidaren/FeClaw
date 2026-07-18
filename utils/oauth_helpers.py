@@ -2,13 +2,13 @@
 OAuth 辅助工具
 
 集中 FeClaw 后端的 OAuth token 签发 / 用户匹配逻辑，供以下场景复用：
-- `routers/oauth.py`  —— Web 回调、Mobile `/exchange`、`/refresh`、`/mobile-login`
-- `routers/desktop_api.py` —— Desktop client `auth_exchange`
+- `routers/oauth.py`  -- Web 回调、Mobile `/exchange`、`/refresh`、`/mobile-login`
+- `routers/desktop_api.py` -- Desktop client `auth_exchange`
 
 依赖：
 - `config.settings` 提供 `JWT_SECRET` / `JWT_ALGORITHM` / `JWT_EXPIRE_HOURS`
 - `utils.auth.hash_password` 兼容 legacy SHA-256 + bcrypt
-- `models.database.User` 含 `platform_user_id` 字段（OAuth 维度唯一键）
+- `models.database.UserLink` 记录 (provider, provider_user_id) 外部身份绑定（取代 User.platform_user_id 单字段）
 
 签名设计：
 - access_token：HS256，`sub=user_id`，`type="access"`，过期 = JWT_EXPIRE_HOURS
@@ -30,7 +30,7 @@ from jose import JWTError, jwt
 from sqlalchemy.orm import Session
 
 from config import settings
-from models.database import User
+from models.database import User, UserLink
 
 logger = logging.getLogger(__name__)
 
@@ -102,7 +102,7 @@ def decode_refresh_token(token: str) -> Optional[int]:
     """
     解码 refresh token，返回 user_id。
 
-    校验失败（签名错 / 过期 / type 不对） → 返回 None。
+    校验失败（签名错 / 过期 / type 不对） -> 返回 None。
     调用方应自行决定是否 raise 401。
     """
     payload = _decode_token(token)
@@ -138,64 +138,79 @@ def find_or_create_user_from_platform(
 ) -> User:
     """
     按 Platform 维度匹配或创建 FeClaw User。
+    使用 UserLink 表代替旧的 User.platform_user_id 字段。
 
-    匹配优先级（与原 oauth_callback 一致，避免回归）：
-    1. platform_user_id 精确匹配 → 复用 + 更新 email/is_admin
-    2. username 匹配且未绑 Platform → 绑 Platform
-    3. username 匹配但已绑别的 Platform → 强制创建独立账号 `{username}_{platform_user_id}`
-    4. 全新 → 创建
+    匹配优先级：
+    1. UserLink(provider="platform", provider_user_id=...) 精确匹配 -> 复用
+    2. username 匹配且无任何 UserLink -> 绑定为 platform 用户
+    3. username 匹配但已绑别的 Platform ID -> 强制创建独立账号
+    4. 全新 -> 创建 + UserLink
 
     副作用：commit + refresh；调用方不要再 commit 同一行。
     """
-    # 1. platform_user_id 精确匹配
-    existing = (
-        db.query(User).filter(User.platform_user_id == platform_user_id).first()
+    # 1. UserLink 精确匹配
+    existing_link = (
+        db.query(UserLink)
+        .filter(UserLink.provider == "platform", UserLink.provider_user_id == platform_user_id)
+        .first()
     )
-    if existing:
-        if email and email != existing.email:
-            existing.email = email
-        existing.is_admin = bool(is_admin) or existing.username == "admin"
-        db.commit()
-        db.refresh(existing)
-        logger.info(f"[oauth_helpers] updated existing user platform_user_id={platform_user_id}")
-        return existing
+    if existing_link:
+        user = db.query(User).filter(User.id == existing_link.user_id).first()
+        if user:
+            if email and email != user.email:
+                user.email = email
+            user.is_admin = bool(is_admin) or user.username == "admin"
+            existing_link.provider_username = username
+            db.commit()
+            db.refresh(user)
+            logger.info(f"[oauth_helpers] updated existing user via UserLink platform_user_id={platform_user_id}")
+            return user
 
-    # 2. username 匹配
+    # 2. 按 username 查找
     by_username = db.query(User).filter(User.username == username).first()
-    if by_username and by_username.platform_user_id is None:
-        by_username.platform_user_id = platform_user_id
-        if email:
-            by_username.email = email
-        by_username.is_admin = bool(is_admin) or username == "admin"
-        db.commit()
-        db.refresh(by_username)
-        logger.info(f"[oauth_helpers] linked local user {username} -> platform_user_id={platform_user_id}")
-        return by_username
+    if by_username:
+        existing_links = db.query(UserLink).filter(UserLink.user_id == by_username.id).count()
+        if existing_links == 0:
+            # username 存在但无任何外部绑定 -> 绑定为 platform 用户
+            by_username.email = email or by_username.email
+            by_username.is_admin = bool(is_admin) or username == "admin"
+            link = UserLink(
+                user_id=by_username.id,
+                provider="platform",
+                provider_user_id=platform_user_id,
+                provider_username=username,
+            )
+            db.add(link)
+            db.commit()
+            db.refresh(by_username)
+            logger.info(f"[oauth_helpers] linked local user {username} -> platform via UserLink")
+            return by_username
+        else:
+            # username 存在且已绑其他 Provider -> 强制独立账号，避免账户劫持
+            logger.warning(f"[oauth_helpers] username collision: {username}")
+            new_user = User(
+                username=f"{username}_{platform_user_id}",
+                password_hash=_dummy_bcrypt_hash(),
+                salt=None,
+                password_version=2,
+                is_admin=False,
+            )
+            db.add(new_user)
+            db.flush()
+            link = UserLink(
+                user_id=new_user.id,
+                provider="platform",
+                provider_user_id=platform_user_id,
+                provider_username=username,
+            )
+            db.add(link)
+            db.commit()
+            db.refresh(new_user)
+            return new_user
 
-    if by_username and by_username.platform_user_id != platform_user_id:
-        # 3. username 撞库 → 强制独立账号，避免账户劫持
-        logger.warning(
-            f"[oauth_helpers] username collision: {username} owned by "
-            f"platform_user_id={by_username.platform_user_id}, "
-            f"incoming platform_user_id={platform_user_id}"
-        )
-        new_user = User(
-            username=f"{username}_{platform_user_id}",
-            platform_user_id=platform_user_id,
-            password_hash=_dummy_bcrypt_hash(),
-            salt=None,
-            password_version=2,
-            is_admin=False,
-        )
-        db.add(new_user)
-        db.commit()
-        db.refresh(new_user)
-        return new_user
-
-    # 4. 全新
+    # 3. 全新用户
     new_user = User(
         username=username,
-        platform_user_id=platform_user_id,
         password_hash=_dummy_bcrypt_hash(),
         salt=None,
         password_version=2,
@@ -204,14 +219,22 @@ def find_or_create_user_from_platform(
     if email:
         new_user.email = email
     db.add(new_user)
+    db.flush()
+    link = UserLink(
+        user_id=new_user.id,
+        provider="platform",
+        provider_user_id=platform_user_id,
+        provider_username=username,
+    )
+    db.add(link)
     db.commit()
     db.refresh(new_user)
-    logger.info(f"[oauth_helpers] created new user {username} (platform_user_id={platform_user_id})")
+    logger.info(f"[oauth_helpers] created new user {username} (platform via UserLink)")
     return new_user
 
 
 # ────────────────────────────────────────────────────────────
-# 一站式：platform user_info → FeClaw access + refresh
+# 一站式：platform user_info -> FeClaw access + refresh
 # ────────────────────────────────────────────────────────────
 
 
