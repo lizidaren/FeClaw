@@ -1269,6 +1269,7 @@
                         deploy: {
                             mode: document.getElementById('deploy-mode').value,
                             feclaw_domain: document.getElementById('deploy-domain').value.trim(),
+                            subdomain_enabled: document.getElementById('deploy-mode').value === 'subdomain',
                             cookie_secure: document.getElementById('deploy-cookie-secure').checked,
                         }
                     })

@@ -690,3 +690,147 @@ class WebChannelService:
             "message": "IM Agent 收到消息，将在 WorkLoop 中异步处理。回复将通过 WebSocket 推送。",
         }
         return f"event: queued\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+    # ========== Gen 2 (IM Agent) Channel-Driven Stream ==========
+
+    def get_or_create_im_session(self, channel: str) -> ConversationSession:
+        """按 (agent_hash, channel) 获取或创建会话（Gen 2 IM Agent 用）。
+
+        与经典路径 (`get_or_create_session`) 不同：
+        - Gen 2 不允许客户端指定 session_id — 由服务端基于渠道组合 key 推断
+        - 同一 IM Agent 的同一渠道在唯一约束下只能有一个会话
+        """
+        import uuid
+
+        existing = (
+            self.db.query(ConversationSession)
+            .filter(
+                ConversationSession.agent_hash == self.agent_hash,
+                ConversationSession.channel == channel,
+                ConversationSession.user_id == self.user_id,
+            )
+            .first()
+        )
+        if existing:
+            return existing
+
+        new_session_id = f"sess_{uuid.uuid4().hex[:16]}"
+        now = datetime.utcnow()
+        session = ConversationSession(
+            session_id=new_session_id,
+            agent_hash=self.agent_hash,
+            user_id=self.user_id,
+            channel=channel,
+            messages="[]",
+            created_at=now,
+            updated_at=now,
+            message_count=0,
+        )
+        # topic 渠道前缀保留（与 web/mobile 一致）
+        session.topic = f"[{channel}]"
+        try:
+            self.db.add(session)
+            self.db.commit()
+            self.db.refresh(session)
+        except Exception as e:
+            # 唯一约束触发（race）：回滚后用直查返回已有会话
+            self.db.rollback()
+            logger.warning(
+                f"[WebChannel] IM session race on (agent_hash={self.agent_hash}, channel={channel}): {e}"
+            )
+            existing = (
+                self.db.query(ConversationSession)
+                .filter(
+                    ConversationSession.agent_hash == self.agent_hash,
+                    ConversationSession.channel == channel,
+                    ConversationSession.user_id == self.user_id,
+                )
+                .first()
+            )
+            if existing:
+                return existing
+            raise
+        return session
+
+    async def _im_chat_stream(
+        self,
+        user_input: str,
+        channel: str,
+        image_url: Optional[str] = None,
+        file_path: Optional[str] = None,
+        file_name: Optional[str] = None,
+    ) -> AsyncGenerator[str, None]:
+        """
+        Gen 2 (IM Agent) Channel-Driven 流式聊天
+
+        与经典路径的关键差异：
+        - **忽略客户端传入的 session_id** — 服务端按 (agent_hash, channel) 自动组合会话
+        - 消息直接 dispatch 给协处理器（IM Agent 自驱，不再一问一答）
+        - CoprocessorService 跑在常驻协程中，IRQ 经 WorkSession 异步处理后通过 WS push 回复
+
+        Channel 校验在路由层 (`routers/feclaw_chat.py`) 已完成。
+        """
+        from services.interrupt_controller import (
+            InterruptController,
+            Interrupt,
+            InterruptType,
+            Priority,
+        )
+
+        # 1. 按 (agent_hash, channel) 取/建会话
+        session = self.get_or_create_im_session(channel)
+
+        # 2. 图片/文件预处理（与经典路径同源，未来可下沉复用）
+        actual_user_input = user_input
+        if image_url:
+            vfs_path, _ = await _download_and_save_image_to_vfs(
+                image_url, self.user_id, agent_hash=self.agent_hash
+            )
+            if vfs_path:
+                prefix = (
+                    "\n【用户上传图片】\n"
+                    f"图片路径: {vfs_path}\n"
+                    "⚠️ 后续工具调用引用此图片必须使用以上路径值。"
+                )
+                actual_user_input = (
+                    f"{prefix}\n\n{user_input}" if user_input else prefix
+                )
+            else:
+                actual_user_input = (
+                    f"【图片上传失败】\n\n{user_input}" if user_input else "【图片上传失败】"
+                )
+
+        # 3. 记录用户消息到会话
+        self.add_message(session, "user", f"{user_input} [图片]" if image_url else user_input)
+
+        # 4. 投递 IRQ → Coprocessor WorkLoop（不调用 ChatService 直接 chat）
+        ic = InterruptController.instance()
+        ic.dispatch(Interrupt(
+            irq_type=InterruptType.MESSAGE,
+            agent_hash=self.agent_hash,
+            priority=Priority.HIGH,
+            payload={
+                "channel": channel,
+                "user_id": self.user_id,
+                "agent_hash": self.agent_hash,
+                "session_id": session.session_id,
+                "msg_id": None,
+                "trigger_content": actual_user_input[:1000],
+                "trigger_sender": "用户",
+            },
+        ))
+        logger.info(
+            f"[WebChannel:IM] IRQ dispatched agent={self.agent_hash} "
+            f"channel={channel} user={self.user_id} session={session.session_id}"
+        )
+
+        # 5. SSE 流：返回 queued 占位 + done 终止
+        queued_payload = {
+            "status": "queued",
+            "agent_hash": self.agent_hash,
+            "channel": channel,
+            "session_id": session.session_id,
+            "message": "IM Agent 收到消息，将在 WorkLoop 中异步处理。回复将通过 WebSocket 推送。",
+        }
+        yield f"event: queued\ndata: {json.dumps(queued_payload, ensure_ascii=False)}\n\n"
+        yield f"event: done\ndata: {json.dumps({'session_id': session.session_id, 'usage': {}}, ensure_ascii=False)}\n\n"

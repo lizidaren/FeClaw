@@ -160,7 +160,7 @@ python -m uvicorn main:app --host 0.0.0.0 --port 8080 --reload
 | `TENCENT_COS_SECRET_KEY` | COS 密钥 Key | — |
 | `TENCENT_COS_BUCKET` | COS 存储桶名称（需在腾讯云创建） | — |
 | `OAUTH_PROVIDER_URL` | OAuth Provider 地址（启用 SSO 时） | — |
-| `FECLAW_DOMAIN` | 部署域名 | — |
+| `FECLAW_PUBLIC_URL` | 部署域名 | — |
 | `MIMO_API_KEY` | 小米 MiMo | — |
 | `MAIN_TEXT_MODEL` | 默认文本模型 | `deepseek-v4-flash` |
 | `MAIN_VISION_MODEL` | 默认视觉模型 | `qwen3.6-35b-a3b` |

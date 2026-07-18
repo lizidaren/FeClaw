@@ -220,7 +220,7 @@ def create_share_link(
             slug = get_unique_slug(db)
             # 子域名 URL：{agent_hash}.feclaw.lizidaren.cn/s/{slug}
             _sub = f"{agent_hash}." if agent_hash else ""
-            url = f"https://{_sub}{settings.FECLAW_DOMAIN}/s/{slug}"
+            url = f"https://{_sub}{settings.FECLAW_PUBLIC_URL}/s/{slug}"
 
             mapping = ShareMapping(
                 user_id=user_id or "",

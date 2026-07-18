@@ -70,7 +70,7 @@ async def oauth_login(request: Request):
         secure=True,
         httponly=True,
         samesite="none",
-        domain=f".{settings.FECLAW_DOMAIN}" if settings.FECLAW_DOMAIN else None,
+        domain=f".{settings.FECLAW_PUBLIC_URL}" if settings.FECLAW_PUBLIC_URL and settings.FECLAW_SUBDOMAIN_ENABLED else None,
     )
     logger.info(f"OAuth login initiated, state={state[:16]}...")
 
@@ -91,7 +91,7 @@ async def oauth_callback(
     # 用户取消授权
     if error:
         logger.info(f"OAuth callback with error: {error} ({error_description})")
-        domain = settings.FECLAW_DOMAIN or "feclaw.lizidaren.cn"
+        domain = settings.FECLAW_PUBLIC_URL or "feclaw.lizidaren.cn"
         base = f"https://{domain}"
         redirect_url = f"{base}/login?error={error}"
         return RedirectResponse(url=redirect_url)
@@ -224,7 +224,7 @@ async def oauth_callback(
     redirect_to = "/dashboard"
 
     # P0-2 修复：token 只走 cookie，不暴露在 URL 中
-    domain = f".{settings.FECLAW_DOMAIN}" if settings.FECLAW_DOMAIN else None
+    domain = f".{settings.FECLAW_PUBLIC_URL}" if settings.FECLAW_PUBLIC_URL else None
     response = RedirectResponse(url=redirect_to)
 
     response.set_cookie(
@@ -302,7 +302,7 @@ async def oauth_logout(request: Request):
         "message": "Logged out successfully",
         "redirect_url": oauth_svc.build_logout_url(
             id_token=id_token_hint,
-            post_logout_redirect_uri=f"https://{settings.FECLAW_DOMAIN}/login" if settings.FECLAW_DOMAIN else None
+            post_logout_redirect_uri=f"https://{settings.FECLAW_PUBLIC_URL}/login" if settings.FECLAW_PUBLIC_URL else None
         )
     })
 

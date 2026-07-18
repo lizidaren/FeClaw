@@ -128,10 +128,10 @@ async def resolve_share_by_slug(slug: str, request: Request, db: Session = Depen
     # 从 Host 头提取 agent_hash（子域名前缀）
     host = request.headers.get("host", "")
     agent_hash = None
-    if host and settings.FECLAW_DOMAIN in host:
-        prefix = host.split(f".{settings.FECLAW_DOMAIN}")[0]
+    if host and settings.FECLAW_SUBDOMAIN_ENABLED and settings.FECLAW_PUBLIC_URL in host:
+        prefix = host.split(f".{settings.FECLAW_PUBLIC_URL}")[0]
         # 4 字符的 agent hash 子域名
-        if prefix and prefix != settings.FECLAW_DOMAIN and len(prefix) == 4:
+        if prefix and prefix != settings.FECLAW_PUBLIC_URL and len(prefix) == 4:
             agent_hash = prefix
 
     mapping = resolve_slug(slug, agent_hash, db)

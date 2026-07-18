@@ -84,12 +84,9 @@ class Settings(BaseSettings):
     OAUTH_END_SESSION_URL: str = ""  # 默认: {OAUTH_PROVIDER_URL}/oauth/end-session
     ADMIN_API_KEY: str = ""
 
-    # Feature Flag：设为 True 启用 OAuth，禁止本地注册/登录
-    _oauth_enabled: bool = False
-
-    @property
-    def OAUTH_ENABLED(self) -> bool:
-        return self._oauth_enabled
+    # OAuth / SSO：设为 true 启用 OAuth 登录
+    # 也可自动检测（有 OAUTH_PROVIDER_URL 且不为空时自动启用）
+    OAUTH_ENABLED: bool = False
 
     # 腾讯云 COS 存储配置
     TENCENT_COS_SECRET_ID: str = ""
@@ -116,10 +113,11 @@ class Settings(BaseSettings):
     TOTP_STRICT_OWNERSHIP: bool = True  # TOTP 登录时严格检查 Agent 归属，True=仅能访问自己的 Agent；False=可以通过 TOTP 访问任何 Agent
 
     # FeClaw 域名配置
-    FECLAW_DOMAIN: str = ""  # FeClaw 主域名（如 feclaw.example.com），从 FECLAW_DOMAIN 环境变量读取
-    FECLAW_CDN_DOMAIN: str = ""  # CDN 域名，默认同 FECLAW_DOMAIN
-    FECLAW_API_DOMAIN: str = ""  # API 域名，默认同 FECLAW_DOMAIN
-    FECLAW_STATIC_DOMAIN: str = ""  # 静态资源域名，默认同 FECLAW_DOMAIN
+    FECLAW_PUBLIC_URL: str = ""  # 服务器访问地址（如 feclaw.example.com 或 139.199.68.185:8080）
+    FECLAW_SUBDOMAIN_ENABLED: bool = False  # 是否启用 Agent 子域名（启用后 {agent}.public_url）
+    FECLAW_CDN_DOMAIN: str = ""  # CDN 域名，默认同 FECLAW_PUBLIC_URL
+    FECLAW_API_DOMAIN: str = ""  # API 域名，默认同 FECLAW_PUBLIC_URL
+    FECLAW_STATIC_DOMAIN: str = ""  # 静态资源域名，默认同 FECLAW_PUBLIC_URL
 
     # 微信配置（iLink 协议）
     WECHAT_ILINK_BASE_URL: str = ""

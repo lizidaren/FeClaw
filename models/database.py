@@ -171,16 +171,25 @@ class AgentUsageLog(Base):
 
 
 class ConversationSession(Base):
-    """对话会话表（按 Agent 隔离）"""
+    """对话会话表（按 Agent 隔离）
+
+    Gen 2 (IM Agent) 路由：
+    - 同一 (agent_hash, channel) 组合在 IM Agent 下视为同一会话（无显式 session_id）
+    - 唯一约束：(agent_hash, channel) — 同一 IM Agent 的同一渠道只对应一个会话
+    - 索引：(agent_hash, channel) — 按渠道快速查找会话
+    """
     __tablename__ = "conversation_sessions"
     __table_args__ = (
         Index("idx_conversation_sessions_agent_hash", "agent_hash"),
+        Index("idx_conversation_sessions_agent_channel", "agent_hash", "channel"),
+        UniqueConstraint("agent_hash", "channel", name="uq_session_agent_channel"),
     )
 
     id = Column(Integer, primary_key=True, index=True)
     session_id = Column(String(64), nullable=False, unique=True, index=True)
     user_id = Column(Integer, nullable=False, index=True)  # 所属用户（从 AgentProfile 获取）
     agent_hash = Column(String(8), nullable=False, index=True)  # Agent hash
+    channel = Column(String(32), nullable=True)  # Gen 2: 渠道名（web/mobile），classic Agent 保留 NULL
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     messages = Column(Text, nullable=False)

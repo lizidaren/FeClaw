@@ -116,9 +116,10 @@ async def get_config(_admin: User = Depends(get_admin_user)):
     env = _read_env()
 
     # 1. 部署模式（推断）
-    feclaw_domain = (env.get("FECLAW_DOMAIN", "") or settings.FECLAW_DOMAIN or "").strip()
-    # 推断：单站点 = FECLAW_DOMAIN 为空
-    deploy_mode = "subdomain" if feclaw_domain else "single"
+    feclaw_domain = (env.get("FECLAW_PUBLIC_URL", "") or settings.FECLAW_PUBLIC_URL or "").strip()
+    # 推断：单站点 = FECLAW_PUBLIC_URL 为空
+    subdomain_enabled = env.get("FECLAW_SUBDOMAIN_ENABLED", "").strip().lower() in ("true", "1", "yes") or settings.FECLAW_SUBDOMAIN_ENABLED
+    deploy_mode = "subdomain" if feclaw_domain and subdomain_enabled else "single"
 
     # 2. Cookie secure：pydantic 把 "true"/"false" 解析为 bool，env 中可能仍是字符串
     cookie_secure_raw = env.get("COOKIE_SECURE", "")
@@ -181,6 +182,7 @@ async def get_config(_admin: User = Depends(get_admin_user)):
         "deploy": {
             "mode": deploy_mode,
             "feclaw_domain": feclaw_domain,
+            "subdomain_enabled": subdomain_enabled,
             "cookie_secure": cookie_secure,
         },
         "database": {
@@ -209,6 +211,7 @@ async def get_config(_admin: User = Depends(get_admin_user)):
             "client_id": oauth_client_id,
             "secret_set": bool(oauth_client_secret.strip()),
             "redirect_uri": oauth_redirect_uri,
+            "enabled": env.get("OAUTH_ENABLED", "false").lower() == "true",
             "configured": bool(oauth_provider_url and oauth_client_id and oauth_redirect_uri),
         },
         "redis": {
@@ -320,11 +323,15 @@ async def update_config(
         # 部署模式
         if payload.deploy.mode == "subdomain":
             if not payload.deploy.feclaw_domain or not payload.deploy.feclaw_domain.strip():
-                raise HTTPException(status_code=400, detail="子域名模式必须填写 FECLAW_DOMAIN")
-            updates["FECLAW_DOMAIN"] = payload.deploy.feclaw_domain.strip()
+                raise HTTPException(status_code=400, detail="子域名模式必须填写 FECLAW_PUBLIC_URL")
+            updates["FECLAW_PUBLIC_URL"] = payload.deploy.feclaw_domain.strip()
+            updates["FECLAW_SUBDOMAIN_ENABLED"] = "true"
         else:
-            # 单站点：清空 FECLAW_DOMAIN
-            updates["FECLAW_DOMAIN"] = ""
+            updates["FECLAW_PUBLIC_URL"] = ""
+            updates["FECLAW_SUBDOMAIN_ENABLED"] = "false"
+        # 此外也支持通过 subdomain_enabled 字段直接控制
+        if hasattr(payload.deploy, "subdomain_enabled"):
+            updates["FECLAW_SUBDOMAIN_ENABLED"] = "true" if payload.deploy.subdomain_enabled else "false"
         updates["COOKIE_SECURE"] = "true" if payload.deploy.cookie_secure else "false"
         updated_sections.append("deploy")
 

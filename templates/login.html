@@ -78,11 +78,11 @@
             <button class="btn btn-primary" onclick="verifyTOTP()" id="loginBtn">验证并登录</button>
         </div>
 
-        <div class="divider" id="loginDivider">
+        <div class="divider" id="loginDivider" style="{{ 'display:none' if oauth_enabled else '' }}">
             <span class="divider-text">其他方式</span>
         </div>
-        <button class="btn btn-secondary" id="switchBtn" onclick="window.location.href='{{ oauth_login_url }}'">
-            使用 Platform 账号登录
+        <button class="btn btn-secondary" id="switchBtn" onclick="window.location.href='{{ oauth_login_url }}'" style="{{ 'display:none' if oauth_enabled else '' }}">
+            使用 {{ oauth_provider_name }} 登录
         </button>
 
         <div class="error-msg" id="errorMsg"></div>
@@ -254,8 +254,8 @@
 <body>
     <div class="glass-panel login-panel animate-scale-in">
 
-        <!-- OAuth 跳转（仅 OAuth 已配时显示） -->
-        <div id="oauthSection" class="brand mb-xl text-center">
+        <!-- OAuth 跳转（仅 OAuth 已配置且启用时显示） -->
+        <div id="oauthSection" class="brand mb-xl text-center" style="{{ 'display:none' if not oauth_enabled else '' }}">
             <span class="brand-icon" style="display:inline-flex;margin-bottom:12px;">
                 <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
                     <path d="M12 2L2 7l10 5 10-5-10-5z"/>

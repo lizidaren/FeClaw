@@ -124,7 +124,7 @@ class ShareToolsMixin(AgentToolsServiceBase):
 
             return f"""验证码: {code}
 过期时间: {expire.strftime("%Y-%m-%d %H:%M:%S")}
-登录地址: https://{agent.hash}.{settings.FECLAW_CDN_DOMAIN or settings.FECLAW_DOMAIN}/login
+登录地址: https://{agent.hash}.{settings.FECLAW_CDN_DOMAIN or settings.FECLAW_PUBLIC_URL}/login
 使用方法: 在 Agent 控制台登录页输入上方验证码即可
 
 注意：验证码 5 分钟内有效，30 秒自动刷新。请告知接收方尽快使用。"""

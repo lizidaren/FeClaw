@@ -29,6 +29,12 @@ router = APIRouter(tags=["FeClaw Chat"])
 
 # ========== 请求模型 ==========
 
+# /api/chat/stream 允许的渠道白名单（Gen 2 channel-driven 路由）
+# - `wechat` 由 routers/wechat.py 接管，与 SSE 路由隔离
+# - classic Agent 不强制带 channel，传则走相同白名单
+ALLOWED_STREAM_CHANNELS = {"web", "mobile"}
+
+
 class ChatRequest(BaseModel):
     """聊天请求"""
     content: str
@@ -37,6 +43,8 @@ class ChatRequest(BaseModel):
     file_path: Optional[str] = None  # 文件 VFS 路径（前端上传后）
     file_name: Optional[str] = None  # 原始文件名
     group_id: Optional[str] = None  # 群聊 ID（P0-2 fix：非空时走群聊逻辑）
+    channel: Optional[str] = None  # Gen 2: 渠道标识（白名单 {web, mobile}）；classic Agent 忽略
+    agent_hash: Optional[str] = None  # Gen 2: IM Agent 标识（query/header 无法带时走 body）
 
 
 class SessionResponse(BaseModel):
@@ -112,6 +120,58 @@ async def chat_stream(
     """
     import logging
     logger = logging.getLogger(__name__)
+
+    # ===== 渠道白名单校验 (Gen 2 channel-driven) =====
+    if request.channel and request.channel not in ALLOWED_STREAM_CHANNELS:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"channel '{request.channel}' not allowed at this endpoint. "
+                f"Allowed: {sorted(ALLOWED_STREAM_CHANNELS)}"
+            ),
+        )
+
+    # ===== Gen 2 (IM Agent) 分支 =====
+    # 经典路径保持完全不变：有 group_id 走群聊；否则走旧的私聊逻辑。
+    # 仅当 client 同时指明 (channel, agent_hash) 且目标 Agent 为 IM 模式时才进 Gen 2。
+    if request.channel and (agent_hash or request.agent_hash):
+        target_hash = agent_hash or request.agent_hash
+        from models.database import AgentProfile  # 局部导入，避免循环
+        target_agent = (
+            db.query(AgentProfile)
+            .filter(AgentProfile.hash == target_hash, AgentProfile.user_id == user_id)
+            .first()
+        )
+        if target_agent is None:
+            raise HTTPException(status_code=404, detail="Agent not found")
+        if getattr(target_agent, "agent_mode", "classic") == "im":
+            # Gen 2 不允许显式 session_id —— 服务端按 (agent_hash, channel) 自动组合
+            if request.session_id:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "IM Agent (Gen 2) ignores client-provided session_id; "
+                        "session is derived from (agent_hash, channel)."
+                    ),
+                )
+            chat_service = WebChannelService(
+                db, user_id=user_id, agent_hash=target_hash
+            )
+            return StreamingResponse(
+                chat_service._im_chat_stream(
+                    user_input=request.content,
+                    channel=request.channel,
+                    image_url=request.image_url,
+                    file_path=request.file_path,
+                    file_name=request.file_name,
+                ),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive",
+                    "X-Accel-Buffering": "no",
+                },
+            )
 
     # P0-2: 群聊分支 —— 校验群存在/所有权、保存用户消息、流式生成、回复保存为群消息
     if request.group_id:

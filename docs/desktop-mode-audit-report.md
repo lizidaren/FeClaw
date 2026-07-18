@@ -380,7 +380,7 @@ let engine = Command::new("feclaw")
 | `sandbox_manager.py:603` | `"/tmp/seccomp_bpf.bin"` | 同上 |
 | `sandbox_manager.py:604` | `"/usr/local/libexec/feclaw/seccomp-enforcer"` | Windows 没有 `/usr/local` |
 | `bash_tools.py:29` | `python3` | Windows 上是 `python.exe` |
-| `routers/feclaw_domain.py:36` | `f".{settings.FECLAW_DOMAIN}"` | FECLAW_DOMAIN 空时 cookie domain 为空 |
+| `routers/feclaw_domain.py:36` | `f".{settings.FECLAW_PUBLIC_URL}"` | FECLAW_PUBLIC_URL 空时 cookie domain 为空 |
 | `routers/oauth.py:60` | `secure=True` cookie | HTTP 下不被发送 |
 | `main.py:78` | `if not settings.JWT_SECRET: raise` | Desktop 用户没 .env 直接挂 |
 

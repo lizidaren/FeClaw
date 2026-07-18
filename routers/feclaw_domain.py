@@ -189,11 +189,11 @@ async def auth_options(host: str = Query(None), request: Request = None):
             "oauth_login_url": "..."
         }
     """
-    feclaw_domain = settings.FECLAW_DOMAIN
+    feclaw_domain = settings.FECLAW_PUBLIC_URL
     if not host and request:
         host = _get_domain(request)
 
-    # 未配置 FECLAW_DOMAIN 时默认非子域名
+    # 未配置 FECLAW_PUBLIC_URL 时默认非子域名
     if not feclaw_domain:
         is_subdomain = False
     else:
@@ -258,8 +258,8 @@ async def auth_sync(
 
         if result:
             # Cookie 有效，重定向回子域名并携带 token
-            feclaw_domain = settings.FECLAW_DOMAIN
-            # 没有配置 FECLAW_DOMAIN 时跳过严格校验，直接使用 host
+            feclaw_domain = settings.FECLAW_PUBLIC_URL
+            # 没有配置 FECLAW_PUBLIC_URL 时跳过严格校验，直接使用 host
             if not feclaw_domain:
                 valid_host = bool(host)
             else:
@@ -346,7 +346,7 @@ async def generate_totp(request: TOTPVerifyRequest, user=Depends(get_current_use
         code=code,
         agent_hash=request.agent_hash,
         expires_in=TOTPService.VALID_WINDOWS * TOTPService.INTERVAL,
-        login_url=f"https://{request.agent_hash}.{settings.FECLAW_DOMAIN}/login?totp={code}",
+        login_url=f"https://{request.agent_hash}.{settings.FECLAW_PUBLIC_URL}/login?totp={code}" if settings.FECLAW_SUBDOMAIN_ENABLED else f"/login?totp={code}",
         qr_data_url=generate_qr_data_url(totp_uri),
     )
 
@@ -719,6 +719,52 @@ async def delete_file(path: str, request: Request, user: User = Depends(get_curr
     return {"status": "deleted", "path": path}
 
 
+# ==================== 本地存储友好的 raw 文件流 ====================
+
+from fastapi.responses import Response as FastAPIResponse
+
+
+@router.get("/api/file/raw")
+async def get_file_raw(
+    path: str,
+    request: Request,
+    user: User = Depends(get_current_user),
+):
+    """直接流式返回文件原始字节（用于本地存储模式下的图片/视频/音频预览）。
+
+    行为：
+    - config/ 虚拟目录：返回 JSON 文本（与 /api/file?path=config/... 一致）
+    - 其他路径：返回原始字节，带上 Content-Type
+    """
+    import os as _os
+    if _os.path.isabs(path) or ".." in path:
+        raise HTTPException(status_code=400, detail="Invalid path")
+    agent_hash = extract_hash_from_host(_get_domain(request))
+    if not agent_hash:
+        raise HTTPException(status_code=400, detail="Invalid agent hash from domain")
+
+    # config/ 走 DB
+    if path == "config" or path.startswith("config/"):
+        val = _read_config_value(agent_hash, path)
+        if val is None:
+            raise HTTPException(status_code=404, detail="Config not found")
+        return FastAPIResponse(
+            content=val.encode("utf-8"),
+            media_type="text/plain; charset=utf-8",
+        )
+
+    full_path = _vfs_path(agent_hash, path)
+    content = s().get_file_content(full_path)
+    if content is None:
+        raise HTTPException(status_code=404, detail="File not found")
+    import mimetypes
+    mime_type, _ = mimetypes.guess_type(path)
+    return FastAPIResponse(
+        content=content,
+        media_type=mime_type or "application/octet-stream",
+    )
+
+
 # ==================== 签名 URL API ====================
 
 class SignedUrlRequest(PydanticModel):
@@ -843,7 +889,7 @@ async def home(request: Request):
         return templates.TemplateResponse(request, "agent_dashboard.html", {"request": request, "agent_hash": agent_hash})
     else:
         # 检查是否为无效子域名（非 4 位 hex 的子域名）→ 302 回主域名
-        feclaw_domain = settings.FECLAW_DOMAIN
+        feclaw_domain = settings.FECLAW_PUBLIC_URL
         if feclaw_domain and host and host.endswith(f".{feclaw_domain}") and host != feclaw_domain:
             logger.info(f"Invalid subdomain detected: {host}, redirecting to {feclaw_domain}")
             return RedirectResponse(url=f"https://{feclaw_domain}", status_code=302)
@@ -861,11 +907,13 @@ async def login_page(request: Request):
     is_subdomain = bool(agent_hash)
     from services.oauth_service import oauth_service
     oauth_configured = oauth_service._oauth_configured
+    oauth_enabled = oauth_configured and settings.OAUTH_ENABLED
     resp = templates.TemplateResponse(request, "login.html", {
         "request": request,
         "is_subdomain": is_subdomain,
         "agent_hash": agent_hash,
         "oauth_configured": oauth_configured,
+        "oauth_enabled": oauth_enabled,
         "oauth_login_url": "/api/oauth/login",
         "oauth_provider_name": settings.OAUTH_PROVIDER_NAME,
         "oauth_register_url": settings.OAUTH_PROVIDER_URL + "/register",
@@ -883,15 +931,25 @@ async def initialize_page(request: Request):
 
 @router.get("/setup", response_class=HTMLResponse)
 @router.get("/setup/", response_class=HTMLResponse)
-async def setup_page(request: Request):
-    """首次启动配置向导页面（仅 admin 可见，未登录会重定向到 /login）。
+async def setup_page(
+    request: Request,
+    reset: str = Query("", alias="reset"),
+):
+    """配置向导 / 已完成时的只读摘要页面。
 
-    页面自身不强制鉴权（前端在加载时会检查 token；后端 API 已用 get_admin_user 守护）。
-    未登录用户打开 /setup 时由前端跳转到 /login。
+    冷启动：setup_router 的路由生效（此路由在 cold-start 时不会注册）。
+    正常启动：复用 setup_router 的渲染逻辑：
+      - 已完成 → 渲染只读 summary
+      - 未完成 / ?reset=1 → 渲染向导
     """
-    resp = templates.TemplateResponse(request, "setup.html", {"request": request})
-    resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
-    return resp
+    from sqlalchemy.orm import Session as _Session
+    from models.database import get_db as _get_db
+    db: _Session = next(_get_db())
+    try:
+        from routers.setup import _render_setup_view
+        return _render_setup_view(request=request, db=db, token="", reset=reset)
+    finally:
+        db.close()
 
 
 @router.get("/dashboard", response_class=HTMLResponse)
@@ -904,8 +962,8 @@ async def dashboard_page(request: Request, agent: Optional[int] = Query(None)):
         try:
             agent_profile = db.query(AgentProfile).filter(AgentProfile.id == agent).first()
             if agent_profile:
-                domain = settings.FECLAW_DOMAIN
-            if domain:
+                domain = settings.FECLAW_PUBLIC_URL
+            if domain and settings.FECLAW_SUBDOMAIN_ENABLED:
                 return RedirectResponse(url=f"https://{agent_profile.hash}.{domain}", status_code=302)
             return RedirectResponse(url=f"/agent/{agent_profile.hash}", status_code=302)
         finally:
@@ -1032,9 +1090,9 @@ def _check_agent_configured(agent_hash: str) -> bool:
 def _redirect_to_subdomain(agent_hash: str, path: str = "") -> RedirectResponse:
     """将根域名 agent 路径重定向到子域名
 
-    有 FECLAW_DOMAIN 配置时用子域名，否则返回 None（由调用方决定渲染逻辑）。
+    有 FECLAW_PUBLIC_URL 配置时用子域名，否则返回 None（由调用方决定渲染逻辑）。
     """
-    domain = settings.FECLAW_DOMAIN
+    domain = settings.FECLAW_PUBLIC_URL
     if domain:
         return RedirectResponse(url=f"https://{agent_hash}.{domain}{path}", status_code=302)
     return None  # 无域名时由调用方在根域名下渲染
@@ -1086,7 +1144,7 @@ async def agent_files(agent_hash: str, request: Request):
     sub = _redirect_to_subdomain(agent_hash, "/files")
     if sub:
         return sub
-    domain = settings.FECLAW_DOMAIN
+    domain = settings.FECLAW_PUBLIC_URL
     home_url = f"https://{agent_hash}.{domain}" if domain else f"/agent/{agent_hash}"
     return templates.TemplateResponse(request, "agent_files.html", {"request": request, "agent_hash": agent_hash, "home_url": home_url})
 
@@ -1114,8 +1172,8 @@ async def agent_configure(agent_hash: str, request: Request):
         raise HTTPException(status_code=403, detail="无权访问")
     from urllib.parse import urlparse
     # 有域名用子域名，无域名 fallback 到当前请求 host
-    if settings.FECLAW_DOMAIN:
-        agent_base_url = f"https://{agent_hash}.{settings.FECLAW_DOMAIN}"
+    if settings.FECLAW_PUBLIC_URL and settings.FECLAW_SUBDOMAIN_ENABLED:
+        agent_base_url = f"https://{agent_hash}.{settings.FECLAW_PUBLIC_URL}"
     else:
         # 从请求中提取 host（兼容 IP:port 和域名）
         host = request.headers.get("host", "localhost:8080")
@@ -1123,7 +1181,8 @@ async def agent_configure(agent_hash: str, request: Request):
     return templates.TemplateResponse(request, "agent_configure.html", {
         "request": request,
         "agent_hash": agent_hash,
-        "feclaw_domain": settings.FECLAW_DOMAIN,
+        "feclaw_domain": settings.FECLAW_PUBLIC_URL,
+        "subdomain_enabled": settings.FECLAW_SUBDOMAIN_ENABLED,
         "agent_base_url": agent_base_url,
     })
 

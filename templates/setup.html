@@ -3,23 +3,25 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>配置向导 - FeClaw</title>
+    <title>{% if setup_done %}系统配置摘要 - FeClaw{% else %}配置向导 - FeClaw{% endif %}</title>
     <link rel="stylesheet" href="/static/css/setup.css">
     <script>
         // 冷启动：从 URL 读取 token。正常启动时 token 为空，跳到 /login。
+        // setup_done 时跳过 token 跳走逻辑（已配置完成允许匿名访问 summary）
         (function () {
             var token = new URLSearchParams(window.location.search).get('token') || '';
+            var setupDone = {% if setup_done %}true{% else %}false{% endif %};
             window.__FECLAW_SETUP_TOKEN__ = token;
+            window.__FECLAW_SETUP_DONE__ = setupDone;
             // 冷启动页面：没有 token 必须立即跳走（防止用户误访问）
-            if (!token) {
-                // 可能是冷启动（漏带 token）→ 提示
-                // 或可能是正常启动但误访问 setup → 也提示
+            // 但 setup_done 时不跳（允许匿名访问 summary）
+            if (!token && !setupDone) {
                 document.documentElement.setAttribute('data-no-token', '1');
             }
         })();
     </script>
 </head>
-<body>
+<body class="{% if setup_done %}setup-done-body{% endif %}">
     <!-- 无 token 时的兜底提示（同时由 setup.js 在 DOMContentLoaded 时重定向到 /login） -->
     <div id="no-token-guard" style="display:none;position:fixed;inset:0;background:#050510;color:#e0e0e0;display:flex;align-items:center;justify-content:center;text-align:center;padding:24px;font-family:sans-serif;">
         <div>
@@ -32,7 +34,8 @@
     <div class="setup-container">
         <header class="setup-header">
             <div class="logo">FeClaw</div>
-            <div class="step-indicator">
+            <!-- 向导模式：显示步骤指示器；摘要模式：不显示 -->
+            <div class="step-indicator" {% if setup_done %}style="display:none"{% endif %}>
                 <div class="step-dot active" data-step="1"><span>1</span></div>
                 <div class="step-line"></div>
                 <div class="step-dot" data-step="2"><span>2</span></div>
@@ -45,7 +48,7 @@
                 <div class="step-line"></div>
                 <div class="step-dot" data-step="6"><span>6</span></div>
             </div>
-            <div class="step-titles">
+            <div class="step-titles" {% if setup_done %}style="display:none"{% endif %}>
                 <span data-step-title="1" class="active">数据库</span>
                 <span data-step-title="2">管理员</span>
                 <span data-step-title="3">选择平台</span>
@@ -56,6 +59,132 @@
         </header>
 
         <main class="setup-main">
+            <!-- ============================================================ -->
+            <!-- 已完成视图：只读配置摘要（setup_done=True 时由 JS 渲染）       -->
+            <!-- ============================================================ -->
+            <section class="step-panel active" data-panel="done" id="setup-done-panel" {% if not setup_done %}style="display:none"{% endif %}>
+                <h1>✅ 系统已配置完成</h1>
+                <p class="step-subtitle">
+                    当前 FeClaw 实例的配置已写入 <code>.env</code> 文件。如需修改，请前往
+                    <a href="/admin/settings" style="color:#667eea">管理后台 → 设置</a>
+                    或点击下方按钮强制重走向导。
+                </p>
+
+                <div id="setup-done-loading" style="text-align:center;padding:40px 0;color:var(--text-tertiary);">
+                    ⏳ 正在加载配置摘要…
+                </div>
+
+                <div id="setup-done-content" style="display:none">
+                    <div class="summary-section">
+                        <div class="summary-section-title">🌐 部署与域名</div>
+                        <div class="summary-row">
+                            <span class="label">部署模式</span>
+                            <span class="value" id="sd-deployment-mode">-</span>
+                        </div>
+                        <div class="summary-row">
+                            <span class="label">主域名</span>
+                            <span class="value" id="sd-feclaw-domain">-</span>
+                        </div>
+                        <div class="summary-row">
+                            <span class="label">HTTPS (Cookie Secure)</span>
+                            <span class="value" id="sd-cookie-secure">-</span>
+                        </div>
+                    </div>
+
+                    <div class="summary-section">
+                        <div class="summary-section-title">🧠 LLM 模型选择</div>
+                        <div class="summary-row">
+                            <span class="label">主文本模型</span>
+                            <span class="value" id="sd-llm-model">-</span>
+                        </div>
+                        <div class="summary-row">
+                            <span class="label">视觉模型</span>
+                            <span class="value" id="sd-vision-model">-</span>
+                        </div>
+                        <div class="summary-row">
+                            <span class="label">嵌入模型</span>
+                            <span class="value" id="sd-embedding-model">-</span>
+                        </div>
+                        <div class="summary-row">
+                            <span class="label">联网搜索后端</span>
+                            <span class="value" id="sd-search-engine">-</span>
+                        </div>
+                    </div>
+
+                    <div class="summary-section">
+                        <div class="summary-section-title">🔌 已配置的 LLM Provider</div>
+                        <div class="summary-row">
+                            <span class="label">已配置 / 总数</span>
+                            <span class="value" id="sd-providers-count">-</span>
+                        </div>
+                        <div id="sd-providers-list" class="provider-list" style="margin-top:8px;margin-bottom:0"></div>
+                    </div>
+
+                    <div class="summary-section">
+                        <div class="summary-section-title">💾 存储配置</div>
+                        <div class="summary-row">
+                            <span class="label">存储模式</span>
+                            <span class="value" id="sd-storage-mode">-</span>
+                        </div>
+                        <div class="summary-row">
+                            <span class="label">本地存储根目录</span>
+                            <span class="value" id="sd-local-storage-root">-</span>
+                        </div>
+                        <div class="summary-row">
+                            <span class="label">腾讯云 COS Bucket</span>
+                            <span class="value" id="sd-cos-bucket">-</span>
+                        </div>
+                        <div class="summary-row">
+                            <span class="label">向量后端</span>
+                            <span class="value" id="sd-vector-backend">-</span>
+                        </div>
+                    </div>
+
+                    <div class="summary-section">
+                        <div class="summary-section-title">🗄️ 数据库</div>
+                        <div class="summary-row">
+                            <span class="label">连接地址（脱敏）</span>
+                            <span class="value" id="sd-database-url">-</span>
+                        </div>
+                    </div>
+
+                    <div class="summary-section">
+                        <div class="summary-section-title">🔐 OAuth / SSO</div>
+                        <div class="summary-row">
+                            <span class="label">启用状态</span>
+                            <span class="value" id="sd-oauth-enabled">-</span>
+                        </div>
+                        <div class="summary-row">
+                            <span class="label">提供商</span>
+                            <span class="value" id="sd-oauth-provider">-</span>
+                        </div>
+                    </div>
+
+                    <div class="summary-section">
+                        <div class="summary-section-title">⚙️ 账户</div>
+                        <div class="summary-row">
+                            <span class="label">管理员用户名</span>
+                            <span class="value" id="sd-admin-username">-</span>
+                        </div>
+                        <div class="summary-row">
+                            <span class="label">管理员邮箱</span>
+                            <span class="value" id="sd-admin-email">-</span>
+                        </div>
+                    </div>
+
+                    <div class="step-actions">
+                        <button class="btn btn-secondary" id="btn-go-dashboard">← 返回控制台</button>
+                        <button class="btn btn-secondary" id="btn-go-admin">管理后台 →</button>
+                        <button class="btn btn-primary" id="btn-reset-setup">重新走向导 ⚠</button>
+                    </div>
+                </div>
+            </section>
+
+            <!-- ============================================================ -->
+            <!-- 向导视图：包裹 Step 1-6，setup_done 时整体隐藏                  -->
+            <!-- ============================================================ -->
+            <div id="setup-wizard-container" {% if setup_done %}style="display:none"{% endif %}>
+
             <!-- Step 1: MySQL 数据库配置 -->
             <section class="step-panel active" data-panel="1">
                 <h1>数据库配置</h1>
@@ -197,10 +326,12 @@
                     <button class="btn btn-primary" id="btn-finish">完成配置 🚀</button>
                 </div>
             </section>
+
+            </div> <!-- /setup-wizard-container -->
         </main>
 
         <footer class="setup-footer">
-            <span>FeClaw 配置向导 · 仅在首次启动时显示</span>
+            <span>{% if setup_done %}FeClaw 系统配置摘要 · 配置已写入 .env 文件{% else %}FeClaw 配置向导 · 仅在首次启动时显示{% endif %}</span>
         </footer>
     </div>
 

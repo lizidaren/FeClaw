@@ -352,6 +352,7 @@
         let bucket = '';
         let region = '';
         let userPrefix = '';
+        let STORAGE_BACKEND = null;  // 'cos' | 'local'
         let currentMode = 'edit';  // 'edit' | 'preview'
         let currentFileType = 'text';  // 'text' | 'markdown' | 'image' | 'video' | 'audio' | 'binary'
         let fileListCache = [];  // 缓存当前文件列表，供三点菜单使用
@@ -369,15 +370,13 @@
         if (!jwt) {
             window.location.href = '/login';
         } else {
-            // 首次加载立即用 API 列出文件（不等待 COS SDK 初始化）
-            loadFiles();
-            // 后台异步初始化 COS SDK（首次文件操作前必须就绪）
-            initCosClient();
+            // 检测存储后端（COS / 本地）并相应初始化
+            initBackend();
         }
 
-        // --- COS 客户端 ---
+        // --- 存储后端初始化 ---
 
-        async function initCosClient() {
+        async function initBackend() {
             try {
                 const res = await fetch('/api/file/sts-credential', {
                     headers: { 'Authorization': 'Bearer ' + jwt }
@@ -388,43 +387,50 @@
                     return;
                 }
 
-                const data = await res.json();
+                let data = null;
+                try { data = await res.json(); } catch (e) { /* 可能无 body */ }
 
-                // 无 COS 配置时（本地存储模式），显示提示
-                if (res.status !== 200 || !data.credentials) {
-                    document.getElementById('fileList').innerHTML =
-                        '<div class="empty-state"><div class="icon">📁</div><p>本地存储模式下文件管理不可用</p>'
-                        + '<p style="font-size:13px;color:#888;margin-top:8px;">'
-                        + '文件存储在服务器本地: <code>' + (data.prefix || './feclaw-storage') + '</code></p></div>';
+                // 没有任何 COS 配置 → 本地存储模式
+                const isCosReady = (res.status === 200) && data && data.credentials;
+                if (!isCosReady) {
+                    STORAGE_BACKEND = 'local';
+                    console.log('[File] 本地存储模式');
+                    updateBackendBadge();
+                    loadFiles();
                     return;
                 }
 
+                // COS 模式
+                STORAGE_BACKEND = 'cos';
                 stsCredential = data.credentials;
                 bucket = data.bucket;
                 region = data.region;
                 userPrefix = data.prefix;
-
                 cosClient = new COS({
                     SecretId: stsCredential.secret_id,
                     SecretKey: stsCredential.secret_key,
                     XCosSecurityToken: stsCredential.session_token
                 });
-
-                console.log('[File] COS client initialized, prefix:', userPrefix);
+                console.log('[File] COS 客户端已初始化, prefix:', userPrefix);
+                updateBackendBadge();
                 loadFiles();
             } catch (e) {
-                console.error('[File] Failed to init COS client:', e);
-                // 检测到 COS 未配置，显示友好提示
-                if (e.message && (e.message.includes('secret_id') || e.message.includes('undefined'))) {
-                    document.getElementById('fileList').innerHTML =
-                        '<div class="empty-state"><div class="icon">📁</div><p>本地存储模式下文件管理不可用</p>'
-                        + '<p style="font-size:13px;color:#888;margin-top:8px;">'
-                        + '请通过 SSH 或系统文件管理器访问存储目录</p></div>';
-                } else {
-                    document.getElementById('fileList').innerHTML =
-                        '<div class="empty-state"><div class="icon">❌</div><p>初始化失败: ' + e.message + '</p></div>';
-                }
+                console.error('[File] 初始化失败:', e);
+                // 网络错误或解析失败 → 退化到本地模式（让 REST API 自己报错）
+                STORAGE_BACKEND = 'local';
+                updateBackendBadge();
+                loadFiles();
             }
+        }
+
+        function updateBackendBadge() {
+            // 在 header 中显示后端类型
+            const el = document.getElementById('agentHash');
+            if (!el) return;
+            const tag = STORAGE_BACKEND === 'local'
+                ? ' <span style="display:inline-block;margin-left:8px;padding:2px 8px;background:#fff3cd;color:#856404;border-radius:4px;font-size:11px;">💾 本地存储</span>'
+                : ' <span style="display:inline-block;margin-left:8px;padding:2px 8px;background:#d1ecf1;color:#0c5460;border-radius:4px;font-size:11px;">☁️ COS</span>';
+            el.innerHTML = 'Agent: ' + agentHash + tag;
         }
 
         function logout() {
@@ -462,6 +468,7 @@
         }
 
         async function saveVFSFile(path, content) {
+            // 仅用于 config/ 虚拟目录（无后端差异）
             const res = await fetch('/api/file?path=' + encodeURIComponent(path), {
                 method: 'PUT',
                 headers: {
@@ -472,6 +479,133 @@
             });
             if (!res.ok) throw new Error('HTTP ' + res.status);
             return await res.json();
+        }
+
+        // --- 后端无关的文件操作（根据 STORAGE_BACKEND 分派） ---
+
+        async function getFilePreviewUrl(path) {
+            // 返回可直接用于 <img>/<video>/fetch 的 URL
+            if (STORAGE_BACKEND === 'local') {
+                return '/api/file/raw?path=' + encodeURIComponent(path);
+            }
+            // COS 模式
+            const res = await fetch('/api/file/signed-url', {
+                method: 'POST',
+                headers: { 'Authorization': 'Bearer ' + jwt, 'Content-Type': 'application/json' },
+                body: JSON.stringify({ path: path, operation: 'download' })
+            });
+            if (!res.ok) throw new Error('获取签名 URL 失败');
+            const data = await res.json();
+            return data.url;
+        }
+
+        async function getFileDownloadUrl(path, expires) {
+            // 返回用于触发下载的 URL
+            if (STORAGE_BACKEND === 'local') {
+                return '/api/file/raw?path=' + encodeURIComponent(path);
+            }
+            const res = await fetch('/api/file/signed-url', {
+                method: 'POST',
+                headers: { 'Authorization': 'Bearer ' + jwt, 'Content-Type': 'application/json' },
+                body: JSON.stringify({ path: path, operation: 'download', expires: expires || 300 })
+            });
+            if (!res.ok) throw new Error('获取下载链接失败');
+            const data = await res.json();
+            return data.url;
+        }
+
+        async function saveContentFile(path, content) {
+            // 保存文本文件
+            if (STORAGE_BACKEND === 'local') {
+                const res = await fetch('/api/file?path=' + encodeURIComponent(path), {
+                    method: 'PUT',
+                    headers: { 'Authorization': 'Bearer ' + jwt, 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ content })
+                });
+                if (!res.ok) {
+                    let err = 'HTTP ' + res.status;
+                    try { const j = await res.json(); err = j.detail || err; } catch (e) {}
+                    throw new Error(err);
+                }
+                return await res.json();
+            }
+            // COS 模式：原有签名 URL PUT 流程
+            const res = await fetch('/api/file/signed-url', {
+                method: 'POST',
+                headers: { 'Authorization': 'Bearer ' + jwt, 'Content-Type': 'application/json' },
+                body: JSON.stringify({ path: path, operation: 'upload' })
+            });
+            if (!res.ok) throw new Error('获取签名 URL 失败');
+            const data = await res.json();
+            const uploadRes = await fetch(data.url, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+                body: content
+            });
+            if (!uploadRes.ok) throw new Error('上传失败: ' + uploadRes.status);
+            return { status: 'success' };
+        }
+
+        async function uploadBinaryFile(file, path) {
+            // 上传任意二进制文件
+            if (STORAGE_BACKEND === 'local') {
+                const form = new FormData();
+                form.append('file', file);
+                const res = await fetch('/api/file/upload?path=' + encodeURIComponent(path), {
+                    method: 'POST',
+                    headers: { 'Authorization': 'Bearer ' + jwt },
+                    body: form
+                });
+                if (!res.ok) {
+                    let err = 'HTTP ' + res.status;
+                    try { const j = await res.json(); err = j.detail || err; } catch (e) {}
+                    throw new Error(err);
+                }
+                return await res.json();
+            }
+            // COS 模式：原有签名 URL PUT
+            const res = await fetch('/api/file/signed-url', {
+                method: 'POST',
+                headers: { 'Authorization': 'Bearer ' + jwt, 'Content-Type': 'application/json' },
+                body: JSON.stringify({ path: path, operation: 'upload' })
+            });
+            if (!res.ok) throw new Error('获取签名 URL 失败');
+            const data = await res.json();
+            const uploadRes = await fetch(data.url, {
+                method: 'PUT',
+                headers: { 'Content-Type': file.type || 'application/octet-stream' },
+                body: file
+            });
+            if (!uploadRes.ok) throw new Error('上传失败: ' + uploadRes.status);
+            return { status: 'success' };
+        }
+
+        async function deleteFileByApi(path) {
+            // 删除文件
+            if (STORAGE_BACKEND === 'local') {
+                const res = await fetch('/api/file?path=' + encodeURIComponent(path), {
+                    method: 'DELETE',
+                    headers: { 'Authorization': 'Bearer ' + jwt }
+                });
+                if (!res.ok) {
+                    let err = 'HTTP ' + res.status;
+                    try { const j = await res.json(); err = j.detail || err; } catch (e) {}
+                    throw new Error(err);
+                }
+                return await res.json();
+            }
+            // COS 模式：原有 COS SDK
+            const key = userPrefix + path;
+            return new Promise((resolve, reject) => {
+                cosClient.deleteObject({
+                    Bucket: bucket,
+                    Region: region,
+                    Key: key
+                }, function(err, data) {
+                    if (err) reject(new Error(err.message));
+                    else resolve(data);
+                });
+            });
         }
 
         // --- 文件列表 ---
@@ -657,35 +791,9 @@
                 return;
             }
 
-            // config/ 虚拟目录走 VFS API
-            if (path === 'config' || path.startsWith('config/')) {
-                fetch('/api/file?path=' + encodeURIComponent(path), {
-                    method: 'DELETE',
-                    headers: { 'Authorization': 'Bearer ' + jwt }
-                }).then(res => {
-                    if (res.ok) {
-                        loadFiles();
-                    } else {
-                        res.json().then(err => alert('删除失败: ' + (err.detail || 'HTTP ' + res.status)));
-                    }
-                }).catch(e => {
-                    alert('删除失败: ' + e.message);
-                });
-                return;
-            }
-
-            const key = userPrefix + path;
-            cosClient.deleteObject({
-                Bucket: bucket,
-                Region: region,
-                Key: key
-            }, function(err, data) {
-                if (err) {
-                    alert('删除失败: ' + err.message);
-                } else {
-                    loadFiles();
-                }
-            });
+            deleteFileByApi(path)
+                .then(() => loadFiles())
+                .catch(e => alert('删除失败: ' + e.message));
         }
 
         // --- 文件类型检测 ---
@@ -767,39 +875,25 @@
                 return;
             }
 
-            // 获取签名下载 URL
+            // 后端无关：获取预览 URL
             try {
-                const res = await fetch('/api/file/signed-url', {
-                    method: 'POST',
-                    headers: {
-                        'Authorization': 'Bearer ' + jwt,
-                        'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify({ path: path, operation: 'download' })
-                });
-
-                if (!res.ok) {
-                    alert('获取签名 URL 失败');
-                    return;
-                }
-
-                const data = await res.json();
+                const url = await getFilePreviewUrl(path);
 
                 switch (category) {
                     case 'image':
-                        showImagePreview(data.url);
+                        showImagePreview(url);
                         break;
                     case 'video':
-                        showMediaPreview('video', data.url);
+                        showMediaPreview('video', url);
                         break;
                     case 'audio':
-                        showMediaPreview('audio', data.url);
+                        showMediaPreview('audio', url);
                         break;
                     case 'markdown':
-                        await openMarkdownFile(data.url, path);
+                        await openMarkdownFile(url, path);
                         break;
                     default:
-                        await openTextFile(data.url, path);
+                        await openTextFile(url, path);
                         break;
                 }
             } catch (e) {
@@ -1073,34 +1167,10 @@
             }
 
             try {
-                const res = await fetch('/api/file/signed-url', {
-                    method: 'POST',
-                    headers: {
-                        'Authorization': 'Bearer ' + jwt,
-                        'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify({ path: editingFile, operation: 'upload' })
-                });
-
-                if (res.ok) {
-                    const data = await res.json();
-                    const uploadRes = await fetch(data.url, {
-                        method: 'PUT',
-                        headers: { 'Content-Type': 'text/plain; charset=utf-8' },
-                        body: content
-                    });
-
-                    if (uploadRes.ok) {
-                        alert('保存成功');
-                        closeModal();
-                        loadFiles();
-                    } else {
-                        alert('上传失败: ' + uploadRes.status);
-                    }
-                } else {
-                    const err = await res.json();
-                    alert('获取签名 URL 失败: ' + (err.detail || '未知错误'));
-                }
+                await saveContentFile(editingFile, content);
+                alert('保存成功');
+                closeModal();
+                loadFiles();
             } catch (e) {
                 alert('保存失败: ' + e.message);
             }
@@ -1162,34 +1232,9 @@
             progressEl.textContent = '⏳ 正在上传 ' + file.name + '...';
 
             try {
-                const res = await fetch('/api/file/signed-url', {
-                    method: 'POST',
-                    headers: {
-                        'Authorization': 'Bearer ' + jwt,
-                        'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify({ path: path, operation: 'upload' })
-                });
-
-                if (res.ok) {
-                    const data = await res.json();
-                    const uploadRes = await fetch(data.url, {
-                        method: 'PUT',
-                        headers: { 'Content-Type': file.type || 'application/octet-stream' },
-                        body: file
-                    });
-
-                    if (uploadRes.ok) {
-                        progressEl.textContent = '✅ 上传成功: ' + file.name;
-                        loadFiles();
-                    } else {
-                        progressEl.className = 'upload-progress error';
-                        progressEl.textContent = '❌ 上传失败: ' + uploadRes.status;
-                    }
-                } else {
-                    progressEl.className = 'upload-progress error';
-                    progressEl.textContent = '❌ 获取签名 URL 失败';
-                }
+                await uploadBinaryFile(file, path);
+                progressEl.textContent = '✅ 上传成功: ' + file.name;
+                loadFiles();
             } catch (e) {
                 progressEl.className = 'upload-progress error';
                 progressEl.textContent = '❌ 上传失败: ' + e.message;
@@ -1203,27 +1248,14 @@
 
         async function downloadFile(path) {
             try {
-                const res = await fetch('/api/file/signed-url', {
-                    method: 'POST',
-                    headers: {
-                        'Authorization': 'Bearer ' + jwt,
-                        'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify({ path: path, operation: 'download', expires: 300 })
-                });
-
-                if (res.ok) {
-                    const data = await res.json();
-                    const a = document.createElement('a');
-                    a.href = data.url;
-                    a.download = path.split('/').pop();
-                    a.target = '_blank';
-                    document.body.appendChild(a);
-                    a.click();
-                    document.body.removeChild(a);
-                } else {
-                    alert('获取下载链接失败');
-                }
+                const url = await getFileDownloadUrl(path, 300);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = path.split('/').pop();
+                a.target = '_blank';
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
             } catch (e) {
                 alert('下载失败: ' + e.message);
             }

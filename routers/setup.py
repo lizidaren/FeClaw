@@ -41,6 +41,7 @@ from services.setup_service import (
     get_partial_config,
     get_provider_list,
     init_database,
+    is_setup_complete,
     test_db_connection,
     update_env,
     verify_config,
@@ -177,26 +178,114 @@ class CompletePayload(BaseModel):
 async def setup_page(
     request: Request,
     token: str = Query("", alias="token"),
+    reset: str = Query("", alias="reset"),
+    db: Session = Depends(get_db),
 ):
     """配置向导页面。
 
     冷启动：URL 必须带 ?token=xxx（由 main.py 启动时打印到控制台）
-    正常启动：直接渲染，由前端检查 JWT 后再做权限校验
+    正常启动：默认渲染只读摘要；?reset=1 强制重走向导
     """
-    if _is_cold_start():
-        verify_setup_token(token=token)
-    return _render_setup_page(request, token=token if _is_cold_start() else "")
+    return _render_setup_view(
+        request=request,
+        db=db,
+        token=token,
+        reset=reset,
+    )
 
 
 INVALID_TOKEN_HTML = """<!DOCTYPE html><html lang=zh-CN><head><meta charset=utf-8><title>无效令牌</title><style>body{background:#050510;color:#e0e0e0;display:flex;align-items:center;justify-content:center;min-height:100vh;font-family:sans-serif;text-align:center;margin:0}h1{color:#f87171;font-size:2em}p{color:#888;margin-top:12px}.hint{color:#666;font-size:0.9em;margin-top:8px}a{color:#667eea}</style></head><body><div><h1>🔒 无效的配置令牌</h1><p>请使用控制台打印的完整 URL 访问</p><p class=hint>首次启动时管理地址会打印在终端中</p></div></body></html>"""
 
 
-def _render_setup_page(request: Request, token: str = "") -> HTMLResponse:
-    """实际渲染 setup.html。"""
+def _get_templates():
+    """获取 Jinja2Templates 实例（带 FeClaw 模板目录）。"""
     from fastapi.templating import Jinja2Templates
-    # 模板目录 = FeClaw/templates/
     import os
-    templates = Jinja2Templates(directory=os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "templates"))
+    return Jinja2Templates(directory=os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "templates",
+    ))
+
+
+def _mask_db_url(url: str) -> str:
+    """脱敏显示数据库 URL（隐藏密码）。"""
+    if not url:
+        return "(未配置)"
+    try:
+        from urllib.parse import urlparse, urlunparse
+        parsed = urlparse(url)
+        if parsed.password:
+            netloc = parsed.netloc.replace(f":{parsed.password}@", ":***@")
+            masked = urlunparse(parsed._replace(netloc=netloc))
+            return masked
+        return url
+    except Exception:
+        # 退化：粗暴地把 password=xxx 替换
+        import re
+        return re.sub(r"(password=)[^&;]+", r"\1***", url)
+
+
+def _build_summary_data() -> Dict[str, Any]:
+    """构建 setup 配置摘要（不依赖 DB）。"""
+    partial = get_partial_config()
+    env = partial
+    api_keys = env.get("api_keys_present", {}) or {}
+
+    # 已配置的 LLM Provider（id → name）
+    from services.setup_service import PROVIDER_LIST
+    providers_set = []
+    for p in PROVIDER_LIST:
+        key_name = p["api_key_name"]
+        if api_keys.get(key_name):
+            providers_set.append({"id": p["id"], "name": p["name"], "api_key_name": key_name})
+
+    # 部署模式
+    if settings.FECLAW_SUBDOMAIN_ENABLED and settings.FECLAW_PUBLIC_URL:
+        deployment_mode = "subdomain"
+    else:
+        deployment_mode = "single-site"
+
+    # OAuth 状态
+    oauth_enabled = bool(settings.OAUTH_ENABLED and (settings.OAUTH_PROVIDER_URL or "").strip())
+
+    # 存储模式（解析实际生效的）
+    storage_mode = (settings.STORAGE_MODE or "auto").lower()
+    cos_configured = all([
+        settings.TENCENT_COS_SECRET_ID,
+        settings.TENCENT_COS_SECRET_KEY,
+        settings.TENCENT_COS_BUCKET,
+    ])
+    storage_active = storage_mode
+    if storage_mode == "auto":
+        storage_active = "cos" if cos_configured else "local"
+
+    return {
+        "setup_complete": True,
+        "deployment_mode": deployment_mode,
+        "feclaw_domain": settings.FECLAW_PUBLIC_URL or "(未设置)",
+        "cookie_secure": bool(settings.COOKIE_SECURE),
+        "providers_set": providers_set,
+        "providers_total": len(PROVIDER_LIST),
+        "llm_model": settings.MAIN_TEXT_MODEL or settings.AGENT_LLM_MODEL or "(未设置)",
+        "vision_model": settings.MAIN_VISION_MODEL or "(未设置)",
+        "embedding_model": settings.MAIN_EMBEDDING_MODEL or "(未设置)",
+        "search_engine": settings.DEFAULT_SEARCH_ENGINE or "qwen",
+        "storage_mode": storage_mode,
+        "storage_active": storage_active,
+        "local_storage_root": settings.LOCAL_STORAGE_ROOT or "./feclaw-storage",
+        "cos_bucket": settings.TENCENT_COS_BUCKET or "(未配置)",
+        "cos_configured": cos_configured,
+        "database_url_masked": _mask_db_url(settings.DATABASE_URL or ""),
+        "vector_storage_backend": settings.VECTOR_STORAGE_BACKEND or "cos",
+        "oauth_enabled": oauth_enabled,
+        "oauth_provider_name": settings.OAUTH_PROVIDER_NAME,
+        "oauth_provider_url": settings.OAUTH_PROVIDER_URL or "",
+    }
+
+
+def _render_setup_page(request: Request, token: str = "", setup_done: bool = False) -> HTMLResponse:
+    """实际渲染 setup.html（向导或摘要）。"""
+    templates = _get_templates()
     resp = templates.TemplateResponse(
         request,
         "setup.html",
@@ -204,10 +293,47 @@ def _render_setup_page(request: Request, token: str = "") -> HTMLResponse:
             "request": request,
             "setup_token": token,
             "cold_start": _is_cold_start(),
+            "setup_done": setup_done,
         },
     )
     resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
     return resp
+
+
+def _render_setup_view(
+    request: Request,
+    db: Optional[Session] = None,
+    token: str = "",
+    reset: str = "",
+) -> HTMLResponse:
+    """根据 setup 状态选择渲染 wizard 或 summary。
+
+    冷启动：总是 wizard
+    ?reset=1：强制重走 wizard
+    已完成：渲染只读 summary
+    未完成：渲染 wizard
+    """
+    cold_start = _is_cold_start()
+    force_wizard = reset.strip().lower() in ("1", "true", "yes")
+
+    if cold_start:
+        # 冷启动：token 鉴权由 setup_page 调用方前置完成；这里只渲染
+        return _render_setup_page(request, token=token, setup_done=False)
+
+    if force_wizard:
+        return _render_setup_page(request, token="", setup_done=False)
+
+    setup_done = False
+    try:
+        if db is not None:
+            setup_done = is_setup_complete(db)
+    except Exception as e:
+        logger.warning(f"[Setup] is_setup_complete 检测失败: {e}")
+
+    if setup_done:
+        return _render_setup_page(request, token="", setup_done=True)
+
+    return _render_setup_page(request, token="", setup_done=False)
 
 
 # ───────────────────────────────────────────────────────────
@@ -350,7 +476,7 @@ async def complete(
     """标记 SETUP_COMPLETE=true，同时把模型选择写入 .env。"""
     updates: Dict[str, str] = {"SETUP_COMPLETE": "true"}
     if payload.feclaw_domain:
-        updates["FECLAW_DOMAIN"] = payload.feclaw_domain.strip()
+        updates["FECLAW_PUBLIC_URL"] = payload.feclaw_domain.strip()
     updates["COOKIE_SECURE"] = "true" if payload.cookie_secure else "false"
     if payload.default_llm_model:
         updates["MAIN_TEXT_MODEL"] = payload.default_llm_model.strip()
@@ -427,3 +553,27 @@ async def state(
             ),
         },
     }
+
+
+@router.get("/api/summary")
+async def api_summary(
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """只读 setup 配置摘要（无需鉴权，仅展示非敏感信息）。
+
+    用于：
+    1. /setup 页面在 setup_done 状态下渲染摘要视图
+    2. 管理后台 widget（未来扩展）
+    """
+    summary = _build_summary_data()
+    summary["setup_complete_flag"] = bool(settings.SETUP_COMPLETE)
+    try:
+        if db is not None:
+            summary["setup_complete"] = is_setup_complete(db)
+            summary["admin"] = get_current_admin(db)
+        else:
+            summary["admin"] = None
+    except Exception:
+        summary["admin"] = None
+    return summary

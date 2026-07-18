@@ -87,6 +87,16 @@ class LocalStorage(FileStorage):
             finally:
                 fcntl.flock(lock_f.fileno(), fcntl.LOCK_UN)
 
+    def upload_file(self, file_bytes: bytes, key: str, max_retries: int = 3) -> str:
+        """直接上传文件到本地存储。
+
+        与 CosStorage.upload_file 接口对齐，供 /api/file/upload 共用。
+        本地存储不需要重试，但保留参数以兼容调用方。
+        """
+        self.put_object(key, file_bytes)
+        # 返回与 COS 等价的 URL 形式（仅占位，本地模式下不会被真正使用）
+        return f"local://{key}"
+
     def delete_file_by_key(self, key: str) -> bool:
         path = self._resolve(key)
         if not os.path.isfile(path):
@@ -101,6 +111,34 @@ class LocalStorage(FileStorage):
                 return False
             finally:
                 fcntl.flock(lock_f.fileno(), fcntl.LOCK_UN)
+
+    def delete_file(self, url: str) -> bool:
+        """删除文件 —— 与 CosStorage 接口对齐。
+
+        接受完整 URL（COS 模式）或 key 字符串（本地模式）：
+        - COS 模式：URL 形如 `https://bucket.cos.region.myqcloud.com/key`，从中提取 key
+        - 本地模式：直接当作 key 处理
+        """
+        if not url:
+            return False
+        # 提取 key：URL 形如 https://bucket.cos.region.myqcloud.com/key
+        if url.startswith(("http://", "https://")):
+            from urllib.parse import urlparse
+            try:
+                parsed = urlparse(url)
+                host = parsed.netloc
+                key = parsed.path.lstrip("/")
+                # 去掉可能的 bucket 前缀（upload 时 URL 不含 bucket）
+                # 如果 host 含 bucket，路径可能以 /<bucket>/ 开头；这里只取 path 部分作为 key
+                if not key:
+                    return False
+            except Exception:
+                return False
+        elif url.startswith("local://"):
+            key = url[len("local://"):]
+        else:
+            key = url
+        return self.delete_file_by_key(key)
 
     def list_objects(self, prefix: str, max_keys: int = 1000) -> Optional[List[Dict]]:
         dir_path = self._resolve(prefix)

@@ -930,10 +930,150 @@ python -m uvicorn main:app --host 0.0.0.0 --port 8080</code></pre>
             setTimeout(() => { window.location.href = '/login'; }, 3000);
             return;
         }
+        // setup_done 模式：渲染只读摘要，不进入向导流程
+        if (window.__FECLAW_SETUP_DONE__ === true) {
+            renderSetupDoneView();
+            return;
+        }
         bindStep1();
         bindStep2();
         bindActions();
     });
+
+    // ──────────────────────────────────────────────
+    // setup_done 视图：只读配置摘要
+    // ──────────────────────────────────────────────
+
+    function setDoneText(id, value, isOk) {
+        const el = document.getElementById(id);
+        if (!el) return;
+        el.textContent = value;
+        el.classList.remove('ok', 'miss');
+        if (typeof isOk === 'boolean') {
+            el.classList.add(isOk ? 'ok' : 'miss');
+        }
+    }
+
+    function renderProvidersList(providersSet) {
+        const list = document.getElementById('sd-providers-list');
+        if (!list) return;
+        if (!providersSet || providersSet.length === 0) {
+            list.innerHTML = '<div class="info-box" style="margin:8px 0"><div class="info-icon">⚠</div><div class="info-text">未配置任何 LLM Provider</div></div>';
+            return;
+        }
+        list.innerHTML = providersSet.map(p => {
+            const safeName = escapeHtml(p.name);
+            const safeKey = escapeHtml(p.api_key_name);
+            return `
+                <div class="provider-card selected" style="cursor:default">
+                    <div class="check">✓</div>
+                    <div class="provider-info">
+                        <div class="provider-name">${safeName}</div>
+                        <div class="provider-key-status set">✓ ${safeKey} 已配置</div>
+                    </div>
+                </div>
+            `;
+        }).join('');
+    }
+
+    function renderSetupDoneView() {
+        // 调用公开 API 拿配置摘要
+        const headers = {};
+        const t = (localStorage.getItem('feclaw_jwt') || '').trim();
+        if (t) headers['Authorization'] = 'Bearer ' + t;
+
+        fetch('/setup/api/summary', { headers })
+            .then(res => {
+                if (!res.ok) throw new Error('HTTP ' + res.status);
+                return res.json();
+            })
+            .then(data => {
+                const loadingEl = document.getElementById('setup-done-loading');
+                const contentEl = document.getElementById('setup-done-content');
+                if (loadingEl) loadingEl.style.display = 'none';
+                if (contentEl) contentEl.style.display = 'block';
+
+                // 部署模式
+                const modeMap = {
+                    'subdomain': '🌐 子域名模式',
+                    'single-site': '📍 单站点模式',
+                };
+                setDoneText('sd-deployment-mode', modeMap[data.deployment_mode] || data.deployment_mode || '-');
+                setDoneText('sd-feclaw-domain', data.feclaw_domain || '(未设置)');
+                setDoneText('sd-cookie-secure', data.cookie_secure ? '✅ 已启用' : '⚠ 未启用');
+
+                // 模型
+                setDoneText('sd-llm-model', data.llm_model || '(未设置)');
+                setDoneText('sd-vision-model', data.vision_model || '(未设置)');
+                setDoneText('sd-embedding-model', data.embedding_model || '(未设置)');
+                setDoneText('sd-search-engine', data.search_engine || 'qwen');
+
+                // Provider
+                const providersSet = data.providers_set || [];
+                setDoneText(
+                    'sd-providers-count',
+                    providersSet.length + ' / ' + (data.providers_total || 0)
+                );
+                renderProvidersList(providersSet);
+
+                // 存储
+                const storageMap = {
+                    'local': '💾 本地存储',
+                    'cos': '☁️ 腾讯云 COS',
+                    'auto': '🔄 自动（已生效：' + (data.storage_active === 'cos' ? 'COS' : '本地') + '）',
+                };
+                setDoneText('sd-storage-mode', storageMap[data.storage_mode] || data.storage_mode);
+                setDoneText('sd-local-storage-root', data.local_storage_root || '-');
+                setDoneText(
+                    'sd-cos-bucket',
+                    data.cos_configured ? (data.cos_bucket || '-') : '(未配置 COS)'
+                );
+                const vecMap = { 'cos': '☁️ COS VectorBucket', 'numpy': '🧮 Numpy（本地）' };
+                setDoneText('sd-vector-backend', vecMap[data.vector_storage_backend] || data.vector_storage_backend);
+
+                // DB
+                setDoneText('sd-database-url', data.database_url_masked || '-');
+
+                // OAuth
+                setDoneText(
+                    'sd-oauth-enabled',
+                    data.oauth_enabled ? '✅ 已启用' : '⚠ 未启用'
+                );
+                setDoneText(
+                    'sd-oauth-provider',
+                    data.oauth_enabled
+                        ? (data.oauth_provider_name || '-') + (data.oauth_provider_url ? ' (' + data.oauth_provider_url + ')' : '')
+                        : '-'
+                );
+
+                // Admin
+                if (data.admin) {
+                    setDoneText('sd-admin-username', data.admin.username || 'admin');
+                    setDoneText('sd-admin-email', data.admin.email || '(未设置)');
+                } else {
+                    setDoneText('sd-admin-username', 'admin');
+                    setDoneText('sd-admin-email', '(未设置)');
+                }
+
+                // 绑定按钮事件
+                const btnDashboard = document.getElementById('btn-go-dashboard');
+                if (btnDashboard) btnDashboard.addEventListener('click', () => { window.location.href = '/dashboard'; });
+                const btnAdmin = document.getElementById('btn-go-admin');
+                if (btnAdmin) btnAdmin.addEventListener('click', () => { window.location.href = '/admin/settings'; });
+                const btnReset = document.getElementById('btn-reset-setup');
+                if (btnReset) btnReset.addEventListener('click', () => {
+                    if (confirm('确定要重新走向导吗？\n\n⚠️ 这只会显示向导，不会自动修改 .env 中的现有配置。\n如需修改，请前往「管理后台 → 设置」。')) {
+                        window.location.href = '/setup?reset=1';
+                    }
+                });
+            })
+            .catch(err => {
+                const loadingEl = document.getElementById('setup-done-loading');
+                if (loadingEl) {
+                    loadingEl.innerHTML = '<div style="color:var(--error)">❌ 加载失败: ' + escapeHtml(err.message) + '<br><br><a href="javascript:location.reload()" style="color:var(--accent)">重试</a></div>';
+                }
+            });
+    }
 
     // 暴露给 console 调试
     window.__feclaw_setup__ = { STATE, setStep, next, prev, IS_COLD_START, SETUP_TOKEN };
