@@ -61,7 +61,7 @@ claude_audit_session_memory_service/
 agent_profiles/
 claude-logs/
 # app/public/filemanager/ is tracked (used by main.py)
-tests/
+# tests/  # 测试套件（2026-07-18 起纳入版本控制）
 
 # Internal tools & config
 .claude/

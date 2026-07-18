@@ -1,0 +1,4 @@
+# FeClaw FUSE 支持（可选）
+# pyfuse3 需要系统安装 fuse3 + libfuse3-dev
+# 安装：apt install fuse3 libfuse3-dev && pip install -r requirements-fuse.txt
+pyfuse3>=1.4.0

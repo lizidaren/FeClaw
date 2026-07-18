@@ -13,11 +13,10 @@ pyotp>=2.9.0   # TOTP support
 Pillow>=10.0.0  # Image processing
 qrcode[pil]     # QR code generation
 
-pyfuse3>=1.4.0  # FUSE 3 filesystem in userspace
 numpy>=1.26.0
 bcrypt>=4.0.0   # 密码哈希（自 2026-07 起逐步替代 SHA-256+salt）
 
-# ─── 部署就绪性补全 ───
+# ─── 部署就绪性补全（可选：pyfuse3 在 requirements-fuse.txt） ───
 redis>=5.0.0                # Redis 缓存/会话
 aiofiles>=24.0.0            # 异步文件 I/O
 certifi>=2024.0.0           # SSL 证书
