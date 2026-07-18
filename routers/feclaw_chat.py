@@ -36,6 +36,7 @@ class ChatRequest(BaseModel):
     image_url: Optional[str] = None  # 图片 URL（支持 base64 data URL）
     file_path: Optional[str] = None  # 文件 VFS 路径（前端上传后）
     file_name: Optional[str] = None  # 原始文件名
+    group_id: Optional[str] = None  # 群聊 ID（P0-2 fix：非空时走群聊逻辑）
 
 
 class SessionResponse(BaseModel):
@@ -46,6 +47,21 @@ class SessionResponse(BaseModel):
     updated_at: Optional[datetime] = None
     topic: Optional[str] = None
     last_message: Optional[str] = None
+
+
+class CreateSessionRequest(BaseModel):
+    """创建会话请求（Mobile 一对一场景：创建 Agent 后立即创建 Session）"""
+    agent_hash: str
+    # 可选：会话主题。Mobile 端通常不传，前端按空 topic 显示占位文案。
+    topic: Optional[str] = None
+
+
+class CreateSessionResponse(BaseModel):
+    """创建会话响应"""
+    session_id: str
+    topic: Optional[str] = None
+    created_at: Optional[datetime] = None
+    agent_hash: str
 
 
 class MessageResponse(BaseModel):
@@ -76,16 +92,19 @@ async def chat_stream(
 ):
     """
     流式聊天 - 调用统一的 ChatService
-    
+
     发送消息并返回 SSE 流式响应
-    
+
     请求体:
     {
         "content": "你好",
         "session_id": "sess_xxx",  // 可选
         "image_url": "data:image/png;base64,..."  // 可选，支持 base64
     }
-    
+
+    P0-2 fix: 新增 `group_id` 字段。传 group_id 时走群聊流式逻辑（保存用户消息 + LLM 流式回复 + 保存 Agent 回复）；
+    不传时仍走原私聊逻辑（完全不变）。
+
     SSE 事件:
     - event: token, data: {"content": "..."}
     - event: done, data: {"session_id": "...", "usage": {...}}
@@ -93,6 +112,17 @@ async def chat_stream(
     """
     import logging
     logger = logging.getLogger(__name__)
+
+    # P0-2: 群聊分支 —— 校验群存在/所有权、保存用户消息、流式生成、回复保存为群消息
+    if request.group_id:
+        return await _chat_stream_group(
+            request=request,
+            user_id=user_id,
+            db=db,
+            agent_hash=agent_hash,
+            logger=logger,
+        )
+
     logger.info(f"[chat_stream] user_id={user_id}, content={request.content[:50]}..., image_url={request.image_url[:50] if request.image_url else None}...")
 
     chat_service = WebChannelService(db, user_id=user_id, agent_hash=agent_hash)
@@ -105,6 +135,155 @@ async def chat_stream(
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no"
         }
+    )
+
+
+async def _chat_stream_group(
+    request: "ChatRequest",
+    user_id: int,
+    db: Session,
+    agent_hash: Optional[str],
+    logger: logging.Logger,
+):
+    """
+    P0-2: 群聊流式聊天
+
+    - 校验群存在 & 当前用户是群主（owner）
+    - 将用户消息保存为 GroupMessage（sender_type="user"）
+    - 选取一个 agent（用户默认 agent / 第一个群成员）走私聊式 LLM 流式
+    - 把 Agent 的完整回复保存为 GroupMessage（sender_type="agent"）
+    - SSE 事件协议与私聊一致（token / thinking / tool / done / error）
+    """
+    from models.group import Group, GroupMember, GroupMessage
+    import uuid as _uuid
+    from datetime import datetime as _dt
+
+    group_id = request.group_id
+    if not request.content or not request.content.strip():
+        raise HTTPException(status_code=400, detail="Message content cannot be empty")
+
+    group = db.query(Group).filter(Group.id == group_id).first()
+    if not group or group.deleted_at:
+        raise HTTPException(status_code=404, detail="Group not found")
+    if group.owner_user_id != user_id:
+        raise HTTPException(status_code=403, detail="Not authorized to access this group")
+
+    # 1. 保存用户消息
+    user_msg_id = str(_uuid.uuid4())
+    user_msg = GroupMessage(
+        id=user_msg_id,
+        group_id=group_id,
+        sender_type="user",
+        sender_hash="",
+        content=request.content,
+        message_type="text",
+        attachments=None,
+        mentions=[],
+        round=0,
+        created_at=_dt.utcnow(),
+    )
+    db.add(user_msg)
+    db.commit()
+    logger.info(
+        f"[chat_stream:group] user={user_id} group={group_id} user_msg={user_msg_id} "
+        f"content_len={len(request.content)}"
+    )
+
+    # 2. 选 agent：query 上的 agent_hash > 用户默认 agent > 群第一个成员 agent
+    selected_agent_hash = agent_hash
+    if not selected_agent_hash:
+        from models.database import AgentProfile
+        default_agent = db.query(AgentProfile).filter(
+            AgentProfile.user_id == user_id,
+            AgentProfile.status == "initialized",
+        ).order_by(AgentProfile.is_default.desc(), AgentProfile.updated_at.desc()).first()
+        if default_agent:
+            selected_agent_hash = default_agent.hash
+    if not selected_agent_hash:
+        first_member = db.query(GroupMember).filter(
+            GroupMember.group_id == group_id,
+            GroupMember.agent_hash != "",
+        ).first()
+        if first_member:
+            selected_agent_hash = first_member.agent_hash
+    if not selected_agent_hash:
+        # 没有可用 agent —— 把"无 agent"标记保存为系统提示消息
+        err_msg = "（群内暂无可用 Agent，无法生成回复）"
+        bot_msg = GroupMessage(
+            id=str(_uuid.uuid4()),
+            group_id=group_id,
+            sender_type="agent",
+            sender_hash="",
+            content=err_msg,
+            message_type="text",
+            attachments=None,
+            mentions=[],
+            round=0,
+            created_at=_dt.utcnow(),
+        )
+        db.add(bot_msg)
+        db.commit()
+
+        async def _no_agent_gen():
+            yield f"event: token\ndata: {json.dumps({'content': err_msg}, ensure_ascii=False)}\n\n"
+            yield f"event: done\ndata: {json.dumps({'group_id': group_id, 'usage': {}}, ensure_ascii=False)}\n\n"
+
+        return StreamingResponse(
+            _no_agent_gen(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
+        )
+
+    chat_service = WebChannelService(db, user_id=user_id, agent_hash=selected_agent_hash)
+
+    # 3. 流式生成 + 收集完整回复
+    full_response = ""
+
+    async def _wrap_group_stream():
+        nonlocal full_response
+        try:
+            async for sse_str in chat_service.chat_stream(
+                request.content, request.session_id, request.image_url,
+                request.file_path, request.file_name,
+            ):
+                # 抓 token 内容用于持久化（不动 SSE 原文）
+                _evt, _data = _parse_sse(sse_str)
+                if _evt == "token" and _data and isinstance(_data.get("content"), str):
+                    full_response += _data["content"]
+                yield sse_str
+        finally:
+            # 4. 把 Agent 回复保存为群消息（无论 stream 是否异常退出，能存多少存多少）
+            try:
+                _bot_msg = GroupMessage(
+                    id=str(_uuid.uuid4()),
+                    group_id=group_id,
+                    sender_type="agent",
+                    sender_hash=selected_agent_hash,
+                    content=full_response,
+                    message_type="text",
+                    attachments=None,
+                    mentions=[],
+                    round=0,
+                    created_at=_dt.utcnow(),
+                )
+                # 用独立 SessionLocal 避免外部 db 已被消费/关闭
+                _save_db = SessionLocal()
+                try:
+                    _save_db.add(_bot_msg)
+                    _save_db.commit()
+                finally:
+                    _save_db.close()
+                logger.info(
+                    f"[chat_stream:group] saved agent reply group={group_id} "
+                    f"agent={selected_agent_hash} len={len(full_response)}"
+                )
+            except Exception as _save_err:
+                logger.error(f"[chat_stream:group] failed to save agent reply: {_save_err}")
+
+    return StreamingResponse(
+        _wrap_group_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
     )
 
 
@@ -348,30 +527,118 @@ async def chat_websocket(websocket: WebSocket):
         logger.warning(f"[WS_DEBUG] user={user_id} connection closed (finally)")
 
 
+@router.post("/api/chat/sessions", response_model=CreateSessionResponse)
+async def create_chat_session(
+    request: CreateSessionRequest,
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+) -> CreateSessionResponse:
+    """
+    创建一个新会话（Mobile 一对一场景）。
+
+    - 校验 `agent_hash` 存在且属于当前用户
+    - 创建一个 `ConversationSession`：`topic` 设为 `[mobile]`（保留渠道前缀），
+      不带具体 topic 文本（Mobile 端在 topic 为空时显示"新创建的 AI 向导"占位）
+    - 立即返回新会话 id，调用方可直接 navigate 到聊天页
+    """
+    from models.database import AgentProfile, ConversationSession
+    from services.web_channel_service import CHANNEL_MOBILE
+    import uuid as _uuid
+
+    agent_hash = (request.agent_hash or "").strip()
+    if not agent_hash:
+        raise HTTPException(status_code=400, detail="agent_hash is required")
+
+    # 校验 Agent 存在且属于当前用户
+    agent = db.query(AgentProfile).filter(AgentProfile.hash == agent_hash).first()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    if agent.user_id != user_id:
+        raise HTTPException(status_code=403, detail="Not authorized to access this agent")
+
+    # 创建新会话（topic 保留渠道前缀，主题内容留空 → 客户端走占位文案）
+    new_session_id = f"sess_{_uuid.uuid4().hex[:16]}"
+    now = datetime.utcnow()
+    session = ConversationSession(
+        session_id=new_session_id,
+        agent_hash=agent_hash,
+        user_id=user_id,
+        messages="[]",
+        created_at=now,
+        updated_at=now,
+        message_count=0,
+        token_count=0,
+        is_archived=False,
+    )
+    # 渠道信息存在 topic 字段（与 Web/WeChat 一致）
+    session.topic = f"[{CHANNEL_MOBILE}]" if not request.topic else f"[{CHANNEL_MOBILE}]{request.topic}"
+    db.add(session)
+    db.commit()
+    db.refresh(session)
+
+    return CreateSessionResponse(
+        session_id=session.session_id,
+        topic=session.topic,
+        created_at=session.created_at,
+        agent_hash=agent_hash,
+    )
+
+
 @router.get("/api/chat/sessions", response_model=List[SessionResponse])
 async def get_sessions(
+    agent_hash: Optional[str] = Query(None, description="Agent hash，筛选特定 Agent 的会话"),
     user_id: int = Depends(get_current_user_id),
     db: Session = Depends(get_db)
 ):
     """
     获取会话列表
-    
-    返回用户的所有 Web 端会话
+
+    返回用户的 Web 端 + Mobile 端会话。渠道通过 topic 前缀区分（[web] / [mobile]），
+    列表渲染时按 topic 携带的真实文案展示。
+    可选 agent_hash 参数筛选特定 Agent 的会话。
     """
-    chat_service = WebChannelService(db, user_id=user_id)
-    sessions = chat_service.get_session_list(limit=50)
-    
-    result = []
-    for session in sessions:
-        result.append(SessionResponse(
-            session_id=session["session_id"],
-            message_count=session["message_count"],
-            created_at=datetime.fromisoformat(session["created_at"]) if session.get("created_at") else None,
-            updated_at=datetime.fromisoformat(session["updated_at"]) if session.get("updated_at") else None,
-            topic="[web]",
-            last_message=session.get("first_message")
-        ))
-    
+    from models.database import ConversationSession
+    from sqlalchemy import or_
+
+    # 一次性查回 [web] 和 [mobile] 渠道的会话（避免两次往返 + 各自 sort）
+    q = db.query(ConversationSession).filter(
+        ConversationSession.user_id == user_id,
+        ConversationSession.is_archived == False  # noqa: E712
+    ).filter(
+        or_(
+            ConversationSession.topic.like("[web]%"),
+            ConversationSession.topic.like("[mobile]%"),
+        )
+    )
+    if agent_hash:
+        q = q.filter(ConversationSession.agent_hash == agent_hash)
+    rows = q.order_by(
+        ConversationSession.updated_at.desc()
+    ).limit(50).all()
+
+    result: List[SessionResponse] = []
+    for s in rows:
+        # 解析 messages 拿首条 user 消息
+        first_message = ""
+        try:
+            msgs = json.loads(s.messages or "[]")
+            for m in msgs:
+                if m.get("role") == "user":
+                    first_message = (m.get("content") or "")[:50]
+                    break
+        except Exception:
+            first_message = ""
+        # topic 字段：保留渠道前缀（"[web]" / "[mobile]"）让前端按原值展示
+        result.append(
+            SessionResponse(
+                session_id=s.session_id,
+                message_count=s.message_count or 0,
+                created_at=s.created_at,
+                updated_at=s.updated_at,
+                topic=s.topic or "[web]",
+                last_message=first_message,
+            )
+        )
     return result
 
 
@@ -383,32 +650,44 @@ async def get_session_detail(
 ):
     """
     获取会话详情（包含消息历史）
-    """
-    chat_service = WebChannelService(db, user_id=user_id)
 
-    # 获取会话
-    session = chat_service.get_session(session_id)
-    if not session:
-        from fastapi import HTTPException
+    支持 Web 和 Mobile 两个渠道的会话。Mobile 渠道的会话不再走
+    WebChannelService.get_session 那一套（被 topic 过滤掉了），这里直接查 ORM。
+    """
+    from models.database import ConversationSession
+
+    # 直接查 ORM（避免 web_channel_service 内部只查 [web] 渠道的过滤）
+    s = (
+        db.query(ConversationSession)
+        .filter(
+            ConversationSession.session_id == session_id,
+            ConversationSession.user_id == user_id,
+        )
+        .first()
+    )
+    if not s:
         raise HTTPException(status_code=404, detail="Session not found")
-    
-    # 获取消息历史
-    messages = session.get("messages", [])
-    
+
+    # 解析 messages
+    try:
+        messages_raw = json.loads(s.messages or "[]")
+    except Exception:
+        messages_raw = []
+
     return SessionDetailResponse(
-        session_id=session["session_id"],
-        message_count=session["message_count"],
-        created_at=datetime.fromisoformat(session["created_at"]) if session.get("created_at") else None,
-        updated_at=datetime.fromisoformat(session["updated_at"]) if session.get("updated_at") else None,
-        topic="[web]",
+        session_id=s.session_id,
+        message_count=s.message_count or 0,
+        created_at=s.created_at,
+        updated_at=s.updated_at,
+        topic=s.topic or "[web]",
         messages=[
             MessageResponse(
-                role=msg["role"],
-                content=msg["content"],
-                timestamp=msg.get("timestamp")
+                role=msg.get("role", "user"),
+                content=msg.get("content", ""),
+                timestamp=msg.get("timestamp"),
             )
-            for msg in messages
-        ]
+            for msg in messages_raw
+        ],
     )
 
 

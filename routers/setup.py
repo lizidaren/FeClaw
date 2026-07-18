@@ -161,6 +161,7 @@ class AdminWithDbPayload(BaseModel):
 class CompletePayload(BaseModel):
     """最后一步：用户为每个能力选择的模型 + 搜索后端。"""
     feclaw_domain: str = ""
+    cookie_secure: bool = False
     default_llm_model: str = ""
     default_vision_model: str = ""
     default_embedding_model: str = ""
@@ -350,6 +351,7 @@ async def complete(
     updates: Dict[str, str] = {"SETUP_COMPLETE": "true"}
     if payload.feclaw_domain:
         updates["FECLAW_DOMAIN"] = payload.feclaw_domain.strip()
+    updates["COOKIE_SECURE"] = "true" if payload.cookie_secure else "false"
     if payload.default_llm_model:
         updates["MAIN_TEXT_MODEL"] = payload.default_llm_model.strip()
     if payload.default_vision_model:

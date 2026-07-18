@@ -62,12 +62,14 @@ from routers.agent_config import router as agent_config_router
 from routers.agent_config_chat import router as agent_config_chat_router
 from routers.user import router as user_router
 from routers.admin import router as admin_router
+from routers.admin_panel import router as admin_panel_router
 from routers.group import router as group_router
 from routers.wechat import ensure_message_handler
 from services.agent_init_service import ensure_default_agent_5178
 from routers.desktop_ws import router as desktop_ws_router
 from routers.well_known import router as well_known_router
 from routers.upload import router as upload_router
+from routers.upload_general import router as upload_general_router
 from routers.desktop_api import router as desktop_api_router
 from routers.zentrim import router as zentrim_router
 from routers.metrics_internal import router as metrics_internal_router
@@ -591,7 +593,8 @@ else:
     app.include_router(console.router)  # 控制台 API (必须在 static_site_public 之前)
     app.include_router(user_router)  # 用户 API (注册、登录)
     app.include_router(group_router)  # Group Chat API
-    app.include_router(admin_router)  # 管理后台 API
+    app.include_router(admin_router)  # 管理后台 API (/api/admin/*)
+    app.include_router(admin_panel_router)  # 管理后台页面 + 配置 + 统计 (/admin/*)
     app.include_router(setup_router)  # 首次启动配置向导 API（正常启动时也挂载，供 admin 在后台调整）
     app.include_router(agent_config_ui_router)  # Agent 配置界面
     app.include_router(dashboard.router)  # Dashboard 页面
@@ -612,6 +615,7 @@ else:
         logger.info("Desktop WS relay enabled")
     app.include_router(metrics_internal_router)  # P1.5: 最小 metrics endpoint（admin-only），必须在 static_site_public 前注册（后者有 catch-all）
     app.include_router(zentrim_router)  # Zentrim（格物所）API — 必须在 static_site_public 前面，避免 catch-all 拦截
+    app.include_router(upload_general_router)  # 通用文件上传 (P0-1)：POST /api/upload
     app.include_router(static_site_public.router)  # 静态网站公开访问
     logger.info("Upload session router registered")
 

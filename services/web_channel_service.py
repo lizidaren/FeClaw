@@ -28,6 +28,9 @@ from services.vfs_image_dedup import VFSImageDeduplicationService
 # 渠道定义
 CHANNEL_WECHAT = "wechat"
 CHANNEL_WEB = "web"
+# 移动端渠道：与 Web 共享同一份会话存储，但 topic 前缀独立
+# （隔离：mobile 和 web 的会话不会互相出现在对方的列表里）
+CHANNEL_MOBILE = "mobile"
 
 logger = logging.getLogger(__name__)
 
@@ -557,14 +560,17 @@ class WebChannelService:
             logger.warning(f"[FeClaw] Failed to parse messages JSON")
             return []
 
-    def get_session_list(self, limit: int = 20) -> list:
-        """获取会话列表"""
-        sessions = self.db.query(ConversationSession).filter(
+    def get_session_list(self, limit: int = 20, agent_hash: Optional[str] = None) -> list:
+        """获取会话列表，可选按 agent_hash 筛选"""
+        q = self.db.query(ConversationSession).filter(
             ConversationSession.user_id == self.user_id,
             ConversationSession.is_archived == False
         ).filter(
             ConversationSession.topic.like(f"[{CHANNEL_WEB}]%")
-        ).order_by(
+        )
+        if agent_hash:
+            q = q.filter(ConversationSession.agent_hash == agent_hash)
+        sessions = q.order_by(
             ConversationSession.updated_at.desc()
         ).limit(limit).all()
 

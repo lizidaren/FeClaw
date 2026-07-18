@@ -12,19 +12,46 @@
     <link rel="stylesheet" href="/static/css/responsive.css">
     <link rel="stylesheet" href="/static/css/themes.css">
     <style>
+        /* ─── 浅色主题变量 ─── */
         :root {
-            --bg: #050510;
-            --card-bg: rgba(255, 255, 255, 0.04);
-            --card-border: rgba(255, 255, 255, 0.08);
-            --text-primary: #ffffff;
-            --text-secondary: rgba(255, 255, 255, 0.7);
-            --text-tertiary: rgba(255, 255, 255, 0.4);
+            --bg: #f5f5f8;
+            --card-bg: #ffffff;
+            --card-border: #e8e8ee;
+            --card-shadow: 0 1px 3px rgba(20, 20, 40, 0.04), 0 1px 2px rgba(20, 20, 40, 0.03);
+            --card-shadow-hover: 0 2px 8px rgba(20, 20, 40, 0.06), 0 1px 3px rgba(20, 20, 40, 0.04);
+
+            --header-bg: #1e1e2e;
+            --header-border: #2a2a3e;
+            --header-text: #ffffff;
+            --header-text-dim: rgba(255, 255, 255, 0.72);
+
+            --text-primary: #1a1a2e;
+            --text-secondary: #555555;
+            --text-tertiary: #888888;
+            --text-on-dark: #ffffff;
+
+            --input-bg: #ffffff;
+            --input-border: #d0d0d8;
+            --input-border-focus: #667eea;
+            --input-text: #1a1a2e;
+            --input-placeholder: #999999;
+
+            --divider: #e8e8ee;
+
             --accent: #667eea;
+            --accent-hover: #5566d6;
+            --accent-soft: #eef0fc;
             --accent-2: #764ba2;
+            --accent-gradient: linear-gradient(135deg, #667eea, #764ba2);
+
             --success: #22c55e;
+            --success-soft: #e8f8ee;
             --error: #ef4444;
+            --error-soft: #fde8e8;
             --warning: #f59e0b;
+            --warning-soft: #fdf3e0;
             --info: #3b82f6;
+            --info-soft: #e6efff;
         }
 
         * { box-sizing: border-box; }
@@ -36,25 +63,30 @@
                 "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
             min-height: 100vh;
             -webkit-font-smoothing: antialiased;
-        }
-
-        body {
-            background:
-                radial-gradient(ellipse at top left, rgba(99, 102, 241, 0.10) 0%, transparent 50%),
-                radial-gradient(ellipse at bottom right, rgba(168, 85, 247, 0.06) 0%, transparent 50%),
-                var(--bg);
             margin: 0;
         }
+        body {
+            background: var(--bg);
+        }
 
-        /* ─── 顶部导航 ─── */
+        /* 强制覆盖 — 浅色主题下所有表单元素用深色文字 */
+        input, select, textarea, option {
+            color: var(--input-text) !important;
+            font-family: inherit;
+        }
+        input::placeholder, textarea::placeholder {
+            color: var(--input-placeholder);
+        }
+
+        /* ─── 顶部导航 (深色) ─── */
         .admin-header {
             display: flex;
             justify-content: space-between;
             align-items: center;
-            padding: 20px 32px;
-            border-bottom: 1px solid var(--card-border);
-            background: rgba(5, 5, 16, 0.6);
-            backdrop-filter: blur(8px);
+            padding: 18px 32px;
+            border-bottom: 1px solid var(--header-border);
+            background: var(--header-bg);
+            color: var(--header-text);
             position: sticky;
             top: 0;
             z-index: 10;
@@ -65,52 +97,60 @@
             gap: 12px;
             font-size: 18px;
             font-weight: 600;
-            background: linear-gradient(135deg, #667eea, #764ba2);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
+            color: #ffffff;
+            -webkit-background-clip: initial;
+            -webkit-text-fill-color: initial;
+            background: none;
             text-decoration: none;
+        }
+        .admin-header .brand svg {
+            color: #a5b4fc;
         }
         .admin-header .user-info {
             display: flex;
             align-items: center;
             gap: 12px;
             font-size: 14px;
-            color: var(--text-secondary);
+            color: var(--header-text-dim);
         }
         .admin-header .user-info a {
-            color: var(--accent);
+            color: #ffffff;
             text-decoration: none;
             padding: 6px 14px;
             border-radius: 8px;
-            border: 1px solid var(--card-border);
-            background: var(--card-bg);
+            border: 1px solid rgba(255, 255, 255, 0.18);
+            background: rgba(255, 255, 255, 0.08);
             transition: all 0.2s;
         }
         .admin-header .user-info a:hover {
-            background: rgba(102, 126, 234, 0.15);
-            border-color: var(--accent);
+            background: rgba(255, 255, 255, 0.18);
+            border-color: rgba(255, 255, 255, 0.32);
         }
 
-        /* ─── Tab 切换 ─── */
+        /* ─── 主容器 ─── */
         .admin-container {
             max-width: 1100px;
             margin: 0 auto;
-            padding: 32px;
+            padding: 28px 32px;
         }
+
+        /* ─── Tab 切换 ─── */
         .tab-bar {
             display: flex;
-            gap: 8px;
-            margin-bottom: 28px;
-            border-bottom: 1px solid var(--card-border);
+            gap: 4px;
+            margin-bottom: 24px;
+            border-bottom: 1px solid var(--divider);
         }
         .tab-btn {
             background: none;
             border: none;
             padding: 12px 24px;
-            color: var(--text-secondary);
+            color: var(--text-tertiary);
             font-size: 15px;
+            font-weight: 500;
             cursor: pointer;
             border-bottom: 2px solid transparent;
+            margin-bottom: -1px;
             transition: all 0.2s;
         }
         .tab-btn:hover { color: var(--text-primary); }
@@ -125,14 +165,16 @@
         .section-card {
             background: var(--card-bg);
             border: 1px solid var(--card-border);
-            border-radius: 14px;
-            padding: 24px 28px;
-            margin-bottom: 20px;
+            border-radius: 12px;
+            padding: 22px 26px;
+            margin-bottom: 18px;
+            box-shadow: var(--card-shadow);
         }
         .section-card h3 {
             margin: 0 0 6px 0;
-            font-size: 17px;
+            font-size: 18px;
             font-weight: 600;
+            color: var(--text-primary);
         }
         .section-card .section-desc {
             color: var(--text-tertiary);
@@ -150,51 +192,58 @@
         }
         .form-row.full { grid-template-columns: 1fr; }
         .form-row label {
-            color: var(--text-secondary);
+            color: var(--text-primary);
             font-size: 14px;
+            font-weight: 500;
         }
         .form-row label .hint {
             display: block;
             font-size: 12px;
             color: var(--text-tertiary);
+            font-weight: 400;
             margin-top: 2px;
         }
         .form-row input[type="text"],
         .form-row input[type="password"],
         .form-row select {
             width: 100%;
-            padding: 10px 14px;
-            background: rgba(255, 255, 255, 0.04);
-            border: 1px solid var(--card-border);
+            padding: 9px 13px;
+            background: var(--input-bg);
+            border: 1px solid var(--input-border);
             border-radius: 8px;
-            color: var(--text-primary);
+            color: var(--input-text);
             font-size: 14px;
             font-family: inherit;
-            transition: border-color 0.2s;
+            transition: border-color 0.15s, box-shadow 0.15s;
+            word-break: break-all;
+            overflow-wrap: break-word;
+            min-width: 0;
         }
         .form-row input:focus,
         .form-row select:focus {
             outline: none;
-            border-color: var(--accent);
+            border-color: var(--input-border-focus);
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.12);
         }
         .form-row input[readonly] {
-            background: rgba(255, 255, 255, 0.02);
-            color: var(--text-tertiary);
+            background: #f5f5fa;
+            color: var(--text-secondary);
             cursor: not-allowed;
         }
         .form-row .key-display {
             display: inline-block;
-            padding: 8px 12px;
-            background: rgba(255, 255, 255, 0.05);
+            padding: 7px 12px;
+            background: #f5f5fa;
             border: 1px solid var(--card-border);
-            border-radius: 8px;
-            color: var(--text-tertiary);
+            border-radius: 6px;
+            color: var(--text-secondary);
             font-family: 'SF Mono', Monaco, Consolas, monospace;
             font-size: 13px;
             margin-right: 8px;
         }
         .form-row .key-display.set {
             color: var(--success);
+            background: var(--success-soft);
             border-color: rgba(34, 197, 94, 0.3);
         }
         .form-row .key-display.empty {
@@ -204,10 +253,17 @@
             display: flex;
             align-items: center;
             gap: 8px;
+            color: var(--text-primary);
+            font-size: 14px;
         }
         .form-row .checkbox-row input[type="checkbox"] {
             width: 18px; height: 18px;
             accent-color: var(--accent);
+            cursor: pointer;
+        }
+        .form-row .checkbox-row span {
+            color: var(--text-secondary);
+            font-size: 14px;
         }
 
         /* ─── 按钮 ─── */
@@ -217,54 +273,71 @@
             gap: 10px;
             margin-top: 18px;
             padding-top: 16px;
-            border-top: 1px solid var(--card-border);
+            border-top: 1px solid var(--divider);
         }
         .btn {
             padding: 9px 20px;
             border-radius: 8px;
             border: 1px solid var(--card-border);
-            background: var(--card-bg);
+            background: #ffffff;
             color: var(--text-primary);
             font-size: 14px;
             cursor: pointer;
-            transition: all 0.2s;
+            transition: all 0.15s;
             font-family: inherit;
         }
         .btn:hover {
-            background: rgba(255, 255, 255, 0.08);
+            background: var(--accent-soft);
             border-color: var(--accent);
+            color: var(--accent);
         }
         .btn-primary {
-            background: linear-gradient(135deg, var(--accent), var(--accent-2));
-            border-color: transparent;
-            color: #fff;
+            background: var(--accent);
+            border-color: var(--accent);
+            color: #ffffff;
             font-weight: 500;
         }
-        .btn-primary:hover { opacity: 0.92; }
+        .btn-primary:hover {
+            background: var(--accent-hover);
+            border-color: var(--accent-hover);
+            color: #ffffff;
+        }
         .btn-primary:disabled {
             opacity: 0.5;
             cursor: not-allowed;
         }
         .btn-test {
-            background: rgba(59, 130, 246, 0.15);
-            border-color: rgba(59, 130, 246, 0.4);
+            background: var(--info-soft);
+            border-color: rgba(59, 130, 246, 0.35);
             color: var(--info);
             padding: 6px 12px;
             font-size: 13px;
         }
-        .btn-test:hover { background: rgba(59, 130, 246, 0.25); }
-        .btn-test.ok { color: var(--success); border-color: rgba(34, 197, 94, 0.4); }
-        .btn-test.err { color: var(--error); border-color: rgba(239, 68, 68, 0.4); }
+        .btn-test:hover {
+            background: rgba(59, 130, 246, 0.18);
+            border-color: var(--info);
+            color: var(--info);
+        }
+        .btn-test.ok {
+            background: var(--success-soft);
+            color: var(--success);
+            border-color: rgba(34, 197, 94, 0.4);
+        }
+        .btn-test.err {
+            background: var(--error-soft);
+            color: var(--error);
+            border-color: rgba(239, 68, 68, 0.4);
+        }
 
         /* ─── Provider 列表 ─── */
-        .provider-list { display: flex; flex-direction: column; gap: 12px; }
+        .provider-list { display: flex; flex-direction: column; gap: 10px; }
         .provider-item {
             display: grid;
             grid-template-columns: 200px 1fr 110px;
             gap: 14px;
             align-items: center;
             padding: 12px 14px;
-            background: rgba(255, 255, 255, 0.02);
+            background: #fafafd;
             border: 1px solid var(--card-border);
             border-radius: 10px;
         }
@@ -282,10 +355,29 @@
             display: inline-block;
             padding: 1px 8px;
             font-size: 11px;
-            background: linear-gradient(135deg, var(--accent), var(--accent-2));
+            background: var(--accent-gradient);
             color: #fff;
             border-radius: 4px;
             margin-left: 6px;
+            font-weight: 500;
+        }
+        .provider-item input[type="password"] {
+            padding: 8px 12px;
+            background: var(--input-bg);
+            border: 1px solid var(--input-border);
+            border-radius: 8px;
+            color: var(--input-text);
+            font-size: 13px;
+            width: 100%;
+            font-family: inherit;
+            word-break: break-all;
+            overflow-wrap: break-word;
+            min-width: 0;
+        }
+        .provider-item input[type="password"]:focus {
+            outline: none;
+            border-color: var(--input-border-focus);
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.12);
         }
 
         /* ─── 状态消息 ─── */
@@ -295,15 +387,16 @@
             font-size: 13px;
             margin-top: 10px;
             display: none;
+            font-weight: 500;
         }
         .status-msg.show { display: block; }
         .status-msg.ok {
-            background: rgba(34, 197, 94, 0.12);
+            background: var(--success-soft);
             color: var(--success);
             border: 1px solid rgba(34, 197, 94, 0.3);
         }
         .status-msg.err {
-            background: rgba(239, 68, 68, 0.12);
+            background: var(--error-soft);
             color: var(--error);
             border: 1px solid rgba(239, 68, 68, 0.3);
         }
@@ -313,35 +406,69 @@
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
             gap: 16px;
-            margin-bottom: 28px;
+            margin-bottom: 24px;
         }
         .stat-card {
             background: var(--card-bg);
             border: 1px solid var(--card-border);
-            border-radius: 14px;
-            padding: 20px 22px;
+            border-left: 3px solid var(--divider);
+            border-radius: 12px;
+            padding: 18px 20px;
+            box-shadow: var(--card-shadow);
+            transition: box-shadow 0.15s;
+        }
+        .stat-card:hover {
+            box-shadow: var(--card-shadow-hover);
         }
         .stat-card .label {
             color: var(--text-tertiary);
             font-size: 13px;
-            margin-bottom: 8px;
+            margin-bottom: 6px;
+            font-weight: 500;
         }
         .stat-card .value {
-            font-size: 28px;
+            font-size: 32px;
             font-weight: 700;
             color: var(--text-primary);
-            background: linear-gradient(135deg, #fff, #ccc);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
+            line-height: 1.2;
+            letter-spacing: -0.5px;
         }
         .stat-card .sub {
             color: var(--text-tertiary);
             font-size: 12px;
-            margin-top: 4px;
+            margin-top: 6px;
         }
-        .stat-card.ok { border-left: 3px solid var(--success); }
-        .stat-card.warn { border-left: 3px solid var(--warning); }
-        .stat-card.err { border-left: 3px solid var(--error); }
+        .stat-card .emoji {
+            font-size: 22px;
+            margin-bottom: 4px;
+            line-height: 1;
+        }
+        .stat-card.ok { border-left-color: var(--success); }
+        .stat-card.warn { border-left-color: var(--warning); }
+        .stat-card.err { border-left-color: var(--error); }
+        /* 业务分类色: 用户=蓝 / Agent=紫 / 对话=绿 / 存储=橙 / 模型=青 / 数据库=靛 */
+        .stat-card.user    { border-left-color: #3b82f6; }
+        .stat-card.user    .value { color: #3b82f6; }
+        .stat-card.agent   { border-left-color: #8b5cf6; }
+        .stat-card.agent   .value { color: #8b5cf6; }
+        .stat-card.chat    { border-left-color: #22c55e; }
+        .stat-card.chat    .value { color: #22c55e; }
+        .stat-card.storage { border-left-color: #f59e0b; }
+        .stat-card.storage .value { color: #f59e0b; }
+        .stat-card.model   { border-left-color: #06b6d4; }
+        .stat-card.model   .value { color: #06b6d4; }
+        .stat-card.db      { border-left-color: #6366f1; }
+        .stat-card.db      .value { color: #6366f1; }
+        /* LLM 状态点 */
+        .stat-card .pill {
+            display: inline-block;
+            padding: 3px 10px;
+            border-radius: 999px;
+            font-size: 13px;
+            font-weight: 600;
+        }
+        .stat-card .pill.ok  { background: var(--success-soft); color: var(--success); }
+        .stat-card .pill.err { background: var(--error-soft); color: var(--error); }
 
         /* ─── 最近活动 ─── */
         .activity-list { display: flex; flex-direction: column; gap: 8px; }
@@ -350,10 +477,11 @@
             justify-content: space-between;
             align-items: center;
             padding: 10px 14px;
-            background: rgba(255, 255, 255, 0.02);
+            background: #fafafd;
             border: 1px solid var(--card-border);
             border-radius: 8px;
             font-size: 13px;
+            color: var(--text-secondary);
         }
         .activity-item .time {
             color: var(--text-tertiary);
@@ -372,22 +500,31 @@
             gap: 12px;
             margin-bottom: 6px;
             font-size: 12px;
-            color: var(--text-tertiary);
+            color: var(--text-secondary);
         }
-        .growth-bar-row .date { width: 50px; }
+        .growth-bar-row .date {
+            width: 50px;
+            color: var(--text-tertiary);
+            font-family: 'SF Mono', Monaco, Consolas, monospace;
+        }
         .growth-bar-row .bar-wrap {
             flex: 1;
             height: 14px;
-            background: rgba(255, 255, 255, 0.04);
+            background: #f0f0f4;
             border-radius: 4px;
             overflow: hidden;
         }
         .growth-bar-row .bar {
             height: 100%;
-            background: linear-gradient(90deg, var(--accent), var(--accent-2));
+            background: var(--accent-gradient);
             border-radius: 4px;
         }
-        .growth-bar-row .count { width: 40px; text-align: right; }
+        .growth-bar-row .count {
+            width: 40px;
+            text-align: right;
+            color: var(--text-primary);
+            font-weight: 500;
+        }
 
         /* ─── 渠道分布 ─── */
         .channel-grid {
@@ -397,19 +534,163 @@
         }
         .channel-pill {
             padding: 10px 14px;
-            background: rgba(102, 126, 234, 0.1);
+            background: var(--accent-soft);
             border: 1px solid rgba(102, 126, 234, 0.25);
             border-radius: 8px;
             text-align: center;
         }
-        .channel-pill .ch { font-size: 12px; color: var(--text-tertiary); }
-        .channel-pill .n { font-size: 20px; font-weight: 600; color: var(--accent); }
+        .channel-pill .ch {
+            font-size: 12px;
+            color: var(--text-secondary);
+        }
+        .channel-pill .n {
+            font-size: 20px;
+            font-weight: 600;
+            color: var(--accent);
+        }
 
-        @media (max-width: 720px) {
-            .form-row { grid-template-columns: 1fr; }
-            .provider-item { grid-template-columns: 1fr; }
+        /* 空状态 */
+        .empty-text {
+            color: var(--text-tertiary);
+            font-size: 14px;
+            padding: 12px 0;
+        }
+
+        /* ─── 时间线 (最近活动) ─── */
+        .timeline {
+            list-style: none;
+            padding: 4px 0 4px 4px;
+            margin: 0;
+            position: relative;
+        }
+        .timeline::before {
+            content: '';
+            position: absolute;
+            left: 9px;
+            top: 14px;
+            bottom: 14px;
+            width: 2px;
+            background: var(--divider);
+        }
+        .timeline-item {
+            position: relative;
+            padding: 8px 0 8px 30px;
+            color: var(--text-secondary);
+            font-size: 13px;
+            line-height: 1.5;
+        }
+        .timeline-item::before {
+            content: '';
+            position: absolute;
+            left: 4px;
+            top: 14px;
+            width: 12px;
+            height: 12px;
+            background: var(--accent);
+            border: 2px solid var(--card-bg);
+            border-radius: 50%;
+            box-shadow: 0 0 0 2px var(--accent-soft);
+        }
+        .timeline-item .user {
+            color: var(--accent);
+            font-weight: 600;
+        }
+        .timeline-item .time {
+            color: var(--text-tertiary);
+            font-size: 12px;
+            font-family: 'SF Mono', Monaco, Consolas, monospace;
+            margin-left: 6px;
+        }
+        .timeline-item .ch {
+            color: var(--text-tertiary);
+            font-size: 12px;
+            margin-left: 4px;
+        }
+
+        /* ─── 增长条带 emoji ─── */
+        .growth-bar-row .bar {
+            transition: width 0.4s ease;
+        }
+        .growth-bar-row .emoji-mark {
+            width: 18px;
+            text-align: center;
+            font-size: 14px;
+        }
+
+        /* ─── 底部状态栏 (集中显示未配置项) ─── */
+        .status-bar {
+            background: #f5f5fa;
+            border: 1px solid var(--divider);
+            border-radius: 10px;
+            padding: 14px 18px;
+            margin-top: 22px;
+            font-size: 13px;
+            color: var(--text-secondary);
+        }
+        .status-bar.all-ok {
+            background: var(--success-soft);
+            border-color: rgba(34, 197, 94, 0.3);
+            color: var(--success);
+        }
+        .status-bar .status-title {
+            font-weight: 600;
+            color: var(--text-primary);
+            margin-bottom: 8px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 14px;
+        }
+        .status-bar.all-ok .status-title { color: var(--success); }
+        .status-bar ul {
+            list-style: none;
+            padding: 0;
+            margin: 0;
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+        .status-bar li {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            color: var(--text-secondary);
+        }
+        .status-bar li .mark {
+            color: var(--warning);
+            font-weight: 700;
+            font-size: 14px;
+            width: 16px;
+            text-align: center;
+        }
+        .status-bar li code {
+            background: rgba(0, 0, 0, 0.04);
+            padding: 1px 6px;
+            border-radius: 4px;
+            font-size: 12px;
+            color: var(--text-primary);
+        }
+
+        /* ─── COS 字段容器 (条件显示) ─── */
+        .cos-only.hidden { display: none; }
+        .cos-only .form-row label .hint {
+            color: var(--warning);
+        }
+
+        @media (max-width: 768px) {
+            .form-row { grid-template-columns: 1fr; gap: 6px; }
+            .form-row label { align-self: start; }
+            .provider-item { grid-template-columns: 1fr; gap: 10px; }
+            .stats-grid { grid-template-columns: 1fr; }
             .admin-container { padding: 16px; }
             .admin-header { padding: 14px 16px; }
+            .section-card { padding: 18px 16px; }
+            .stat-card .value { font-size: 28px; }
+            .tab-btn { padding: 10px 14px; font-size: 14px; }
+        }
+        @media (max-width: 480px) {
+            .stat-card .value { font-size: 24px; }
+            .channel-grid { grid-template-columns: 1fr 1fr; }
         }
     </style>
 </head>
@@ -447,9 +728,7 @@
                 <h3>部署模式</h3>
                 <p class="section-desc">单站点（path 路由）或子域名（*.domain）模式。修改后建议重启服务。</p>
                 <div class="form-row">
-                    <label>
-                        部署模式
-                    </label>
+                    <label>部署模式</label>
                     <div class="checkbox-row">
                         <select id="deploy-mode">
                             <option value="single">单站点 (Path 路由)</option>
@@ -545,20 +824,22 @@
                         <option value="numpy">Numpy (本地)</option>
                     </select>
                 </div>
-                <div class="form-row">
-                    <label>COS Bucket</label>
-                    <input type="text" id="cos-bucket" placeholder="example-1250000000">
-                </div>
-                <div class="form-row">
-                    <label>
-                        COS Secret ID
-                        <span class="hint">空值表示保持现状</span>
-                    </label>
-                    <input type="text" id="cos-secret-id" placeholder="保留现状请留空">
-                </div>
-                <div class="form-row">
-                    <label>COS Secret Key</label>
-                    <input type="password" id="cos-secret-key" placeholder="保留现状请留空">
+                <div class="cos-only" id="cos-fields">
+                    <div class="form-row">
+                        <label>COS Bucket</label>
+                        <input type="text" id="cos-bucket" placeholder="example-1250000000">
+                    </div>
+                    <div class="form-row">
+                        <label>
+                            COS Secret ID
+                            <span class="hint">空值表示保持现状</span>
+                        </label>
+                        <input type="text" id="cos-secret-id" placeholder="保留现状请留空">
+                    </div>
+                    <div class="form-row">
+                        <label>COS Secret Key</label>
+                        <input type="password" id="cos-secret-key" placeholder="保留现状请留空">
+                    </div>
                 </div>
                 <div class="section-actions">
                     <button class="btn btn-primary" id="btn-save-storage">保存存储配置</button>
@@ -574,6 +855,12 @@
                     <label>连接串</label>
                     <input type="text" id="db-url" readonly>
                 </div>
+            </div>
+
+            <!-- 底部状态栏 — 集中显示未配置项 -->
+            <div class="status-bar all-ok" id="config-status-bar">
+                <div class="status-title">✅ 配置已就绪</div>
+                <ul id="config-status-list"></ul>
             </div>
         </div>
 
@@ -652,6 +939,9 @@
 
         function renderConfig(data) {
             providersData = data.providers;
+            window._lastModels = data.models || {};
+            window._lastDeploy = data.deploy || {};
+            window._lastStorage = data.storage || {};
 
             // 部署
             document.getElementById('deploy-mode').value = data.deploy.mode;
@@ -675,6 +965,101 @@
 
             // 模型下拉框
             renderModelDropdowns(data.providers, data.models);
+
+            // COS 字段按当前选择显示/隐藏
+            toggleCosFields();
+
+            // 底部状态栏
+            updateStatusBar(data);
+        }
+
+        // ─── COS 字段可见性 ───
+        function toggleCosFields() {
+            const mode = document.getElementById('storage-mode').value;
+            const vec = document.getElementById('vector-backend').value;
+            const needCos = (mode === 'cos') || (vec === 'cos');
+            document.getElementById('cos-fields').classList.toggle('hidden', !needCos);
+        }
+
+        // 监听存储/向量后端切换
+        document.getElementById('storage-mode').addEventListener('change', () => {
+            toggleCosFields();
+            updateStatusBar({ providers: providersData, models: window._lastModels || {}, deploy: {
+                mode: document.getElementById('deploy-mode').value,
+                feclaw_domain: document.getElementById('deploy-domain').value.trim(),
+            }, storage: {
+                storage_mode: document.getElementById('storage-mode').value,
+                vector_backend: document.getElementById('vector-backend').value,
+                cos_bucket: document.getElementById('cos-bucket').value.trim(),
+            }});
+        });
+        document.getElementById('vector-backend').addEventListener('change', () => {
+            toggleCosFields();
+            document.getElementById('storage-mode').dispatchEvent(new Event('change'));
+        });
+        document.getElementById('deploy-mode').addEventListener('change', () => {
+            document.getElementById('storage-mode').dispatchEvent(new Event('change'));
+        });
+        document.getElementById('deploy-domain').addEventListener('input', () => {
+            document.getElementById('storage-mode').dispatchEvent(new Event('change'));
+        });
+        document.getElementById('cos-bucket').addEventListener('input', () => {
+            document.getElementById('storage-mode').dispatchEvent(new Event('change'));
+        });
+
+        // ─── 底部状态栏 — 列出所有未配置项 ───
+        function updateStatusBar(data) {
+            const bar = document.getElementById('config-status-bar');
+            const list = document.getElementById('config-status-list');
+            const items = [];
+
+            // 1) 子域名模式下主域名必填
+            const deploy = data.deploy || {};
+            if (deploy.mode === 'subdomain' && !deploy.feclaw_domain) {
+                items.push('子域名模式已开启，但 <code>主域名</code> 为空');
+            }
+
+            // 2) 存储相关
+            const st = data.storage || {};
+            const useCos = st.storage_mode === 'cos' || st.vector_backend === 'cos';
+            if (useCos && !st.cos_bucket) {
+                items.push('已选择 COS，但 <code>COS Bucket</code> 为空');
+            }
+            // COS 凭证没有显式 has_key 标志 (保持留空语义)，仅在切到 cos 时给出友好提示
+            if (useCos) {
+                items.push('若 <code>Secret ID/Key</code> 从未设置，需在保存时填入');
+            }
+
+            // 3) 主文本模型必须设置
+            const md = data.models || {};
+            if (!md.main_text) {
+                items.push('<code>主文本模型</code> 未选择 — Agent 将无法回复');
+            }
+
+            // 4) 模型对应的 provider 是否都有 key
+            if (providersData && providersData.length) {
+                const needProvs = new Set();
+                if (md.main_text) {
+                    // 简单启发式: 模型名前缀 = provider id
+                    for (const p of providersData) {
+                        if (md.main_text.startsWith(p.id)) needProvs.add(p.id);
+                    }
+                }
+                for (const pid of needProvs) {
+                    const p = providersData.find(x => x.id === pid);
+                    if (p && !p.has_key) items.push('Provider <code>' + p.name + '</code> 未设置 API Key');
+                }
+            }
+
+            if (items.length === 0) {
+                bar.classList.add('all-ok');
+                bar.querySelector('.status-title').innerHTML = '✅ 配置已就绪';
+                list.innerHTML = '';
+            } else {
+                bar.classList.remove('all-ok');
+                bar.querySelector('.status-title').innerHTML = '⚠️ 还有 ' + items.length + ' 项待配置';
+                list.innerHTML = items.map(t => '<li><span class="mark">✗</span><span>' + t + '</span></li>').join('');
+            }
         }
 
         function renderProviders(providers) {
@@ -687,7 +1072,7 @@
                     </div>
                     <div>
                         <span class="key-display ${p.has_key ? 'set' : 'empty'}">${p.has_key ? escapeHtml(p.key_display || '••••') : '未设置'}</span>
-                        <input type="password" data-provider="${p.id}" placeholder="${p.has_key ? '替换现有 key (留空保留)' : '粘贴 API key'}" style="width: 60%; padding: 8px 12px; background: rgba(255,255,255,0.04); border: 1px solid var(--card-border); border-radius: 8px; color: var(--text-primary); font-size: 13px;">
+                        <input type="password" data-provider="${p.id}" placeholder="${p.has_key ? '替换现有 key (留空保留)' : '粘贴 API key'}">
                     </div>
                     <div>
                         <button class="btn btn-test" data-test="${p.id}">测试</button>
@@ -886,28 +1271,40 @@
         }
 
         function renderStats(d) {
+            // 业务色 + emoji 让数据一眼可读
             const cards = [
-                { label: '用户总数', value: d.user_count, sub: '今日 +' + d.new_users_today, cls: '' },
-                { label: 'Agent 总数', value: d.agent_count, sub: '今日 +' + d.new_agents_today, cls: '' },
-                { label: '对话次数', value: d.chat_count, sub: '今日 +' + d.messages_today, cls: '' },
-                { label: '模型调用（今日）', value: d.model_calls_today, sub: '累计 ' + d.model_calls_total, cls: 'ok' },
-                { label: '存储用量', value: d.storage_used, sub: d.storage_mode, cls: '' },
-                { label: '数据库', value: d.db_status === 'connected' ? '✅ 正常' : '❌ 异常', sub: '', cls: d.db_status === 'connected' ? 'ok' : 'err' },
+                { label: '用户总数',     value: d.user_count,       sub: '今日 +' + d.new_users_today,   cls: 'user',    emoji: '👥' },
+                { label: 'Agent 总数',   value: d.agent_count,      sub: '今日 +' + d.new_agents_today,  cls: 'agent',   emoji: '🤖' },
+                { label: '对话次数',     value: d.chat_count,       sub: '今日 +' + d.messages_today,   cls: 'chat',    emoji: '💬' },
+                { label: '模型调用',     value: d.model_calls_today,sub: '累计 ' + d.model_calls_total,  cls: 'model',   emoji: '⚡' },
+                { label: '存储用量',     value: d.storage_used,     sub: d.storage_mode,                cls: 'storage', emoji: '💾' },
             ];
-            document.getElementById('stats-cards').innerHTML = cards.map(c => `
-                <div class="stat-card ${c.cls}">
-                    <div class="label">${escapeHtml(c.label)}</div>
-                    <div class="value">${escapeHtml(String(c.value))}</div>
-                    ${c.sub ? `<div class="sub">${escapeHtml(c.sub)}</div>` : ''}
+            // 数据库单独渲染 (有状态色)
+            const dbOk = d.db_status === 'connected';
+            const dbHtml = `
+                <div class="stat-card db ${dbOk ? 'ok' : 'err'}">
+                    <div class="emoji">${dbOk ? '🟢' : '🔴'}</div>
+                    <div class="label">数据库</div>
+                    <div class="value"><span class="pill ${dbOk ? 'ok' : 'err'}">${dbOk ? '正常' : '异常'}</span></div>
                 </div>
-            `).join('');
+            `;
+            document.getElementById('stats-cards').innerHTML =
+                cards.map(c => `
+                    <div class="stat-card ${c.cls}">
+                        <div class="emoji">${c.emoji}</div>
+                        <div class="label">${escapeHtml(c.label)}</div>
+                        <div class="value">${escapeHtml(String(c.value))}</div>
+                        ${c.sub ? `<div class="sub">${escapeHtml(c.sub)}</div>` : ''}
+                    </div>
+                `).join('') + dbHtml;
 
-            // LLM 状态
+            // LLM 状态 — 用 pill 展示
             const llmCards = Object.entries(d.llm_status || {}).map(([id, st]) => {
                 const ok = st === 'ok';
                 return `<div class="stat-card ${ok ? 'ok' : 'err'}">
+                    <div class="emoji">${ok ? '🟢' : '🔴'}</div>
                     <div class="label">LLM · ${escapeHtml(id)}</div>
-                    <div class="value" style="font-size:18px;">${ok ? '✅ OK' : '❌ ' + escapeHtml(st)}</div>
+                    <div class="value"><span class="pill ${ok ? 'ok' : 'err'}">${ok ? 'OK' : escapeHtml(st)}</span></div>
                 </div>`;
             }).join('');
             document.getElementById('stats-cards').innerHTML += llmCards;
@@ -916,7 +1313,7 @@
             const ch = d.channel_distribution || {};
             const chEl = document.getElementById('channel-distribution');
             if (Object.keys(ch).length === 0) {
-                chEl.innerHTML = '<p style="color: var(--text-tertiary);">今日无消息记录</p>';
+                chEl.innerHTML = '<p class="empty-text">今日无消息记录</p>';
             } else {
                 chEl.innerHTML = Object.entries(ch).map(([k, v]) => `
                     <div class="channel-pill">
@@ -926,28 +1323,33 @@
                 `).join('');
             }
 
-            // 用户增长
+            // 用户增长 — 柱状条 + emoji 强度
             const growth = d.user_growth || [];
             const maxCount = Math.max(1, ...growth.map(g => g.count));
-            document.getElementById('user-growth').innerHTML = growth.map(g => `
+            document.getElementById('user-growth').innerHTML = growth.map(g => {
+                const ratio = g.count / maxCount;
+                const emoji = g.count === 0 ? '·' : (ratio > 0.66 ? '🔥' : (ratio > 0.33 ? '📈' : '🌱'));
+                return `
                 <div class="growth-bar-row">
                     <span class="date">${escapeHtml(g.date)}</span>
-                    <div class="bar-wrap"><div class="bar" style="width: ${(g.count / maxCount * 100).toFixed(1)}%"></div></div>
+                    <div class="bar-wrap"><div class="bar" style="width: ${(ratio * 100).toFixed(1)}%"></div></div>
+                    <span class="emoji-mark">${emoji}</span>
                     <span class="count">${g.count}</span>
                 </div>
-            `).join('');
+            `;
+            }).join('');
 
-            // 最近活动
+            // 最近活动 — 时间线样式
             const act = d.recent_activity || [];
             if (act.length === 0) {
-                document.getElementById('recent-activity').innerHTML = '<p style="color: var(--text-tertiary);">暂无活动</p>';
+                document.getElementById('recent-activity').innerHTML = '<p class="empty-text">暂无活动</p>';
             } else {
-                document.getElementById('recent-activity').innerHTML = act.map(a => `
-                    <div class="activity-item">
-                        <span><span class="user">${escapeHtml(a.user)}</span> · ${escapeHtml(a.action)} <span style="color: var(--text-tertiary);">(${escapeHtml(a.channel)})</span></span>
+                document.getElementById('recent-activity').innerHTML = '<ul class="timeline">' + act.map(a => `
+                    <li class="timeline-item">
+                        <span class="user">${escapeHtml(a.user)}</span> · ${escapeHtml(a.action)}<span class="ch">(${escapeHtml(a.channel)})</span>
                         <span class="time">${escapeHtml(a.time)}</span>
-                    </div>
-                `).join('');
+                    </li>
+                `).join('') + '</ul>';
             }
         }
 

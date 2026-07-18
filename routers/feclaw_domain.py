@@ -914,9 +914,33 @@ async def dashboard_page(request: Request, agent: Optional[int] = Query(None)):
         return RedirectResponse(url="/login", status_code=302)
     host = _get_domain(request)
     agent_hash = extract_hash_from_host(host)
+    # 解析 is_admin（用于在导航栏显示「管理后台」入口）
+    is_admin = False
+    try:
+        # get_current_user 用 Depends(get_db)，手动调用需要解析 db
+        from utils.auth_dependencies import _extract_global_jwt, _decode_or_none, _user_id_from_payload
+        from models.database import User, get_db as _get_db_factory
+        token = _extract_global_jwt(request)
+        payload = _decode_or_none(token) if token else None
+        uid = _user_id_from_payload(payload) if payload else None
+        if uid:
+            db = next(_get_db_factory())
+            try:
+                u = db.query(User).filter(User.id == uid).first()
+                is_admin = bool(u and getattr(u, "is_admin", False))
+            finally:
+                db.close()
+    except Exception:
+        is_admin = False
     if agent_hash:
-        return templates.TemplateResponse(request, "agent_dashboard.html", {"request": request, "agent_hash": agent_hash})
-    return templates.TemplateResponse(request, "dashboard.html", {"request": request, "agent_hash": agent_hash})
+        return templates.TemplateResponse(
+            request, "agent_dashboard.html",
+            {"request": request, "agent_hash": agent_hash, "is_admin": is_admin},
+        )
+    return templates.TemplateResponse(
+        request, "dashboard.html",
+        {"request": request, "agent_hash": agent_hash, "is_admin": is_admin},
+    )
 
 
 @router.get("/files", response_class=HTMLResponse)

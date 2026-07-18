@@ -49,6 +49,8 @@ from utils.auth_dependencies import get_admin_user
 
 logger = logging.getLogger(__name__)
 
+FORBIDDEN_PAGE_HTML = """<!DOCTYPE html><html lang=zh-CN><head><meta charset=utf-8><title>权限不足</title><style>body{background:#050510;color:#e0e0e0;display:flex;align-items:center;justify-content:center;min-height:100vh;font-family:sans-serif;text-align:center;margin:0}h1{font-size:3em;margin:0}h2{color:#f87171;margin:8px 0 0}p{color:#888;margin-top:20px}a{color:#667eea;text-decoration:none}.btn{display:inline-block;margin-top:24px;padding:10px 24px;background:#667eea;color:#fff;border-radius:8px;text-decoration:none}</style></head><body><div><div style="font-size:64px;margin-bottom:16px">🔒</div><h1>403</h1><h2>需要管理员权限</h2><p>你的账户没有访问管理后台的权限。</p><a href="/dashboard" class="btn">返回控制台</a></div></body></html>"""
+
 router = APIRouter(prefix="/admin", tags=["Admin Panel"])
 
 

@@ -79,9 +79,13 @@ async def agent_config_chat(
             payload.setdefault("model", llm_model)
 
             try:
+                _url = f"{llm_base.rstrip('/')}/chat/completions"
+                _model = payload.get("model", "unknown")
+                _has_key = bool(api_key)
+                logger.info(f"[ConfigChat] -> POST {_url} model={_model} has_key={_has_key}")
                 async with client.stream(
                         "POST",
-                        f"{llm_base.rstrip('/')}/v1/chat/completions",
+                        f"{llm_base.rstrip('/')}/chat/completions",
                         json=payload,
                         headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
                     ) as resp:

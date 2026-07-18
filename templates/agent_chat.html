@@ -1177,7 +1177,7 @@ let selectedFilePath = null;     // 上传后的 VFS 路径
         // 加载会话列表
         async function loadSessions() {
             try {
-                const response = await fetch('/api/chat/sessions', {
+                const response = await fetch('/api/chat/sessions?agent_hash=' + encodeURIComponent(AGENT_HASH), {
                     headers: { 'Authorization': `Bearer ${jwt}` }
                 });
                 
