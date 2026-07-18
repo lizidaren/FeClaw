@@ -52,3 +52,4 @@ sse-starlette>=2.0.0        # 群聊 SSE 订阅端点（routers/group.py:GET /ap
 playwright>=1.40.0          # 浏览器自动化（需额外 npx playwright install）
 
 # 沙箱（可选，pyfuse3 在 requirements-fuse.txt）
+eval_type_backport>=0.2.0     # Pydantic runtime type annotation parsing（Python 3.9 兼容）

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 FeClaw Desktop 客户端发现端点 (RFC 8615 .well-known).
 

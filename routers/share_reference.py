@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 分享页引用令牌路由 — 创建和解析文本引用
 """

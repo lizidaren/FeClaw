@@ -418,7 +418,7 @@ async def save_api_keys(
             updates[k.strip()] = v.strip()
     if updates:
         update_env(updates)
-        logger.info(f"[Setup] admin={(_setup_user.username if _setup_user else "admin")} 更新了 {len(updates)} 个 API key")
+        logger.info(f"[Setup] admin={(_setup_user.username if _setup_user else 'admin')} 更新了 {len(updates)} 个 API key")
     return {"status": "ok", "updated": list(updates.keys())}
 
 
@@ -445,7 +445,7 @@ async def save_storage(
         updates["VECTOR_STORAGE_BACKEND"] = payload.vector_storage_backend.strip().lower()
     if updates:
         update_env(updates)
-        logger.info(f"[Setup] admin={(_setup_user.username if _setup_user else "admin")} 更新了存储配置: {list(updates.keys())}")
+        logger.info(f"[Setup] admin={(_setup_user.username if _setup_user else 'admin')} 更新了存储配置: {list(updates.keys())}")
     return {"status": "ok", "updated": list(updates.keys())}
 
 
@@ -488,7 +488,7 @@ async def complete(
         updates["DEFAULT_SEARCH_ENGINE"] = payload.default_search_engine.strip().lower()
     update_env(updates)
     logger.info(
-        f"[Setup] admin={(_setup_user.username if _setup_user else "admin")} 完成配置: "
+        f"[Setup] admin={(_setup_user.username if _setup_user else 'admin')} 完成配置: "
         f"llm={updates.get('MAIN_TEXT_MODEL')!r}, "
         f"vision={updates.get('MAIN_VISION_MODEL')!r}, "
         f"embedding={updates.get('MAIN_EMBEDDING_MODEL')!r}, "

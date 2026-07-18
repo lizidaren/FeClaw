@@ -236,13 +236,14 @@ class WebChannelService:
 
                 # 发送预识别结果为主管 SSE 事件（可点击展开）
                 if image_desc:
-                    yield f"event: pipeline\ndata: {json.dumps({
+                    _pipeline_data = json.dumps({
                         "content": "📷 图片预识别完成",
                         "result_preview": image_desc[:2000],
                         "done": True,
                         "tool": "image_describer",
                         "query": "图片分析"
-                    }, ensure_ascii=False)}\n\n"
+                    }, ensure_ascii=False)
+                    yield f"event: pipeline\ndata: {_pipeline_data}\n\n"
 
                 prefix = "\n".join(prefix_parts)
                 
@@ -370,13 +371,14 @@ class WebChannelService:
                 if parsed_content:
                     file_prefix_parts.append(f"文档内容:\n{parsed_content[:4000]}")
                     file_prefix_parts.append("（以上为自动提取的文档内容，Agent 无需再尝试读取文件，可直接基于以上内容回答。如需完整内容或进一步分析，可使用 parse_file 工具。）")
-                    yield f"event: pipeline\ndata: {json.dumps({
+                    _pipe_data_0 = json.dumps({
                         "content": "📄 文档自动解析完成",
                         "result_preview": parsed_content[:2000],
                         "done": True,
                         "tool": "document_extractor",
                         "query": "文档分析"
-                    }, ensure_ascii=False)}\n\n"
+                    }, ensure_ascii=False)
+                    yield f"event: pipeline\ndata: {_pipe_data_0}\n\n"
                     
                     # 后台异步：VFS 向量索引（fire-and-forget）
                     try:
@@ -392,11 +394,12 @@ class WebChannelService:
                 else:
                     # 乱码/扫描 PDF → 自动 VLM OCR（后台处理）
                     file_prefix_parts.append("（正在对文档进行 OCR 识别...）")
-                    yield f"event: pipeline\ndata: {json.dumps({
+                    _pipe_data_1 = json.dumps({
                         "content": "🔍 正在 OCR 识别文档...",
                         "done": False,
                         "tool": "document_extractor",
-                    }, ensure_ascii=False)}\n\n"
+                    }, ensure_ascii=False)
+                    yield f"event: pipeline\ndata: {_pipe_data_1}\n\n"
                     
                     try:
                         from services.storage_service import StorageService as _SS
@@ -435,28 +438,32 @@ class WebChannelService:
                                         f"【文档 OCR 识别结果】\n{_vlm_text[:6000]}",
                                         "（以上为自动识别结果）",
                                     ]
-                                    yield f"event: pipeline\ndata: {json.dumps({
+                                    _pipe_data_2 = json.dumps({
                                         "content": "📄 文档 OCR 识别完成",
                                         "result_preview": _vlm_text[:2000],
                                         "done": True,
-                                    }, ensure_ascii=False)}\n\n"
+                                    }, ensure_ascii=False)
+                                    yield f"event: pipeline\ndata: {_pipe_data_2}\n\n"
                                 else:
-                                    yield f"event: pipeline\ndata: {json.dumps({
+                                    _pipe_data_3 = json.dumps({
                                         "content": "❌ OCR 识别失败",
                                         "done": True,
-                                    }, ensure_ascii=False)}\n\n"
+                                    }, ensure_ascii=False)
+                                    yield f"event: pipeline\ndata: {_pipe_data_3}\n\n"
                     except Exception as e:
                         logger.warning(f"[FeClaw] VLM OCR failed: {e}")
-                        yield f"event: pipeline\ndata: {json.dumps({
+                        _pipe_data_4 = json.dumps({
                             "content": "❌ OCR 处理异常",
                             "done": True,
-                        }, ensure_ascii=False)}\n\n"
-                    yield f"event: pipeline\ndata: {json.dumps({
+                        }, ensure_ascii=False)
+                        yield f"event: pipeline\ndata: {_pipe_data_4}\n\n"
+                    _pipe_data_5 = json.dumps({
                         "content": "📄 文档需专用工具解析",
                         "done": True,
                         "tool": "document_extractor",
                         "query": "文档分析"
-                    }, ensure_ascii=False)}\n\n"
+                    }, ensure_ascii=False)
+                    yield f"event: pipeline\ndata: {_pipe_data_5}\n\n"
                 
                 file_prefix = "\n".join(file_prefix_parts) + "\n"
                 if actual_user_input:
@@ -548,12 +555,13 @@ class WebChannelService:
                     "status": "pending",
                 }
                 tool_calls.append(tool_call)
-                yield f"event: tool\ndata: {json.dumps({
+                _pipe_data_6 = json.dumps({
                     'content': event.content,
                     'tool_name': event.tool_name,
                     'tool_args': event.tool_args,
                     'tool_call_id': tool_call_id,
-                }, ensure_ascii=False)}\n\n"
+                }, ensure_ascii=False)
+                yield f"event: pipeline\ndata: {_pipe_data_6}\n\n"
                 # 工具调用后可能长时间无数据（工具执行中），加填充强制 CDN flush 已输出的内容
                 yield f": flush {' ' * 2048}\n\n"
 
@@ -577,11 +585,12 @@ class WebChannelService:
                     tool_calls.append(matched_call)
                 matched_call["result"] = event.tool_result or event.content
                 matched_call["status"] = "done"
-                yield f"event: tool_result\ndata: {json.dumps({
+                _pipe_data_7 = json.dumps({
                     'content': event.tool_result or event.content,
                     'tool_name': event.tool_name,
                     'tool_call_id': matched_call['id'],
-                }, ensure_ascii=False)}\n\n"
+                }, ensure_ascii=False)
+                yield f"event: pipeline\ndata: {_pipe_data_7}\n\n"
             
             elif event.type == ChatEventType.DONE:
                 usage = {

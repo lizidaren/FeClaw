@@ -7,8 +7,8 @@ echo "=== FeClaw 开发环境初始化 ==="
 
 # 1. Check Python
 PY_VER=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>/dev/null || echo "0")
-if ! python3 -c "import sys; sys.exit(0 if sys.version_info >= (3,10) else 1)" 2>/dev/null; then
-    echo "❌ Python 3.10+ required (found $PY_VER)"
+if ! python3 -c "import sys; sys.exit(0 if sys.version_info >= (3,9) else 1)" 2>/dev/null; then
+    echo "❌ Python 3.9+ required (found $PY_VER)"
     echo "  安装: sudo apt install python3 python3-pip python3-venv"
     exit 1
 fi

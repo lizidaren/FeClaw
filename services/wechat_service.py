@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 WeChat Service - iLink协议实现
 
@@ -698,7 +700,7 @@ class WeChatService:
         logger.debug(f"[WX_DEBUG] _on_sdk_message: type={msg.type}, images={len(msg.images)}, content={str(msg.content)[:100] if msg.content else "None"}")
         if msg.images:
             for i, img in enumerate(msg.images):
-                logger.debug(f"[WX_DEBUG]   image[{i}]: url={img.url}, media={*** if img.media else "None"}")
+                logger.debug(f"[WX_DEBUG]   image[{i}]: url={img.url}, media={*** if img.media else 'None'}")
 
         Args:
             msg: The incoming message from the SDK

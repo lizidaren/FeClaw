@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 静态网站托管服务 (Static Site Service)
 
@@ -15,7 +17,7 @@ Phase 2 实现：
 import logging
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any
-from datetime import datetime, UTC, date, timedelta
+from datetime import datetime, date, timedelta, timezone
 
 from models.database import SessionLocal
 from models.database import StaticSite as StaticSiteModel
@@ -123,8 +125,8 @@ class StaticSiteService:
                 root_path=root_path,
                 status="active",
                 custom_cname=custom_cname,
-                created_at=datetime.now(UTC),
-                updated_at=datetime.now(UTC),
+                created_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(timezone.utc),
             )
             db.add(db_site)
             db.commit()
@@ -182,7 +184,7 @@ class StaticSiteService:
         if not update:
             return self.get_site(site_id, user_id)
 
-        update["updated_at"] = datetime.now(UTC)
+        update["updated_at"] = datetime.now(timezone.utc)
         db = SessionLocal()
         try:
             row = db.query(StaticSiteModel).filter(
@@ -210,7 +212,7 @@ class StaticSiteService:
             if not row:
                 return False
             row.status = "deleted"
-            row.updated_at = datetime.now(UTC)
+            row.updated_at = datetime.now(timezone.utc)
             db.commit()
             return True
         finally:
@@ -465,7 +467,7 @@ class StaticSiteService:
                 referer=referer,
                 response_size=response_size,
                 response_status=response_status,
-                created_at=datetime.now(UTC)
+                created_at=datetime.now(timezone.utc)
             )
             db.add(log)
 
@@ -481,7 +483,7 @@ class StaticSiteService:
                 # 对于 HTML 页面访问，增加 visit_count
                 if file_path.endswith(('.html', '.htm')) or file_path == '' or '/' in file_path and not '.' in file_path.split('/')[-1]:
                     usage.visit_count += 1
-                usage.updated_at = datetime.now(UTC)
+                usage.updated_at = datetime.now(timezone.utc)
             else:
                 # 创建新的每日记录
                 is_page_visit = file_path.endswith(('.html', '.htm')) or file_path == '' or '/' in file_path and not '.' in file_path.split('/')[-1]
@@ -492,8 +494,8 @@ class StaticSiteService:
                     bandwidth_bytes=response_size,
                     request_count=1,
                     unique_ips=1 if client_ip else 0,
-                    created_at=datetime.now(UTC),
-                    updated_at=datetime.now(UTC)
+                    created_at=datetime.now(timezone.utc),
+                    updated_at=datetime.now(timezone.utc)
                 )
                 db.add(usage)
 
@@ -615,7 +617,7 @@ class StaticSiteService:
 
         db = SessionLocal()
         try:
-            start_date = datetime.now(UTC) - timedelta(days=days)
+            start_date = datetime.now(timezone.utc) - timedelta(days=days)
 
             # 使用 SQLAlchemy 查询热门页面
             from sqlalchemy import func
@@ -733,8 +735,8 @@ class StaticSiteService:
                 ).first()
                 if row:
                     row.cname_verified = verified
-                    row.cname_verified_at = datetime.now(UTC) if verified else None
-                    row.updated_at = datetime.now(UTC)
+                    row.cname_verified_at = datetime.now(timezone.utc) if verified else None
+                    row.updated_at = datetime.now(timezone.utc)
                     db.commit()
             finally:
                 db.close()

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 Agent 工具服务 - AI/子Agent 工具
 包含 spawn_subagent, text_summarize, text_translate, image_generate 等

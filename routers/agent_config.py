@@ -220,11 +220,12 @@ async def generate_persona_stream(
             soul_match = re.search(r"===SOUL===\s*(.*?)(?=\n===IDENTITY===|\Z)", buffer, re.DOTALL)
             identity_match = re.search(r"===IDENTITY===\s*(.*?)(?=\n===USER===|\Z)", buffer, re.DOTALL)
             user_match = re.search(r"===USER===\s*(.*)", buffer, re.DOTALL)
-            yield f"data: {json.dumps({'done': True, 'parsed': {
+            _parsed = {
                 'soul': soul_match.group(1).strip() if soul_match else '',
                 'identity': identity_match.group(1).strip() if identity_match else '',
                 'user': user_match.group(1).strip() if user_match else ''
-            }})}\n\n"
+            }
+            yield f"data: {json.dumps({'done': True, 'parsed': _parsed})}\n\n"
         except Exception as e:
             yield f"data: {json.dumps({'error': str(e)})}\n\n"
 

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 SDK 通信层 - DatabaseBackedClient + iLink HTTP helpers
 
