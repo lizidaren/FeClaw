@@ -1,5 +1,6 @@
 # FeClaw Backend Routers
 
+from routers.client_ws import router as client_ws_router
 from routers.console import router as console_router
 from routers.feclaw_chat import router as feclaw_chat_router
 from routers.health import router as health_router
@@ -15,6 +16,7 @@ from routers.metrics_internal import router as metrics_internal_router  # P1.5
 
 
 __all__ = [
+    "client_ws_router",
     "console_router",
     "feclaw_chat_router",
     "health_router",

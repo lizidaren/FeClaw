@@ -1140,6 +1140,13 @@ class ChatService:
                         type=ChatEventType.PRE_TOOL,
                         content=step.content or ""
                     )
+                elif step.step_type == "tool_call_arg":
+                    # 工具调用参数流（Gen 2 IM Agent 灰度字用）
+                    yield ChatEvent(
+                        type=ChatEventType.TOOL_CALL_ARG,
+                        content=step.content or "",
+                        tool_name=step.tool_name or "",
+                    )
                 elif step.step_type == "tool_call":
                     # 工具调用：先把已累积的纯文本 flush，再追加 tool_call 记录
                     self._session_memory_tool_calls_since += 1
@@ -1452,7 +1459,7 @@ class ChatService:
                 if response:
                     try:
                         import asyncio as _aio
-                        from routers.desktop_ws import manager as _ws_manager
+                        from routers.client_ws import manager as _ws_manager
                         push_payload = {
                             "type": "group_message",
                             "group_id": self.group_id,

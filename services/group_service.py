@@ -994,7 +994,7 @@ class GroupDispatchService:
     ):
         """Push a new group message to connected WS clients."""
         try:
-            from routers.desktop_ws import manager
+            from routers.client_ws import manager
             payload = {
                 "type": "group_message",
                 "group_id": group_id,

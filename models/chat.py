@@ -12,6 +12,7 @@ class ChatEventType(Enum):
     """聊天事件类型"""
     TEXT = "text"               # 文本内容（流式片段）
     TOOL_CALL = "tool_call"     # 工具调用开始
+    TOOL_CALL_ARG = "tool_call_arg"  # 工具调用参数的流式片段（Gen 2 IM Agent 灰度流）
     TOOL_RESULT = "tool_result" # 工具执行结果
     PRE_TOOL = "pre_tool"       # 工具调用前的思考
     KEEPALIVE = "keepalive"     # 工具执行中的心跳

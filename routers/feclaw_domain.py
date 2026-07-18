@@ -57,7 +57,7 @@ def extract_hash_from_host(host: str) -> Optional[str]:
     if not host:
         return None
     parts = host.split(".")
-    if len(parts) >= 3 and len(parts[0]) == 4:
+    if len(parts) >= 3 and 4 <= len(parts[0]) <= 8:
         try:
             int(parts[0], 16)
             return parts[0]
@@ -442,10 +442,11 @@ def _read_config_value(agent_hash: str, vpath: str) -> Optional[str]:
 
 
 @router.get("/api/files", response_model=FileListResponse)
-async def list_files(request: Request, path: str = "", user: User = Depends(get_current_user)):
+async def list_files(request: Request, path: str = "", agent_hash: str = Query(""), user: User = Depends(get_current_user)):
     """列出 VFS 文件"""
     from fastapi.responses import Response as APIResponse
-    agent_hash = extract_hash_from_host(_get_domain(request))
+    if not agent_hash:
+        agent_hash = extract_hash_from_host(_get_domain(request))
     if not agent_hash:
         raise HTTPException(status_code=400, detail="Invalid agent hash from domain")
 
@@ -575,14 +576,15 @@ class FileUpdateRequest(PydanticModel):
 
 
 @router.get("/api/file", response_model=FileContentResponse)
-async def get_file(path: str, request: Request, user: User = Depends(get_current_user)):
+async def get_file(path: str, request: Request, agent_hash: str = Query(""), user: User = Depends(get_current_user)):
     """获取文件内容"""
     # Validate path (prevent path traversal)
     import os as _os
     if _os.path.isabs(path) or ".." in path:
         raise HTTPException(status_code=400, detail="Invalid path")
     from fastapi import HTTPException
-    agent_hash = extract_hash_from_host(_get_domain(request))
+    if not agent_hash:
+        agent_hash = extract_hash_from_host(_get_domain(request))
     if not agent_hash:
         raise HTTPException(status_code=400, detail="Invalid agent hash from domain")
 
@@ -625,7 +627,7 @@ async def get_file(path: str, request: Request, user: User = Depends(get_current
 
 
 @router.put("/api/file")
-async def update_file(path: str, body: FileUpdateRequest, req: Request, user: User = Depends(get_current_user)) -> dict:
+async def update_file(path: str, body: FileUpdateRequest, req: Request, agent_hash: str = Query(""), user: User = Depends(get_current_user)) -> dict:
     """更新文件内容"""
     # Validate path (prevent path traversal)
     import os as _os
@@ -633,9 +635,9 @@ async def update_file(path: str, body: FileUpdateRequest, req: Request, user: Us
         raise HTTPException(status_code=400, detail="Invalid path")
     if path == "public" or path.startswith("public/"):
         raise HTTPException(status_code=403, detail="公共空间为只读，不允许修改")
-    agent_hash = extract_hash_from_host(_get_domain(req))
     if not agent_hash:
-        pass  # HTTPException already imported at module level
+        agent_hash = extract_hash_from_host(_get_domain(request))
+    if not agent_hash:
         raise HTTPException(status_code=400, detail="Invalid agent hash from domain")
 
     # 处理 /config/ 虚拟配置目录写入
@@ -695,7 +697,7 @@ async def update_file(path: str, body: FileUpdateRequest, req: Request, user: Us
 
 
 @router.delete("/api/file")
-async def delete_file(path: str, request: Request, user: User = Depends(get_current_user)) -> dict:
+async def delete_file(path: str, request: Request, agent_hash: str = Query(""), user: User = Depends(get_current_user)) -> dict:
     """删除文件"""
     # Validate path (prevent path traversal)
     import os as _os
@@ -703,9 +705,9 @@ async def delete_file(path: str, request: Request, user: User = Depends(get_curr
         raise HTTPException(status_code=400, detail="Invalid path")
     if path == "public" or path.startswith("public/") or path == "config" or path.startswith("config/"):
         raise HTTPException(status_code=403, detail=f"{'公共空间' if path.startswith('public') else '配置目录'}为只读，不允许删除")
-    agent_hash = extract_hash_from_host(_get_domain(request))
     if not agent_hash:
-        pass  # HTTPException already imported at module level
+        agent_hash = extract_hash_from_host(_get_domain(request))
+    if not agent_hash:
         raise HTTPException(status_code=400, detail="Invalid agent hash from domain")
     # 构建完整路径
     full_path = _vfs_path(agent_hash, path)
@@ -728,6 +730,7 @@ from fastapi.responses import Response as FastAPIResponse
 async def get_file_raw(
     path: str,
     request: Request,
+    agent_hash: str = Query(""),
     user: User = Depends(get_current_user),
 ):
     """直接流式返回文件原始字节（用于本地存储模式下的图片/视频/音频预览）。
@@ -739,7 +742,8 @@ async def get_file_raw(
     import os as _os
     if _os.path.isabs(path) or ".." in path:
         raise HTTPException(status_code=400, detail="Invalid path")
-    agent_hash = extract_hash_from_host(_get_domain(request))
+    if not agent_hash:
+        agent_hash = extract_hash_from_host(_get_domain(request))
     if not agent_hash:
         raise HTTPException(status_code=400, detail="Invalid agent hash from domain")
 
@@ -790,9 +794,8 @@ async def get_signed_url(body: SignedUrlRequest, req: Request, user: User = Depe
     Returns:
         {url, path, expires_at, method}
     """
-    agent_hash = extract_hash_from_host(_get_domain(req))
+    agent_hash = extract_hash_from_host(_get_domain(request))
     if not agent_hash:
-        pass  # HTTPException already imported at module level
         raise HTTPException(status_code=400, detail="Invalid agent hash from domain")
 
     # 构建完整路径（agent 工作区路径）
@@ -855,7 +858,6 @@ async def get_sts_credential(request: Request, user: User = Depends(get_current_
     """
     agent_hash = extract_hash_from_host(_get_domain(request))
     if not agent_hash:
-        pass  # HTTPException already imported at module level
         raise HTTPException(status_code=400, detail="Invalid agent hash from domain")
 
     # 使用 agent 工作区路径前缀
@@ -1422,6 +1424,6 @@ async def upload_file_vfs(
         raise HTTPException(status_code=400, detail="Invalid agent hash from domain")
     content = await file.read()
     full_path = _vfs_path(agent_hash, path)
-    s().upload_file(full_path, content)
+    s().upload_file(content, full_path)
     return {"status": "success", "path": path, "size": len(content)}
 

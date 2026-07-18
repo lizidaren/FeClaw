@@ -1109,8 +1109,16 @@ class LLMService:
                                 tool_calls_data[idx]["id"] = tc["id"]
                             if tc.get("function", {}).get("name"):
                                 tool_calls_data[idx]["function"]["name"] = tc["function"]["name"]
-                            if tc.get("function", {}).get("arguments"):
-                                tool_calls_data[idx]["function"]["arguments"] += tc["function"]["arguments"]
+                            arg_chunk = tc.get("function", {}).get("arguments", "")
+                            if arg_chunk:
+                                tool_calls_data[idx]["function"]["arguments"] += arg_chunk
+                                # 推 tool_call_arg 流（Gen 2 IM Agent 灰度字用）
+                                yield {
+                                    "type": "tool_call_arg",
+                                    "tool_index": idx,
+                                    "content": arg_chunk,
+                                    "tool_name": tool_calls_data[idx]["function"]["name"] or "",
+                                }
 
                 except json.JSONDecodeError:
                     continue

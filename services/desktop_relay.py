@@ -137,7 +137,7 @@ class DesktopRelay:
         self.pending[request_id] = future
 
         # 构造发送给 Desktop 的消息
-        from routers.desktop_ws import send_to_desktop
+        from routers.client_ws import send_to_client
         msg = {
             "type": "command_exec_request",
             "id": request_id,
@@ -149,7 +149,7 @@ class DesktopRelay:
             }
         }
 
-        sent = await send_to_desktop(msg)
+        sent = await send_to_client(msg)
         if not sent:
             self.pending.pop(request_id, None)
             return {"decision": "deny", "reason": "Desktop not connected"}
@@ -172,9 +172,9 @@ class DesktopRelay:
         request_id = str(uuid.uuid4())
         future = asyncio.get_event_loop().create_future()
         self.pending[request_id] = future
-        from routers.desktop_ws import send_to_desktop
+        from routers.client_ws import send_to_client
         msg = {"type": "file_read_request", "id": request_id, "payload": {"path": path}}
-        sent = await send_to_desktop(msg)
+        sent = await send_to_client(msg)
         if not sent:
             self.pending.pop(request_id, None)
             return {"status": "error", "error": "Desktop not connected"}
@@ -190,13 +190,13 @@ class DesktopRelay:
         request_id = str(uuid.uuid4())
         future = asyncio.get_event_loop().create_future()
         self.pending[request_id] = future
-        from routers.desktop_ws import send_to_desktop
+        from routers.client_ws import send_to_client
         msg = {
             "type": "file_write_request",
             "id": request_id,
             "payload": {"path": path, "content": content},
         }
-        sent = await send_to_desktop(msg)
+        sent = await send_to_client(msg)
         if not sent:
             self.pending.pop(request_id, None)
             return {"status": "error", "error": "Desktop not connected"}
@@ -212,13 +212,13 @@ class DesktopRelay:
         request_id = str(uuid.uuid4())
         future = asyncio.get_event_loop().create_future()
         self.pending[request_id] = future
-        from routers.desktop_ws import send_to_desktop
+        from routers.client_ws import send_to_client
         msg = {
             "type": "file_delete_request",
             "id": request_id,
             "payload": {"path": path},
         }
-        sent = await send_to_desktop(msg)
+        sent = await send_to_client(msg)
         if not sent:
             self.pending.pop(request_id, None)
             return {"status": "error", "error": "Desktop not connected"}
@@ -245,7 +245,7 @@ class DesktopRelay:
             future.set_result(payload)
 
     def is_desktop_connected(self) -> bool:
-        from routers.desktop_ws import manager
+        from routers.client_ws import manager
         return manager.is_connected
 
 

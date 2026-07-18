@@ -23,7 +23,7 @@
 </head>
 <body class="{% if setup_done %}setup-done-body{% endif %}">
     <!-- 无 token 时的兜底提示（同时由 setup.js 在 DOMContentLoaded 时重定向到 /login） -->
-    <div id="no-token-guard" style="display:none;position:fixed;inset:0;background:#050510;color:#e0e0e0;display:flex;align-items:center;justify-content:center;text-align:center;padding:24px;font-family:sans-serif;">
+    <div id="no-token-guard" style="display:none;position:fixed;inset:0;background:#050510;color:#e0e0e0;align-items:center;justify-content:center;text-align:center;padding:24px;font-family:sans-serif;">
         <div>
             <h1 style="font-size:1.8em;background:linear-gradient(135deg,#667eea,#764ba2);-webkit-background-clip:text;-webkit-text-fill-color:transparent;margin-bottom:16px;">FeClaw</h1>
             <p style="color:#888;margin-bottom:8px;">缺少 setup token</p>

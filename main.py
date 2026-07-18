@@ -66,7 +66,7 @@ from routers.admin_panel import router as admin_panel_router
 from routers.group import router as group_router
 from routers.wechat import ensure_message_handler
 from services.agent_init_service import ensure_default_agent_5178
-from routers.desktop_ws import router as desktop_ws_router
+from routers.client_ws import router as client_ws_router
 from routers.well_known import router as well_known_router
 from routers.upload import router as upload_router
 from routers.upload_general import router as upload_general_router
@@ -611,8 +611,8 @@ else:
     # Desktop WS 通道（条件启用）
 
     if settings.DESKTOP_ENABLED:
-        app.include_router(desktop_ws_router)
-        logger.info("Desktop WS relay enabled")
+        app.include_router(client_ws_router)
+        logger.info("Client WS relay enabled (desktop + mobile)")
     app.include_router(metrics_internal_router)  # P1.5: 最小 metrics endpoint（admin-only），必须在 static_site_public 前注册（后者有 catch-all）
     app.include_router(zentrim_router)  # Zentrim（格物所）API — 必须在 static_site_public 前面，避免 catch-all 拦截
     app.include_router(upload_general_router)  # 通用文件上传 (P0-1)：POST /api/upload

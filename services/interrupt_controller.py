@@ -98,6 +98,8 @@ class WorkSession:
     state: str = WorkSessionState.IDLE
     running: bool = False              # 工作循环是否运行中
     interrupts_popped: int = 0         # 已消费的中断数，用于区分冷启动 vs 事件循环
+    # Gen 2 IM Agent 灰度流：(session_id → 累积 draft 文本)，在 reply_buffer_flush 推 confirm 时清空
+    draft_buffers: Dict[str, str] = field(default_factory=dict)
 
     def is_expired(self, max_hours: float = 12.0) -> bool:
         return (datetime.utcnow() - self.started_at) > timedelta(hours=max_hours)
@@ -361,6 +363,13 @@ class InterruptController:
                     flush_parts.append(f'user_id={user_id!r}')
                 if session_id:
                     flush_parts.append(f'session_id="{session_id}"')
+            elif channel == "mobile":
+                if user_id is not None:
+                    flush_parts.append(f'user_id={user_id!r}')
+                if session_id:
+                    flush_parts.append(f'session_id="{session_id}"')
+                if msg_id is not None:
+                    flush_parts.append(f'msg_id="{msg_id}"')
             elif channel == "desktop":
                 if user_id is not None:
                     flush_parts.append(f'user_id={user_id!r}')
@@ -416,11 +425,67 @@ class InterruptController:
                 group_id=group_id,
             )
             full = ""
+            # Gen 2 IM Agent 灰度字流：web 渠道时把 LLM 中间 token + tool_call_arg 实时推 WS（draft）。
+            # Classic Agent / group / wechat / desktop 渠道不受影响（仅 web 走 draft 通道）。
+            _ws_manager = None
+            if channel in ("web", "mobile"):
+                try:
+                    from routers.client_ws import manager as _ws_manager  # noqa: F401
+                except Exception:
+                    _ws_manager = None
+
+            async def _push_draft(payload: Dict[str, Any]) -> None:
+                """把 draft 推给前端（失败静默，不影响 LLM 流）。
+
+                只推给当前连着的客户端：桌面端/移动端均可接收 draft 灰字流，客户端按 session_id 路由。
+                """
+                if not _ws_manager or not _ws_manager.is_connected:
+                    return
+                # draft 推给当前连着的客户端，客户端按 session_id 路由
+                # 注：ClientConnectionManager 是单连接管理器，一个设备只连一个 WS
+                try:
+                    await _ws_manager.send(payload)
+                except Exception as _e:
+                    logger.debug(f"[WorkLoop] draft push failed: {_e}")
+
             async for event in cs.chat(input=ChatInput(text=prompt, skip_history=False)):
                 t = str(event.type)
                 if t == "ChatEventType.TEXT":
                     if hasattr(event, "content") and event.content:
-                        full += str(event.content)
+                        _chunk = str(event.content)
+                        full += _chunk
+                        if channel in ("web", "mobile") and session_id:
+                            ws.draft_buffers[session_id] = (
+                                ws.draft_buffers.get(session_id, "") + _chunk
+                            )
+                            await _push_draft({
+                                "type": "draft",
+                                "event": "draft",
+                                "channel": channel,
+                                "agent_hash": ws.agent_hash,
+                                "session_id": session_id,
+                                "user_id": user_id,
+                                "content": _chunk,
+                            })
+                elif t == "ChatEventType.TOOL_CALL_ARG":
+                    # 工具参数也以 draft 形式推（前端可显示小灰字「调用 X… 参数：…」）
+                    if channel in ("web", "mobile") and session_id:
+                        _arg = getattr(event, "content", "") or ""
+                        _tn = getattr(event, "tool_name", "") or ""
+                        if _arg:
+                            ws.draft_buffers[session_id] = (
+                                ws.draft_buffers.get(session_id, "") + _arg
+                            )
+                            await _push_draft({
+                                "type": "draft",
+                                "event": "draft",
+                                "channel": channel,
+                                "agent_hash": ws.agent_hash,
+                                "session_id": session_id,
+                                "user_id": user_id,
+                                "content": _arg,
+                                "tool_name": _tn,
+                            })
                 elif t == "ChatEventType.DONE":
                     break
 

@@ -243,7 +243,7 @@ async def _push_direct_response(
     """将 Agent 私聊响应推回原渠道（IM Agent 统一 buffer 路径的终端）。
 
     - wechat: 通过 wechat_service.send_message 推送给微信用户
-    - web/desktop: 通过 DesktopConnectionManager (WebSocket) 推送给前端
+    - web/desktop: 通过 ClientConnectionManager (WebSocket) 推送给前端
                    推完后 ChatHistory 仍由 ChatService 在 chat() 末尾写入。
 
     静默降级契约（graceful degradation contract）：
@@ -278,7 +278,7 @@ async def _push_direct_response(
 
         # web / desktop：通过 WS 推送
         try:
-            from routers.desktop_ws import manager as _ws_manager
+            from routers.client_ws import manager as _ws_manager
         except Exception as e:
             logger.warning(f"[PushResponse] 加载 WS manager 失败: {e}")
             return False
@@ -321,6 +321,27 @@ async def _push_direct_response(
                 "content": content,
                 "timestamp": ts,
             })
+            # Gen 2 IM Agent 灰度字流：flush 成功后推 confirm，让前端把同 session 的灰字变成黑字。
+            # 不影响 Classic Agent / desktop 路径。
+            if channel in ("web", "mobile") and session_id:
+                try:
+                    from services.interrupt_controller import WorkSessionManager
+                    _ws = WorkSessionManager.instance().get(agent_hash)
+                except Exception:
+                    _ws = None
+                await _ws_manager.send({
+                    "type": "confirm",
+                    "event": "confirm",
+                    "channel": channel,
+                    "agent_hash": agent_hash,
+                    "user_id": user_id,
+                    "session_id": session_id or "",
+                    "msg_id": msg_id or "",
+                    "content": content,
+                    "timestamp": ts,
+                })
+                if _ws is not None:
+                    _ws.draft_buffers.pop(session_id, None)
         logger.info(
             f"[PushResponse] {channel} ok agent={agent_hash} "
             f"response_len={len(content)}"

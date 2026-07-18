@@ -513,6 +513,14 @@ class AgentExecutor:
                         # 深度思考推理过程
                         yield Step(step_type="reasoning", content=event["content"])
 
+                    elif event["type"] == "tool_call_arg":
+                        # 工具调用参数流（Gen 2 IM Agent 灰度字用）
+                        yield Step(
+                            step_type="tool_call_arg",
+                            content=event.get("content", ""),
+                            tool_name=event.get("tool_name") or "",
+                        )
+
                     elif event["type"] == "done":
                         # 流结束，获取完整信息
                         tool_calls = event.get("tool_calls")

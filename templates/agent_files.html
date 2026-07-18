@@ -267,7 +267,33 @@
             .editor-container { flex-direction: column; }
             .preview-pane { padding: 16px 20px; }
         }
-    </style>
+    /* 自定义确认对话框 */
+        .unsaved-overlay {
+            display:none; position:fixed; inset:0; background:rgba(0,0,0,0.3);
+            z-index:10000; align-items:center; justify-content:center;
+        }
+        .unsaved-overlay.active { display:flex; }
+        .unsaved-dialog {
+            background:white; border-radius:12px; padding:28px 32px;
+            max-width:420px; width:90%; box-shadow:0 8px 32px rgba(0,0,0,0.15);
+            text-align:center;
+        }
+        .unsaved-dialog h3 { margin:0 0 8px; color:#1a1a2e; font-size:18px; }
+        .unsaved-dialog p { margin:0 0 24px; color:#666; font-size:14px; line-height:1.5; }
+        .unsaved-actions { display:flex; gap:10px; justify-content:center; }
+        .unsaved-actions button {
+            padding:10px 24px; border-radius:8px; border:none; font-size:14px;
+            cursor:pointer; font-weight:600; transition:all 0.2s;
+        }
+        .unsaved-actions .btn-discard { background:#f0f0f0; color:#666; }
+        .unsaved-actions .btn-discard:hover { background:#e0e0e0; }
+        .unsaved-actions .btn-cancel { background:#f0f0f0; color:#666; }
+        .unsaved-actions .btn-cancel:hover { background:#e0e0e0; }
+        .unsaved-actions .btn-save-close {
+            background:linear-gradient(135deg,#667eea,#764ba2); color:white;
+        }
+        .unsaved-actions .btn-save-close:hover { opacity:0.9; }
+        </style>
 </head>
 <body>
     <div class="header">
@@ -280,7 +306,8 @@
     <a href="{{ home_url }}" class="back-link">← 返回主页</a>
     <div class="breadcrumb" id="breadcrumb"></div>
     <div class="toolbar">
-        <button class="primary" onclick="newFile()" id="btnNewFile">📝 新建</button>
+        <button class="primary" onclick="newFile()" id="btnNewFile">📝 新建文件</button>
+        <button class="primary" onclick="newFolder()" id="btnNewDir" style="margin-left:6px">📁 新建目录</button>
         <button onclick="uploadFile()" id="btnUpload">📤 上传</button>
         <button onclick="loadFiles()">🔄 刷新</button>
         <span id="readonlyBadge" style="display:none;padding:4px 10px;background:#ffebee;color:#c62828;border-radius:4px;font-size:12px;font-weight:600;margin-left:10px">🔒 只读目录</span>
@@ -345,6 +372,9 @@
     <script>
         let jwt = localStorage.getItem('feclaw_jwt');
         let currentPath = '';
+        let dirtyFile = false;        // 编辑器内容是否已修改
+        let lsTimer = null;             // localStorage 自动保存定时器
+        const LS_PREFIX = 'fclw_';      // localStorage key 前缀
         let editingFile = null;
         let editor = null;  // CodeMirror 实例
         let cosClient = null;
@@ -361,10 +391,22 @@
         function escapeJsStr(s) {
             return String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '\\"').replace(/\n/g, '\\n').replace(/\r/g, '\\r');
         }
+        function escapeHtml(s) {
+            return String(s).replace(/[&<>"']/g, function(c) {
+                return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
+            });
+        }
+        function escapeAttr(s) {
+            return String(s).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+        }
 
         const host = window.location.host;
+        const path = window.location.pathname;
+        // 子域名模式：从 host 提取
         const hashMatch = host.match(/^([a-f0-9]{4})\./);
-        const agentHash = hashMatch ? hashMatch[1] : null;
+        // 单站点模式：从 URL 路径 /agent/{hash}/... 提取
+        const pathMatch = path.match(/^\/agent\/([a-f0-9]+)\//);
+        const agentHash = (hashMatch ? hashMatch[1] : null) || (pathMatch ? pathMatch[1] : null);
         document.getElementById('agentHash').textContent = 'Agent: ' + agentHash;
 
         if (!jwt) {
@@ -396,7 +438,7 @@
                     STORAGE_BACKEND = 'local';
                     console.log('[File] 本地存储模式');
                     updateBackendBadge();
-                    loadFiles();
+                    restorePathFromUrl();
                     return;
                 }
 
@@ -413,13 +455,34 @@
                 });
                 console.log('[File] COS 客户端已初始化, prefix:', userPrefix);
                 updateBackendBadge();
-                loadFiles();
+                restorePathFromUrl();
             } catch (e) {
                 console.error('[File] 初始化失败:', e);
-                // 网络错误或解析失败 → 退化到本地模式（让 REST API 自己报错）
+                // 网络错误或解析失败 → 退化到本地模式
                 STORAGE_BACKEND = 'local';
                 updateBackendBadge();
+                restorePathFromUrl();
+            }
+            // 初始化完成后检查草稿
+            setTimeout(autoRestoreOnLoad, 100);
+        }
+
+        function restorePathFromUrl() {
+            const p = new URLSearchParams(window.location.search).get('path');
+            if (p !== null && p !== '') {
+                currentPath = p;
                 loadFiles();
+            }
+        }
+
+        function updateMarkdownPreview() {
+            if (editor && currentMode === 'preview') {
+                var mdContent = editor.getValue();
+                var previewEl = document.getElementById('markdownPreview');
+                if (previewEl) {
+                    var renderer = window.marked || { parse: function(t) { return '<pre>' + escapeHtml(t) + '</pre>'; } };
+                    previewEl.innerHTML = renderer.parse ? renderer.parse(mdContent) : mdContent;
+                }
             }
         }
 
@@ -445,7 +508,8 @@
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), 10000);
             try {
-                const res = await fetch('/api/files?path=' + encodeURIComponent(path), {
+                const hashParam = agentHash ? '&agent_hash=' + encodeURIComponent(agentHash) : '';
+                const res = await fetch('/api/files?path=' + encodeURIComponent(path) + hashParam, {
                     headers: { 'Authorization': 'Bearer ' + jwt },
                     signal: controller.signal
                 });
@@ -468,8 +532,8 @@
         }
 
         async function saveVFSFile(path, content) {
-            // 仅用于 config/ 虚拟目录（无后端差异）
-            const res = await fetch('/api/file?path=' + encodeURIComponent(path), {
+            var hp = agentHash ? '&agent_hash=' + encodeURIComponent(agentHash) : '';
+            const res = await fetch('/api/file?path=' + encodeURIComponent(path) + hp, {
                 method: 'PUT',
                 headers: {
                     'Authorization': 'Bearer ' + jwt,
@@ -481,12 +545,22 @@
             return await res.json();
         }
 
+        // --- 草稿恢复：获取文件原始内容（含草稿检测） ---
+        async function fetchVFSFileRaw(path) {
+            var url = STORAGE_BACKEND === 'local'
+                ? '/api/file/raw?path=' + encodeURIComponent(path) + (agentHash ? '&agent_hash=' + encodeURIComponent(agentHash) : '')
+                : '/api/file?path=' + encodeURIComponent(path) + (agentHash ? '&agent_hash=' + encodeURIComponent(agentHash) : '');
+            var res = await fetch(url);
+            if (!res.ok) throw new Error('HTTP ' + res.status);
+            return await res.text();
+        }
+
         // --- 后端无关的文件操作（根据 STORAGE_BACKEND 分派） ---
 
         async function getFilePreviewUrl(path) {
-            // 返回可直接用于 <img>/<video>/fetch 的 URL
             if (STORAGE_BACKEND === 'local') {
-                return '/api/file/raw?path=' + encodeURIComponent(path);
+                const hp = agentHash ? '&agent_hash=' + encodeURIComponent(agentHash) : '';
+                return '/api/file/raw?path=' + encodeURIComponent(path) + hp;
             }
             // COS 模式
             const res = await fetch('/api/file/signed-url', {
@@ -502,7 +576,8 @@
         async function getFileDownloadUrl(path, expires) {
             // 返回用于触发下载的 URL
             if (STORAGE_BACKEND === 'local') {
-                return '/api/file/raw?path=' + encodeURIComponent(path);
+                const hp = agentHash ? '&agent_hash=' + encodeURIComponent(agentHash) : '';
+                return '/api/file/raw?path=' + encodeURIComponent(path) + hp;
             }
             const res = await fetch('/api/file/signed-url', {
                 method: 'POST',
@@ -515,9 +590,10 @@
         }
 
         async function saveContentFile(path, content) {
+            var hp = agentHash ? '&agent_hash=' + encodeURIComponent(agentHash) : '';
             // 保存文本文件
             if (STORAGE_BACKEND === 'local') {
-                const res = await fetch('/api/file?path=' + encodeURIComponent(path), {
+                const res = await fetch('/api/file?path=' + encodeURIComponent(path) + hp, {
                     method: 'PUT',
                     headers: { 'Authorization': 'Bearer ' + jwt, 'Content-Type': 'application/json' },
                     body: JSON.stringify({ content })
@@ -551,7 +627,8 @@
             if (STORAGE_BACKEND === 'local') {
                 const form = new FormData();
                 form.append('file', file);
-                const res = await fetch('/api/file/upload?path=' + encodeURIComponent(path), {
+                const uploadHashP = agentHash ? '&agent_hash=' + encodeURIComponent(agentHash) : '';
+                const res = await fetch('/api/file/upload?path=' + encodeURIComponent(path) + uploadHashP, {
                     method: 'POST',
                     headers: { 'Authorization': 'Bearer ' + jwt },
                     body: form
@@ -629,13 +706,13 @@
             }
 
             list.innerHTML = files.map(f => {
-                const safePath = escapeJsStr(f.path);
-                const safeName = escapeJsStr(f.name);
+                const htmlPath = escapeHtml(f.path);
+                const htmlName = escapeHtml(f.name);
                 if (f.type === 'dir') {
                     return `
-                <div class="file-item" onclick="navigate('${safePath}')" style="cursor:pointer">
+                <div class="file-item" data-path="${escapeAttr(f.path)}" onclick="navigate(this.dataset.path)" style="cursor:pointer">
                     <span class="icon">📁</span>
-                    <span class="name">${safeName}</span>
+                    <span class="name">${htmlName}</span>
                     <span class="size">${formatSize(f.size)}</span>
                 </div>`;
                 }
@@ -643,11 +720,11 @@
                 return `
                 <div class="file-item">
                     <span class="icon">📄</span>
-                    <div class="file-item-wrap" onclick="openFile('${safePath}')">
-                        <span class="name">${safeName}</span>
+                    <div class="file-item-wrap" data-path="${escapeAttr(f.path)}" onclick="openFile(this.dataset.path)">
+                        <span class="name">${htmlName}</span>
                     </div>
                     <span class="size">${formatSize(f.size)}</span>
-                    <button class="three-dot-btn" onclick="event.stopPropagation();toggleDotMenu(event, '${safePath}')" title="更多操作">⋯</button>
+                    <button class="three-dot-btn" data-path="${escapeAttr(f.path)}" onclick="event.stopPropagation();toggleDotMenu(event, this.dataset.path)" title="更多操作">⋯</button>
                 </div>`;
             }).join('');
         }
@@ -705,7 +782,188 @@
 
         function navigate(path) {
             currentPath = path;
+            updateFileHistory();
             loadFiles();
+        }
+        
+        function showUnsavedDialog() {
+            document.getElementById('unsavedOverlay').classList.add('active');
+        }
+
+        function discardAndClose() {
+            dirtyFile = false;
+            document.getElementById('unsavedOverlay').classList.remove('active');
+            // 丢弃时同时清除草稿
+            try {
+                var p = editingFile;
+                if (p) { localStorage.removeItem(LS_PREFIX + 'unsaved_' + p); localStorage.removeItem(LS_PREFIX + 'draft_path'); }
+            } catch(e) {}
+            editingFile = null;
+            closeModalDirect();
+        }
+
+        var pendingDraftPath = null;   // 等待用户确认的草稿路径
+
+        function restoreDraft() {
+            document.getElementById('draftOverlay').classList.remove('active');
+            if (window.__draftRestoreCallback) {
+                window.__draftRestoreCallback();
+                window.__draftRestoreCallback = null;
+                window.__draftDiscardCallback = null;
+            } else if (pendingDraftPath) {
+                try {
+                    var saved = localStorage.getItem(LS_PREFIX + 'unsaved_' + pendingDraftPath);
+                    if (saved) { dirtyFile = true; openFile(pendingDraftPath); }
+                } catch(e) {}
+            }
+            pendingDraftPath = null;
+        }
+
+        function discardDraft() {
+            document.getElementById('draftOverlay').classList.remove('active');
+            if (window.__draftDiscardCallback) {
+                window.__draftDiscardCallback();
+                window.__draftRestoreCallback = null;
+                window.__draftDiscardCallback = null;
+            } else if (pendingDraftPath) {
+                try {
+                    localStorage.removeItem(LS_PREFIX + 'unsaved_' + pendingDraftPath);
+                    localStorage.removeItem(LS_PREFIX + 'draft_path');
+                } catch(e) {}
+            }
+            pendingDraftPath = null;
+        }
+
+        function checkUnsavedDraft(path, url, category) {
+            // 异步检查草稿，有则弹窗询问
+            return new Promise(function(resolve) {
+                try {
+                    var saved = localStorage.getItem(LS_PREFIX + 'unsaved_' + path);
+                    if (saved && saved.length > 0) {
+                        var dp = localStorage.getItem(LS_PREFIX + 'draft_path');
+                        if (dp !== path) { resolve(false); return; }
+                        pendingDraftPath = path;
+                        document.getElementById('draftOverlayMsg').textContent =
+                            '文件「' + path + '」有未保存的编辑，是否继续编辑？';
+                        document.getElementById('draftOverlay').classList.add('active');
+                        // 覆盖 restoreDraft：直接用草稿内容打开
+                        window.__draftRestoreCallback = function() {
+                            var isMarkdown = (category === 'markdown');
+                            if (isMarkdown) {
+                                // 切换为编辑模式，而非预览
+                                document.getElementById('editorContainer').style.display = 'block';
+                                initEditor(saved, 'markdown');
+                                var toggleBtn = document.getElementById('modeToggleBtn');
+                                if (toggleBtn) { toggleBtn.style.display = ''; toggleBtn.textContent = '预览'; toggleBtn.classList.remove('active'); }
+                                currentMode = 'edit';
+                            } else {
+                                document.getElementById('editorContainer').style.display = 'block';
+                                document.getElementById('modeToggleBtn').style.display = 'none';
+                                initEditor(saved || '', detectCodeMirrorMode(path));
+                            }
+                            dirtyFile = true;
+                        };
+                        // 覆盖 discardDraft：清除草稿，加载服务器内容
+                        window.__draftDiscardCallback = function() {
+                            try {
+                                localStorage.removeItem(LS_PREFIX + 'unsaved_' + path);
+                                localStorage.removeItem(LS_PREFIX + 'draft_path');
+                            } catch(e) {}
+                            pendingDraftPath = null;
+                            // 用服务器内容打开
+                            if (category === 'markdown') {
+                                fetch(url).then(function(r) { return r.text(); }).then(function(content) {
+                                    initEditor(content, 'markdown');
+                                    showMarkdownPreview(content);
+                                }).catch(function() {});
+                            } else {
+                                fetch(url).then(function(r) { return r.text(); }).then(function(content) {
+                                    document.getElementById('editorContainer').style.display = 'block';
+                                    document.getElementById('modeToggleBtn').style.display = 'none';
+                                    initEditor(content || '', detectCodeMirrorMode(path));
+                                }).catch(function() {});
+                            }
+                        };
+                        resolve(true);
+                        return;
+                    }
+                } catch(e) {}
+                resolve(false);
+            });
+        }
+
+        function autoRestoreOnLoad() {
+            // 页面加载后检测是否有草稿，自动打开文件（草稿确认由 openFile 中的 checkUnsavedDraft 处理）
+            try {
+                var dp = localStorage.getItem(LS_PREFIX + 'draft_path');
+                if (!dp) return;
+                var saved = localStorage.getItem(LS_PREFIX + 'unsaved_' + dp);
+                if (!saved || saved.length === 0) return;
+                var dir = '';
+                var slashIdx = dp.lastIndexOf('/');
+                if (slashIdx >= 0) {
+                    dir = dp.substring(0, slashIdx);
+                }
+                // 延迟等待文件列表加载，然后导航 + 打开文件
+                setTimeout(function() {
+                    if (dir !== currentPath) {
+                        navigate(dir);
+                        setTimeout(function() { openFile(dp); }, 300);
+                    } else {
+                        openFile(dp);
+                    }
+                }, 500);
+            } catch(e) {}
+        }
+
+        function saveAndClose() {
+            // 保持 overlay 在保存期间可见，右上角显示"保存中…"
+            var btns = document.querySelectorAll('.unsaved-actions button');
+            btns.forEach(function(b) { b.disabled = true; });
+            var saveBtn = document.querySelector('.unsaved-actions .btn-save-close');
+            if (saveBtn) saveBtn.textContent = '保存中…';
+            saveFile().then(function() {
+                dirtyFile = false;
+                editingFile = null;
+                document.getElementById('unsavedOverlay').classList.remove('active');
+                closeModalDirect();
+            }).catch(function(err) {
+                // 保存失败 - 恢复按钮 + 显示错误提示
+                btns.forEach(function(b) { b.disabled = false; });
+                if (saveBtn) saveBtn.textContent = '保存';
+                var msg = '保存失败' + (err && err.message ? ': ' + err.message : '');
+                var p = document.querySelector('.unsaved-dialog p');
+                if (p) p.innerHTML = msg + '<br>请重试或选择不保存';
+            });
+        }
+
+        function closeModalDirect() {
+            document.getElementById('editModal').classList.remove('active');
+            if (editor) { editor.getTextArea().style.display = 'block'; editor.toTextArea(); editor = null; }
+            var body = document.querySelector('.editor-body');
+            if (body) body.style.display = '';
+            document.getElementById('editorContainer').style.display = 'block';
+            document.getElementById('configEditor').style.display = 'none';
+            document.getElementById('configDesc').style.display = 'none';
+            document.getElementById('configValueEdit').style.display = 'block';
+            document.getElementById('imagePreview').style.display = 'none';
+            document.getElementById('markdownPreview').classList.remove('active');
+            document.getElementById('mediaPreview').classList.remove('active');
+            document.getElementById('mediaPreview').innerHTML = '';
+            document.getElementById('unsupportedPreview').classList.remove('active');
+            document.getElementById('modeToggleBtn').style.display = 'none';
+            document.getElementById('modalActions').style.display = 'flex';
+            document.getElementById('btnSave').style.display = '';
+            document.getElementById('editorPaneHeader').style.display = '';
+            currentMode = 'edit';
+            currentFileType = 'text';
+        }
+
+        function updateFileHistory() {
+            const params = new URLSearchParams(window.location.search);
+            params.set('path', currentPath || '');
+            const newUrl = window.location.pathname + '?' + params.toString();
+            window.history.replaceState({ path: currentPath }, '', newUrl);
         }
 
         // --- 三点菜单 ---
@@ -857,6 +1115,12 @@
         // --- 打开文件（按类型分发）---
 
         async function openFile(path) {
+            // 如果 pendingDraftPath 匹配，说明是草稿恢复，静默继续
+            var isDraftRestore = false;
+            if (pendingDraftPath === path) {
+                isDraftRestore = true;
+                pendingDraftPath = null;
+            }
             editingFile = path;
             document.getElementById('editFileName').textContent = path;
             document.getElementById('editModal').classList.add('active');
@@ -879,6 +1143,11 @@
             try {
                 const url = await getFilePreviewUrl(path);
 
+                // 检查并显示草稿恢复对话框
+                if (await checkUnsavedDraft(path, url, category)) {
+                    // 草稿恢复对话框会处理内容加载
+                    return;
+                }
                 switch (category) {
                     case 'image':
                         showImagePreview(url);
@@ -922,7 +1191,9 @@
             try {
                 const contentRes = await fetch(url);
                 if (!contentRes.ok) throw new Error('HTTP ' + contentRes.status);
-                const content = await contentRes.text();
+                var content = await contentRes.text();
+                // 检查草稿，延迟弹窗询问（由 openFile 统一处理）
+                // （草稿恢复逻辑在 draftConfirm 流程中处理）
 
                 // 同时初始化 CodeMirror（编辑模式备用）
                 initEditor(content, 'markdown');
@@ -955,7 +1226,9 @@
             try {
                 const contentRes = await fetch(url);
                 if (!contentRes.ok) throw new Error('HTTP ' + contentRes.status);
-                const content = await contentRes.text();
+                var content = await contentRes.text();
+
+                // 草稿恢复逻辑统一在 openFile → draftConfirm 中处理
 
                 // 检查是否为二进制内容
                 if (isBinaryContent(content)) {
@@ -1103,12 +1376,31 @@
                     "Esc": function() { closeModal(); }
                 }
             });
+            editor.on('change', function() {
+                dirtyFile = true;
+                updateMarkdownPreview();
+                // 防抖保存到 localStorage（崩溃恢复用）
+                if (lsTimer) clearTimeout(lsTimer);
+                lsTimer = setTimeout(function() {
+                    try {
+                        var content = editor.getValue();
+                        if (content && editingFile) {
+                            localStorage.setItem(LS_PREFIX + 'unsaved_' + editingFile, content);
+                            localStorage.setItem(LS_PREFIX + 'draft_path', editingFile);
+                        }
+                    } catch(e) { /* localStorage 满或不可用 */ }
+                }, 1000);
+            });
             editor.refresh();
         }
 
         // --- 关闭弹窗 ---
 
         function closeModal() {
+            if (dirtyFile) {
+                showUnsavedDialog();
+                return;
+            }
             document.getElementById('editModal').classList.remove('active');
             if (editor) { editor.getTextArea().style.display = 'block'; editor.toTextArea(); editor = null; }
             const body = document.querySelector('.editor-body');
@@ -1150,7 +1442,6 @@
                 }
                 try {
                     await saveVFSFile(editingFile, content);
-                    alert('配置已保存');
                     closeModal();
                     loadFiles();
                 } catch (e) {
@@ -1168,7 +1459,6 @@
 
             try {
                 await saveContentFile(editingFile, content);
-                alert('保存成功');
                 closeModal();
                 loadFiles();
             } catch (e) {
@@ -1179,14 +1469,51 @@
         // --- 新建文件 ---
 
         function newFile() {
-            const name = prompt('请输入文件名:');
-            if (!name) return;
-
             if (isReadonlyPath()) {
                 alert('只读目录不允许新建文件');
                 return;
             }
+            document.getElementById('newFileDialogTitle').textContent = '新建文件';
+            document.getElementById('btnNewFileConfirm').textContent = '创建';
+            document.getElementById('newFileNameInput').value = '';
+            document.getElementById('newFileNameInput').placeholder = 'example.md';
+            document.getElementById('newFileNameInput').dataset.mode = 'file';
+            document.getElementById('newFileOverlay').classList.add('active');
+            setTimeout(function() { document.getElementById('newFileNameInput').focus(); }, 100);
+        }
 
+        function newFolder() {
+            if (isReadonlyPath()) {
+                alert('只读目录不允许新建目录');
+                return;
+            }
+            document.getElementById('newFileDialogTitle').textContent = '新建目录';
+            document.getElementById('btnNewFileConfirm').textContent = '创建';
+            document.getElementById('newFileNameInput').value = '';
+            document.getElementById('newFileNameInput').placeholder = 'my-folder';
+            document.getElementById('newFileNameInput').dataset.mode = 'dir';
+            document.getElementById('newFileOverlay').classList.add('active');
+            setTimeout(function() { document.getElementById('newFileNameInput').focus(); }, 100);
+        }
+
+        function newFileConfirm() {
+            var name = document.getElementById('newFileNameInput').value.trim();
+            if (!name) return;
+            var mode = document.getElementById('newFileNameInput').dataset.mode;
+            document.getElementById('newFileOverlay').classList.remove('active');
+            if (mode === 'dir') {
+                // 创建目录：在目录内放一个空 .directory 标记文件
+                var dirPath = currentPath ? currentPath + '/' + name : name;
+                var markerPath = dirPath + '/.directory';
+                saveContentFile(markerPath, '').then(function() {
+                    loadFiles();
+                }).catch(function(e) {
+                    alert('创建目录失败: ' + e.message);
+                });
+                return;
+            }
+            // 创建文件
+            if (isReadonlyPath()) return;
             const path = currentPath ? currentPath + '/' + name : name;
             editingFile = path;
             document.getElementById('editFileName').textContent = '新建: ' + name;
@@ -1199,8 +1526,8 @@
             document.getElementById('btnSave').style.display = '';
             document.getElementById('editorPaneHeader').style.display = '';
             hideAllPanes();
-            const mode = detectCodeMirrorMode(path);
-            initEditor('', mode);
+            const cmode = detectCodeMirrorMode(path);
+            initEditor('', cmode);
             currentMode = 'edit';
             currentFileType = 'text';
         }
@@ -1268,5 +1595,62 @@
             deleteFileByPath(path);
         }
     </script>
+    <!-- 未保存确认对话框 -->
+    <!-- 新建文件/目录对话框 -->
+    <div class="unsaved-overlay" id="newFileOverlay">
+        <div class="unsaved-dialog" style="text-align:left;max-width:380px;">
+            <h3 style="margin:0 0 12px;color:#1a1a2e;font-size:16px;font-weight:600;" id="newFileDialogTitle">新建文件</h3>
+            <p style="margin:0 0 4px;color:#888;font-size:13px;">文件名</p>
+            <input type="text" id="newFileNameInput" placeholder="example.md" style="width:100%;padding:10px 14px;border:1px solid #ddd;border-radius:8px;font-size:14px;outline:none;box-sizing:border-box;margin-bottom:16px;" autofocus>
+            <div style="display:flex;gap:12px;justify-content:flex-end;">
+                <button class="btn-discard" onclick="document.getElementById('newFileOverlay').classList.remove('active')">取消</button>
+                <button class="btn-save-close" id="btnNewFileConfirm" onclick="newFileConfirm()">创建</button>
+            </div>
+        </div>
+    </div>
+    <script>
+        document.getElementById('newFileNameInput').addEventListener('keydown', function(e) {
+            if (e.key === 'Enter') newFileConfirm();
+        });
+    </script>
+    <!-- 草稿恢复确认对话框 -->
+    <div class="unsaved-overlay" id="draftOverlay">
+        <div class="unsaved-dialog">
+            <div style="text-align:center;margin-bottom:16px;">
+                <div style="width:48px;height:48px;border-radius:50%;background:#e8f5e9;display:inline-flex;align-items:center;justify-content:center;">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#2e7d32" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                        <polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/>
+                        <line x1="16" y1="17" x2="8" y2="17"/>
+                    </svg>
+                </div>
+            </div>
+            <h3 style="margin:0 0 4px;color:#1a1a2e;font-size:16px;font-weight:600;">检测到未保存的编辑</h3>
+            <p style="margin:0 0 20px;color:#888;font-size:13px;" id="draftOverlayMsg">上次编辑的内容尚未保存，是否继续编辑？</p>
+            <div class="unsaved-actions">
+                <button class="btn-save-close" onclick="restoreDraft()" style="order:1">继续编辑</button>
+                <button class="btn-discard" onclick="discardDraft()" style="order:2">放弃草稿</button>
+            </div>
+        </div>
+    </div>
+    <div class="unsaved-overlay" id="unsavedOverlay">
+        <div class="unsaved-dialog">
+            <div style="text-align:center;margin-bottom:16px;">
+                <div style="width:48px;height:48px;border-radius:50%;background:#fff3e0;display:inline-flex;align-items:center;justify-content:center;">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#f57c00" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
+                        <line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>
+                    </svg>
+                </div>
+            </div>
+            <h3 style="margin:0 0 4px;color:#1a1a2e;font-size:16px;font-weight:600;">要保存对此文件的更改吗？</h3>
+            <p style="margin:0 0 20px;color:#888;font-size:13px;">如果关闭而不保存，此文件的更改将丢失。</p>
+            <div class="unsaved-actions">
+                <button class="btn-save-close" onclick="saveAndClose()" style="order:1">保存</button>
+                <button class="btn-discard" onclick="discardAndClose()" style="order:2">不保存</button>
+                <button class="btn-cancel" onclick="document.getElementById('unsavedOverlay').classList.remove('active')" style="order:3">取消</button>
+            </div>
+        </div>
+    </div>
 </body>
 </html>

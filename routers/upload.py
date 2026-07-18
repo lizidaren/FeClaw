@@ -64,8 +64,8 @@ async def upload_done(request: dict, user_id: int = Depends(get_current_user_id)
     if presigned_get_url is None:
         raise HTTPException(status_code=404, detail="Session not found or expired")
 
-    # Push to Desktop via DesktopConnectionManager
-    from routers.desktop_ws import manager
+    # Push to Desktop via ClientConnectionManager
+    from routers.client_ws import manager
     ws_push_payload = {
         "type": "upload_complete",
         "session_id": session_id,

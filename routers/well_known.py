@@ -9,7 +9,7 @@ Desktop 客户端启动时通过 `GET /.well-known/feclaw-desktop` 获取：
        - `platform` → OAuth / Platform 模式（`/api/auth/login`）
        - 未来可能扩展 `oidc` 等
   * 认证端点（`platform` 模式下为 `POST {endpoint}/api/auth/login`）
-  * WebSocket 路径（`/ws/desktop/{agent_hash}`）
+  * WebSocket 路径（`/ws/client?token=<JWT>&channel=desktop&agent_hash=<hash>`）
 
 该端点只返回元信息，不泄露任何敏感数据。
 """
@@ -47,5 +47,5 @@ async def feclaw_desktop_discovery() -> dict:
             "type": auth_type,
             "endpoint": auth_endpoint,
         },
-        "ws_path": "/ws/desktop",
+        "ws_path": "/ws/client",
     }

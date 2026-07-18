@@ -129,7 +129,7 @@ class MomentsService:
     async def push_moments_event(self, group_id: str, moment: GroupMoments):
         """Push a moments_event to connected Desktop WS clients."""
         try:
-            from routers.desktop_ws import manager
+            from routers.client_ws import manager
 
             # Resolve agent_name from agent_hash
             agent_name = ""
