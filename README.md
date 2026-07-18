@@ -166,6 +166,78 @@ python -m uvicorn main:app --host 0.0.0.0 --port 8080 --reload
 | `MAIN_VISION_MODEL` | 默认视觉模型 | `qwen3.6-35b-a3b` |
 | `MAIN_EMBEDDING_MODEL` | 默认嵌入模型 | `text-embedding-v4` |
 
+
+## 🚀 部署指南（从零到一）
+
+### 环境要求
+
+| 依赖 | 版本 | 说明 |
+|:----|:-----|:------|
+| Python | 3.12+ | 3.10 可能因 type hint 语法报错 |
+| MySQL | 8.0+ | 硬依赖（不支持 SQLite） |
+| pip | (最新) | Ubuntu 24.04 需 `apt install python3-pip python3-venv` |
+| Docker | (可选) | 用于快速启动 MySQL 开发实例 |
+
+### 快速启动（Ubuntu 24.04 示例）
+
+```bash
+# 1. 系统依赖
+sudo apt update
+sudo apt install -y python3-pip python3-venv git
+
+# 2. 克隆
+git clone https://github.com/lizidaren/FeClaw.git
+cd FeClaw
+
+# 3. 虚拟环境（Python 3.12+）
+python3 -m venv venv
+source venv/bin/activate
+
+# 4. 安装依赖
+pip install -r requirements.txt
+
+# 5. 配置数据库
+# 方案 A：使用 dev_init.sh（自动 Docker MySQL + 生成 .env）
+sudo bash scripts/dev_init.sh   # ⚠️ Docker 需提前安装
+
+# 方案 B：手动配置
+cp .env.example .env
+# 编辑 .env，填入 JWT_SECRET、DATABASE_URL、API Key
+```
+
+> **国内网络注意事项：**
+> - `git clone` 可能因 GFW 超时，重试或使用代理
+> - Docker Hub 被墙，配置镜像：`/etc/docker/daemon.json` → `{"registry-mirrors":["https://mirror.ccs.tencentyun.com"]}`
+> - pip 使用腾讯云镜像：`pip config set global.index-url https://mirrors.cloud.tencent.com/pypi/simple`
+
+### 启动
+
+```bash
+source venv/bin/activate
+python main.py
+```
+
+首次启动时控制台会打印冷启动地址（类似 `http://localhost:8080/setup?token=xxxx`），
+打开浏览器完成配置向导（设置 admin 密码、选择 LLM 模型等）。
+
+配置完成后重启服务：
+
+```bash
+# 停止：Ctrl+C
+# 重新启动
+python main.py
+```
+
+### 常见问题
+
+| 问题 | 原因 | 解决 |
+|:----|:-----|:------|
+| `ModuleNotFoundError: No module named 'services'` | 从错误目录运行 | 确保在 `FeClaw/` 目录下执行 |
+| `pip install` 报 PEP 668 错误 | Ubuntu 24.04 禁止系统 pip | 先 `python3 -m venv venv` 再 `source venv/bin/activate` |
+| `PermissionError: .env` | `.env` 归 root | `sudo chown $(whoami) .env` |
+| MySQL 连不上 | MySQL 未运行或密码不对 | 运行 `sudo bash scripts/dev_init.sh` 用 Docker 启动 |
+| `pyfuse3` 安装失败 | 缺少 `fuse3 libfuse3-dev` | `apt install fuse3 libfuse3-dev` 或删除 `requirements-fuse.txt` |
+
 ### 项目结构
 
 ```

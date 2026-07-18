@@ -27,3 +27,23 @@ psutil>=5.9.0               # 系统指标监控
 python-docx>=1.0.0          # .docx 文档解析
 openpyxl>=3.0.0             # .xlsx 表格解析
 \nPyJWT>=2.0.0            # JWT 编解码（feclaw_domain.py）
+
+# ─── 可选依赖（按功能分组，不安装不影响核心启动） ───
+# 文档/媒体解析
+PyMuPDF>=1.23.0             # PDF 解析
+python-pptx>=1.0.0          # PPTX 解析
+
+# TTS 语音合成
+pydub>=0.25.0               # 音频拼接
+dashscope>=1.14.0           # 阿里云百炼 SDK（CosyVoice TTS）
+
+# SVG 处理
+cairosvg>=2.7.0             # SVG → PNG 转换
+svglib>=1.5.0               # SVG → 其他格式
+reportlab>=4.0.0            # PDF/图像生成
+
+# 浏览器自动化（仅某些高级功能需要）
+playwright>=1.40.0          # 浏览器自动化（需额外 npx playwright install）
+
+# 沙箱（可选）
+pyfuse3>=1.4.0              # FUSE 文件系统（需要系统 libfuse3-dev）
