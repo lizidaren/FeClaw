@@ -5,6 +5,7 @@ WORKDIR /app
 # 系统依赖（不含 FUSE，需要时另加）
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
+    && pip install --no-cache-dir eval_type_backport \
     && rm -rf /var/lib/apt/lists/*
 
 # 安装 Python 依赖
