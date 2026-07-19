@@ -10,7 +10,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # 安装 Python 依赖
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN mkdir -p /root/.pip && \
+    echo "[global]\nindex-url = https://mirrors.cloud.tencent.com/pypi/simple" > /root/.pip/pip.conf && \
+    pip install --no-cache-dir -r requirements.txt
 
 # 应用代码
 COPY . .
