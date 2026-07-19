@@ -377,30 +377,103 @@ def get_provider_list() -> Dict[str, Any]:
 
 
 # ───────────────────────────────────────────────────────────
-# 连接测试（最小实现：检查 key 是否设置 + 形态合法）
+# 连接测试（发真实 API 请求验证 Key）
 # ───────────────────────────────────────────────────────────
 
-def _looks_like_valid_key(value: str) -> bool:
-    if not value or len(value) < 8:
-        return False
-    return True
+# 各 provider 测试用的最小模型名（发一个 token 验证 Key 有效性）
+_PROVIDER_TEST_MODEL = {
+    "qwen": "qwen-turbo",
+    "deepseek": "deepseek-chat",
+    "zhipuai": "glm-4-flash",
+    "kimi": "moonshot-v1-8k",
+    "mimo": "mimo-v2.5-pro-ultraspeed",
+    "doubao": "doubao-lite-128k-240528",  # 豆包 lite 模型
+}
+
+# 各 provider 的 API base URL（与 model_registry.PROVIDER_META 对齐）
+_PROVIDER_API_BASE = {
+    "qwen": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    "deepseek": "https://api.deepseek.com/v1",
+    "zhipuai": "https://open.bigmodel.cn/api/paas/v4",
+    "kimi": None,  # 动态读取 settings.KIMI_BASE_URL
+    "mimo": "https://api.xiaomimimo.com/v1",
+    "doubao": "https://ark.cn-beijing.volces.com/api/v3",
+}
 
 
 async def verify_provider(provider_id: str) -> Dict[str, Any]:
     """测试某个 provider 的 API key 是否可用。
 
-    实际是只做格式校验 + 标记 key 存在，不发起真实网络请求
-    （避免启动时阻塞 / 速率限制）。详细校验在 /setup/verify 中可选执行。
+    发送一个真实的 HTTP 请求调用 chat/completions（max_tokens=1），
+    根据 HTTP 状态码判断 Key 是否有效。
     """
+    import httpx
+
     provider = next((p for p in PROVIDER_LIST if p["id"] == provider_id), None)
     if not provider:
         return {"ok": False, "provider": provider_id, "error": "unknown provider"}
+
     key_name = provider["api_key_name"]
     env = _parse_env_file(ENV_FILE) if ENV_FILE.exists() else {}
     value = env.get(key_name, "") or getattr(settings, key_name, "")
-    if not _looks_like_valid_key(value):
+
+    # 快速格式拦截
+    if not value or len(value) < 8:
         return {"ok": False, "provider": provider_id, "error": f"{key_name} 未设置或格式异常"}
-    return {"ok": True, "provider": provider_id, "key_name": key_name}
+
+    # 构造 API URL
+    base_url = _PROVIDER_API_BASE.get(provider_id)
+    if provider_id == "kimi":
+        base_url = getattr(settings, "KIMI_BASE_URL", None) or "https://api.moonshot.cn/v1"
+    if not base_url:
+        return {"ok": False, "provider": provider_id, "error": "未知的 API 地址"}
+
+    api_url = base_url.rstrip("/") + "/chat/completions"
+    test_model = _PROVIDER_TEST_MODEL.get(provider_id, "gpt-3.5-turbo")
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(
+                api_url,
+                headers={
+                    "Authorization": f"Bearer {value}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": test_model,
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "max_tokens": 1,
+                },
+            )
+            status = resp.status_code
+            body = resp.json()
+
+        # 200 = 请求成功，Key 有效
+        if status == 200:
+            return {"ok": True, "provider": provider_id, "key_name": key_name, "detail": "API Key 有效"}
+
+        # 401/403 = 认证失败，Key 无效
+        if status in (401, 403):
+            err_msg = body.get("error", {}).get("message", "") or body.get("message", "")
+            return {"ok": False, "provider": provider_id, "error": f"认证失败: {err_msg or 'API Key 无效'}"}
+
+        # 4xx（除 401/403）= Key 有效但其他问题（余额不足、模型不存在等）
+        if 400 <= status < 500:
+            err_msg = body.get("error", {}).get("message", "") or body.get("message", "")
+            logger.info("verify_provider(%s) got 4xx but not auth: %s — Key 有效", provider_id, err_msg)
+            return {"ok": True, "provider": provider_id, "key_name": key_name, "detail": f"API Key 有效 (状态 {status})"}
+
+        # 5xx = 服务端错误，无法判断 Key
+        logger.warning("verify_provider(%s) got %d from provider", provider_id, status)
+        return {"ok": True, "provider": provider_id, "key_name": key_name, "detail": f"服务端响应 {status}，Key 格式正确"}
+
+    except httpx.TimeoutException:
+        return {"ok": False, "provider": provider_id, "error": "连接超时（10 秒），请检查网络"}
+    except httpx.ConnectError:
+        return {"ok": False, "provider": provider_id, "error": "无法连接，请检查 API 地址"}
+    except Exception as e:
+        logger.exception("verify_provider(%s) unexpected error", provider_id)
+        return {"ok": False, "provider": provider_id, "error": f"测试异常: {type(e).__name__}"}
 
 
 async def verify_config(db=None) -> Dict[str, Any]:
