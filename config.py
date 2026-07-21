@@ -213,7 +213,7 @@ class Settings(BaseSettings):
 
     # FUSE 文件系统配置
     FUSE_ENABLED: bool = True
-    FUSE_MOUNT_DIR: str = "./feclaw-fuse"  # FUSE 挂载点目录（默认项目目录下）
+    FUSE_MOUNT_DIR: str = "/tmp/feclaw-fuse"  # FUSE 挂载点目录（应放在 /tmp 下，避免 git 扫描）
     FUSE_CACHE_TTL: int = 60  # FUSE 属性缓存 TTL（秒）
     FUSE_AUTO_FALLBACK: bool = True  # FUSE 不可用时自动回退到仿真模式
 

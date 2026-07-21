@@ -350,7 +350,7 @@ mermaid.run({{nodes:document.querySelectorAll('.mermaid')}});
         logger.warning(f"[Share] COS fetch failed: {e}")
 
     # 尝试通过 FUSE 本地路径
-    fuse_path = f"/tmp/feclaw-fuse{vfs_path}"
+    fuse_path = f"{settings.FUSE_MOUNT_DIR}{vfs_path}"
     if os.path.isfile(fuse_path):
         return FileResponse(fuse_path, filename=os.path.basename(vfs_path))
 
