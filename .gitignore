@@ -92,3 +92,4 @@ claude-tasks/
 scripts/compliance-prompt-iter.py
 scripts/migrate_passwords.py
 feclaw-storage/
+feclaw-fuse/
