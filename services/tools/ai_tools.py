@@ -23,6 +23,7 @@ import httpx
 from config import settings
 from services.tool_registry import tool
 from services.tools.base import AgentToolsServiceBase
+from services.tool_log_service import TOOL_LOG_ROOT
 
 logger = logging.getLogger(__name__)
 
@@ -554,9 +555,9 @@ class AIToolsMixin(AgentToolsServiceBase):
 
                         log_path = None
                         try:
-                            log_dir = "workspace/subagent_logs"
-                            log_filename = f"{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}_{call_id}.md"
-                            log_path = f"{log_dir}/{log_filename}"
+                            today = datetime.now().strftime("%Y-%m-%d")
+                            log_dir = f"{TOOL_LOG_ROOT}/{today}/subagent"
+                            log_path = f"{log_dir}/{call_id}.log"
 
                             log_content = f"""# Sub-agent 执行日志
 
@@ -575,7 +576,7 @@ class AIToolsMixin(AgentToolsServiceBase):
 
 {result_content}
 """
-                            write_result = self.file_write(log_path, log_content)
+                            write_result = self._vfs.write_tool_log(log_path, log_content)
                             if write_result.startswith("OK"):
                                 logger.info(f"[spawn_subagent] Full output saved to VFS: {log_path}")
                             else:
@@ -641,7 +642,7 @@ class AIToolsMixin(AgentToolsServiceBase):
         return error_msg
 
     @tool(description="读取子Agent的完整执行日志", category="agent")
-    def read_subagent_log(self, log_path: str) -> str:
+    async def read_subagent_log(self, log_path: str) -> str:
         """
         读取子代理的完整执行日志
 
@@ -649,19 +650,24 @@ class AIToolsMixin(AgentToolsServiceBase):
         此方法用于读取那些完整日志。
 
         Args:
-            log_path: VFS 日志文件路径，如 "workspace/subagent_logs/2024-01-15_10-30-00_xxx.md"
+            log_path: VFS 日志路径，如 ".logs/tools/2026-07-19/subagent/call_id.log"
 
         Returns:
             完整的日志内容
         """
-        if not log_path.startswith("workspace/subagent_logs/"):
-            return "Error: 无效的日志路径，应为 workspace/subagent_logs/... 格式"
-
-        if not log_path.endswith(".md"):
-            return "Error: 日志文件应为 .md 格式"
+        is_current = bool(re.fullmatch(
+            r"/?(?:workspace/)?\.logs/tools/\d{4}-\d{2}-\d{2}/subagent/"
+            r"[A-Za-z0-9_.-]+\.log",
+            log_path,
+        ))
+        is_legacy = (
+            log_path.startswith("workspace/subagent_logs/")
+            and log_path.endswith(".md")
+        )
+        if not (is_current or is_legacy):
+            return "Error: 无效的日志路径，应为 .logs/tools/{date}/subagent/{call_id}.log 格式"
 
         try:
-            content = self.file_read(log_path)
-            return content
+            return await self.file_read(log_path)
         except Exception as e:
             return f"Error: 读取日志失败: {e}"

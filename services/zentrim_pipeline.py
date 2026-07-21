@@ -2,24 +2,74 @@
 Zentrim AI Pipeline — 异步处理入口
 
 设计参考：docs/v1/02-zentrim.md §9 Pipeline
-任务参考：claude-work/zentrim-pipeline.md
+任务参考：claude-work/zentrim-pipeline.md + /tmp/next-step-plan-0719.md
 
 处理链路：
-  拍照 → process_photo → VLM 形态判断 → VLM→HTML / 智能二值化标记 → 写计算层 blocks.text → 向量索引
+  拍照 → process_photo → Speed 形态判断 → (随手拍:保留原图 / 文档:二值化+可选HTML) → Heavy VLM 描述 → 向量索引
   录音 → process_audio → (ASR 占位，暂不实现) → 写 blocks.text → 向量索引
   手写 → process_ink   → VLM 瓦片语义提取 → 写 blocks.text → 向量索引
 
 后台处理：asyncio.create_task，不引入 Celery/Redis。
-状态流：entry.status: active → processing → active（完成）/ active（失败，不阻塞用户）
+状态流：entry.status: active → processing → active（完成/失败都通过计数器恢复）
+
+────────────────────────────────────────────────────────────────────
+Block.data.processed Schema（photo 类型，U 阶段前端参照）
+────────────────────────────────────────────────────────────────────
+{
+  "original": {
+    "key": "feclaw/zentrim/user_{uid}/attachments/{block_id}_original.jpg",
+    "url": "https://...",
+    "mime": "image/jpeg",
+    "size": 2456789
+  },
+  "processed": {
+    "status": "processing" | "rendered" | "failed" | "active" | "archived",
+    "current_stage": null | "classify" | "color_id" | "binarize" | "html" | "screenshot" | "describe",
+    "error": null | "[ec] human msg",
+    "failed_stage": null | "classify" | "color_id" | ...,
+    "binarized": {
+      "channels": [
+        {"color": "black", "threshold": 128, "iterations": 3,
+         "key": ".../{block_id}_black.webp", "url": "..."},
+        ...
+      ],
+      "fused": {"key": ".../{block_id}_fused.webp", "url": "..."}
+    },
+    "html": {
+      "source_key": ".../{block_id}.html",
+      "source_url": "...",
+      "screenshot_key": ".../{block_id}_screenshot.webp",
+      "screenshot_url": "..."
+    },
+    "display_image": {                     # ← 前端渲染时只读这一个字段
+      "kind": "fused" | "screenshot" | "original",
+      "key":  "<COS key>",
+      "url":  "<presigned URL>"
+    }
+  },
+  "vlm_description": "这张图是物理试卷...",
+  "text": "...",
+  "model_name": "doubao-seed-2.0-lite",
+  "vector_id": "vec_abc123..."
+}
+
+display_image 字段语义：
+  - kind = "screenshot" HTML 路径，显示 html.screenshot（Playwright 渲染截屏）
+  - kind = "fused"      二值化路径，显示 binarized.fused（多色融合净图）
+  - kind = "original"   随手拍 / 失败 / processing 时，显示 original 原图
+原则：后端在写 processed 时就决定好显示哪张，前端不做选择。
 """
 
 import asyncio
 import base64
+import json
 import logging
 import os
 import re
+import uuid
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Literal, Optional, Tuple
 
 import httpx
 from sqlalchemy.orm import Session
@@ -27,19 +77,91 @@ from sqlalchemy.orm import Session
 from config import settings
 from models.database import SessionLocal
 from models.zentrim import ZentrimBlock, ZentrimEntry
-from services.model_registry import resolve as _model_resolve
+from services.model_registry import (
+    VisionModelConfig,
+    get_vision_heavy,
+    get_vision_speed,
+    resolve as _model_resolve,
+)
 from services.zentrim_service import ZentrimService, _generate_ulid
 
 logger = logging.getLogger(__name__)
 
-# ─── VLM 配置 ───
+# ─── cv2 / numpy 懒加载（二值化用；headless 服务器无 GUI） ───
+try:
+    import cv2
+    import numpy as np
+    _CV2_AVAILABLE = True
+except ImportError:
+    cv2 = None  # type: ignore
+    np = None   # type: ignore
+    _CV2_AVAILABLE = False
+    logger.warning("[zentrim_pipeline] cv2/numpy not available; binarization disabled")
+
+
+# ─── VLM 全局配置（向后兼容；实例用 self.vision_speed/heavy） ───
 _vlm_info = _model_resolve(settings.MAIN_VISION_MODEL)
 VLM_MODEL = settings.MAIN_VISION_MODEL
 VLM_BASE_URL = f"{_vlm_info['base_url']}/chat/completions"
 VLM_API_KEY: str = os.getenv(_vlm_info.get("api_key_attr", ""), "")
 
-VLM_TIMEOUT = 60.0  # VLM 调用超时
-VLM_MAX_IMAGE_BYTES = 10 * 1024 * 1024  # 10MB 图片上限
+VLM_TIMEOUT = 60.0
+VLM_MAX_IMAGE_BYTES = 10 * 1024 * 1024  # 10MB hard limit
+
+
+# ════════════════════════════════════════
+# 状态机 / 失败阶段 / 错误码常量（T 阶段定义，V/U 阶段用）
+# ════════════════════════════════════════
+
+class PipelineStatus:
+    """photo block 的处理状态。"""
+    PROCESSING = "processing"
+    RENDERED = "rendered"
+    FAILED = "failed"
+    ACTIVE = "active"
+    ARCHIVED = "archived"
+
+
+class FailedStage:
+    """失败发生在管线的哪个阶段。describe 是软失败，不入 failed 状态。"""
+    CLASSIFY = "classify"
+    COLOR_ID = "color_id"
+    BINARIZE = "binarize"
+    HTML = "html"
+    SCREENSHOT = "screenshot"
+    DESCRIBE = "describe"      # 软失败
+    COS_UPLOAD = "cos_upload"
+
+
+class ErrorCode:
+    VLM_TIMEOUT = "vlm_timeout"
+    VLM_INVALID_RESPONSE = "vlm_invalid_response"
+    PLAYWRIGHT_RENDER_FAILED = "playwright_render_failed"
+    COS_UPLOAD_FAILED = "cos_upload_failed"
+    ITERATIONS_EXCEEDED = "iterations_exceeded"
+    CV2_UNAVAILABLE = "cv2_unavailable"
+
+
+_DISPLAY_IMAGE_KINDS = ("fused", "screenshot", "original")
+
+
+# ─── 二值化数据结构 ───
+@dataclass
+class ColorChannel:
+    """主色识别结果 — 一个颜色通道。"""
+    color: Literal["black", "red", "blue", "green", "other"]
+    hue_low: float = 0.0
+    hue_high: float = 0.0
+    description: str = ""
+
+
+@dataclass
+class BinarizedChannel:
+    """单通道二值化结果。"""
+    color: str
+    threshold: int
+    iterations: int
+    image_bytes_webp: bytes
 
 
 # ─── 提示词 ───
@@ -74,34 +196,86 @@ PROMPT_INK_SEMANTIC = (
     "3. 总结整张瓦片的核心内容"
 )
 
+# ─── V 阶段新增提示词 ───
+PROMPT_DOCUMENT_CLASSIFY = (
+    "你是图像分类器。判断这张图片是「文档类内容」还是「随手拍」。\n"
+    "文档类包括：笔记、课本、试卷、白板、打印文档、作业、发票、表格、幻灯片照片等需要处理的图文内容。\n"
+    "随手拍包括：风景、人物、食物、宠物、建筑、自拍、街景等生活照片。\n"
+    "只回答一个词：DOCUMENT 或 CASUAL"
+)
+
+PROMPT_DETECT_COLORS = (
+    "这张手写/印刷文档图片里，作者用了哪几种颜色的笔书写或印刷？\n"
+    "通常包括：黑色（主色）、红色（批改/重点）、蓝色（批注）、绿色（标注）等。\n"
+    "请判断：\n"
+    "1. 这张图是否规整到足以转成 HTML（印刷清晰、排版整齐，评分 0-1，0.8+ 规整，0.5 以下是自由手写/拍照角度歪斜）\n"
+    "2. 列出 1-5 种用到的颜色\n"
+    "只输出 JSON，格式：\n"
+    "{\"regularity_score\": 0.0-1.0, \"colors\": [{\"color\": \"black|red|blue|green|other\", \"description\": \"...\"}]}"
+)
+
+PROMPT_BINARIZE_EVAL = (
+    "你在评估一个二值化阈值。左边是原始图片（{color}色墨迹），右边是当前阈值 ({threshold}) 二值化后的黑白图。\n"
+    "判断：当前阈值是否合适？\n"
+    "- 如果二值化图里笔画断裂、大量笔画缺失 → 阈值应该调高 (higher)\n"
+    "- 如果二值化图里背景噪点很多、纸张阴影被误判成笔迹 → 阈值应该调低 (lower)\n"
+    "- 如果笔画清晰、背景干净 → ok\n"
+    "只输出 JSON：{\"adjust\": \"higher|lower|ok\", \"amount\": 整数 5-30}"
+)
+
+PROMPT_GENERATE_HTML = (
+    "你是一个高级 OCR + HTML 生成助手。用户上传了一张规整的文档照片。\n"
+    "请生成像素级对齐的 HTML：\n"
+    "1. 还原原文布局（标题/段落/列表/公式/表格）\n"
+    "2. 用 Tailwind 风格的 inline CSS (style=\"...\")，设置合理字体大小和行距\n"
+    "3. body 背景白色，文字黑色，最大宽度 1000px，居中\n"
+    "4. 如果是试卷保留题号和选项；笔记保留颜色层级（红色批注用 style=\"color:red\"）\n"
+    "5. 只输出完整的 <!DOCTYPE html>... 文档，不要 markdown 包裹，不要解释"
+)
+
+PROMPT_DESCRIBE_IMAGE = (
+    "用 1-3 句话描述这张图片的内容，包括标题（若有）、主题、关键概念/公式/人物/物品。\n"
+    "要求简洁、利于搜索检索，不要冗长。直接输出描述文本。"
+)
+
+
+# ─── 预定义颜色 HSV 色相范围（OpenCV H: 0-179, S/V: 0-255） ───
+# 参考：cvtColor BGR→HSV 后 H 范围 0-179
+_COLOR_HUE_RANGES = {
+    "red":    [(0, 10), (170, 179)],   # 红色跨 0°
+    "blue":   [(100, 130)],
+    "green":  [(40, 80)],
+    # "black"/"other" 不以色相判定，走 V 通道
+}
+
+# 颜色 → 显示色（fused 时映射回 RGB）
+_COLOR_TO_RGB = {
+    "black": (0, 0, 0),
+    "red":   (220, 30, 30),
+    "blue":  (30, 80, 220),
+    "green": (30, 160, 60),
+    "other": (120, 60, 180),
+}
+
 
 # ─── 运行中任务跟踪 ───
-_running_tasks: Dict[str, asyncio.Task] = {}  # key = f"{entry_id}:{block_id}"
+_running_tasks: Dict[str, asyncio.Task] = {}
 
 
 def _task_key(entry_id: str, block_id: str) -> str:
     return f"{entry_id}:{block_id}"
 
 
-# fix(P0-3): cos_key 路径白名单 — 防止 COS 路径穿越 / 跨用户读取
-# 合法路径：feclaw/zentrim/user_{uid}/attachments/{entry_id}_{file_type}.{ext}
-#          feclaw/zentrim/user_{uid}/blocks/{block_id}_*.{ext}
+# COS key 白名单
 _COS_KEY_PATTERN_TEMPLATE = r"^feclaw/zentrim/user_{uid}/[A-Za-z0-9_\-/]+\.[a-z0-9]{1,5}$"
 
 
 def _is_valid_cos_key(cos_key: str, user_id: Optional[int]) -> bool:
-    """校验 cos_key 是否在白名单内且归属当前用户。
-
-    若 user_id 为 None（无法校验归属），则只做格式 + 禁字符校验，
-    但记 warning（因为 pipeline 默认 user_id 来自信任域，None 是异常情况）。
-    """
     if not cos_key or not isinstance(cos_key, str):
         return False
-    # 禁字符防御
     if ".." in cos_key or "//" in cos_key or "\x00" in cos_key:
         return False
     if user_id is None:
-        # user_id 未知 — 放宽到只校验路径前缀
         pattern = r"^feclaw/zentrim/user_\d+/[A-Za-z0-9_\-/]+\.[a-z0-9]{1,5}$"
         if not re.match(pattern, cos_key):
             return False
@@ -117,30 +291,39 @@ def _is_valid_cos_key(cos_key: str, user_id: Optional[int]) -> bool:
 # ZentrimPipeline
 # ════════════════════════════════════════
 class ZentrimPipeline:
-    """Zentrim AI 管线 — 异步处理入口
+    """Zentrim AI 管线 — 异步处理入口"""
 
-    所有方法返回 asyncio.Task，后台执行，不阻塞调用方。
-    失败时 entry 会被恢复为 active，block.text 写入错误信息。
-    """
-
-    def __init__(self, db: Optional[Session] = None):
+    def __init__(
+        self,
+        db: Optional[Session] = None,
+        vision_speed: Optional[VisionModelConfig] = None,
+        vision_heavy: Optional[VisionModelConfig] = None,
+    ):
         self._db = db
+        try:
+            self.vision_speed = vision_speed or get_vision_speed()
+        except Exception as e:
+            logger.warning(f"[zentrim_pipeline] vision_speed load failed, using fallback: {e}")
+            self.vision_speed = VisionModelConfig(
+                name="qwen3.6-flash", display_name="Qwen3.6 Flash",
+                cost_per_call=0.001, max_image_size_mb=20, max_tokens=2048, timeout_s=15,
+            )
+        try:
+            self.vision_heavy = vision_heavy or get_vision_heavy()
+        except Exception as e:
+            logger.warning(f"[zentrim_pipeline] vision_heavy load failed, using fallback: {e}")
+            self.vision_heavy = VisionModelConfig(
+                name="doubao-seed-2.0-lite", display_name="豆包 Seed 2.0 Lite",
+                cost_per_call=0.01, max_image_size_mb=20, max_tokens=4096, timeout_s=60,
+            )
+        self.max_image_bytes = self.vision_heavy.max_image_size_mb * 1024 * 1024
+        # Playwright 浏览器单例（lazy init，避免每次请求 launch）
+        self._pw_browser = None
+        self._pw_lock = asyncio.Lock()
 
     # ─── 公开接口 ───
 
     def process_photo(self, entry_id: str, block_id: str, cos_key: str, user_id: int) -> asyncio.Task:
-        """拍照入库管线（Step 1a）
-
-        1. 状态 → processing
-        2. 下载图片
-        3. VLM 判断形态（印刷体/手写/混合）
-        4. 印刷体 → VLM→HTML
-           手写 → 标记，暂存描述
-           混合 → VLM→HTML + 手写描述
-        5. 写 blocks.text（计算层）+ blocks.data.html
-        6. 向量索引
-        7. 状态 → active
-        """
         task = asyncio.create_task(
             self._run_photo_pipeline(entry_id, block_id, cos_key, user_id)
         )
@@ -149,11 +332,6 @@ class ZentrimPipeline:
         return task
 
     def process_audio(self, entry_id: str, block_id: str, cos_key: str, user_id: int) -> asyncio.Task:
-        """录音管线（Step 1b）— ASR 占位
-
-        当前版本仅标记 processing → 直接恢复 active，text 写占位。
-        ASR 实际调用待接入。
-        """
         task = asyncio.create_task(
             self._run_audio_pipeline(entry_id, block_id, cos_key, user_id)
         )
@@ -162,15 +340,6 @@ class ZentrimPipeline:
         return task
 
     def process_ink(self, entry_id: str, block_id: str, cos_key: str, user_id: int) -> asyncio.Task:
-        """手写画布管线（Step 1d）
-
-        1. 状态 → processing
-        2. 下载画布缩略图/瓦片
-        3. VLM 语义提取（文字+图表描述+总结）
-        4. 写 blocks.text
-        5. 向量索引
-        6. 状态 → active
-        """
         task = asyncio.create_task(
             self._run_ink_pipeline(entry_id, block_id, cos_key, user_id)
         )
@@ -179,7 +348,6 @@ class ZentrimPipeline:
         return task
 
     def get_status(self, entry_id: str, block_id: str) -> str:
-        """获取管线处理状态"""
         key = _task_key(entry_id, block_id)
         task = _running_tasks.get(key)
         if task is None:
@@ -188,32 +356,47 @@ class ZentrimPipeline:
             return "done"
         return "processing"
 
-    # ─── 内部工具 ───
+    # ─── 内部工具（DB / 状态） ───
 
     def _get_db(self) -> Session:
-        """获取 DB Session（优先用注入的，否则新建）"""
         if self._db is not None:
             return self._db
         return SessionLocal()
 
     def _set_processing(self, entry_id: str, block_id: str, user_id: int) -> None:
-        """标记 entry 为 processing，block.text 为占位"""
+        """标记 entry processing + block.text 占位 + block.data.processed.status=processing"""
         db = self._get_db()
         own_session = self._db is None
         try:
             svc = ZentrimService(db)
-            # fix(P0-5): 使用计数器而非直接改 entry.status
             self._increment_processing_count(db, entry_id, user_id)
-            # 更新 block.text 为处理中占位
             block = db.query(ZentrimBlock).filter(ZentrimBlock.id == block_id).first()
             if block:
                 block.text = "[处理中...]"
+                data = block.data if isinstance(block.data, dict) else {}
+                processed = data.get("processed") if isinstance(data.get("processed"), dict) else {}
+                processed["status"] = PipelineStatus.PROCESSING
+                processed["current_stage"] = None
+                processed["error"] = None
+                processed["failed_stage"] = None
+                # display_image 默认回落到原图，processing 期间前端显示原图
+                orig = data.get("original") if isinstance(data.get("original"), dict) else None
+                if orig and orig.get("key"):
+                    processed["display_image"] = {
+                        "kind": "original",
+                        "key": orig["key"],
+                        "url": orig.get("url", ""),
+                    }
+                data["processed"] = processed
+                block.data = data
                 db.commit()
         except Exception as e:
             logger.error(f"[Pipeline] set_processing failed: entry={entry_id} block={block_id} err={e}")
         finally:
             if own_session:
                 db.close()
+
+    # ─── 旧版 _set_completed / _set_failed 保留给 audio/ink 管线 ───
 
     async def _set_completed(
         self,
@@ -224,15 +407,9 @@ class ZentrimPipeline:
         html: Optional[str] = None,
         model_name: Optional[str] = None,
     ) -> None:
-        """完成处理：写 blocks.text + data.html + 向量索引 + 状态恢复
-
-        fix(P0-4): 改为 async — pipeline 本身是 async 函数，所有调用都用 await。
-        DB session 在 finally 中 close，确保向量写回后再关闭。
-        """
         db = self._get_db()
         own_session = self._db is None
         try:
-            # 更新 block（text + html + model_name）
             block = db.query(ZentrimBlock).filter(ZentrimBlock.id == block_id).first()
             if block:
                 block.text = text
@@ -243,10 +420,7 @@ class ZentrimPipeline:
                     block.data = data
                 db.commit()
 
-            # fix(P0-4): 向量索引 — 用 await 直接等待，vector_id 成功后才写回 DB
             vector_id = await self._index_block(block_id, text, entry_id, user_id)
-
-            # 如果 _index_block 返回了 vector_id，单独写到 DB（新 session 防止已关闭）
             if vector_id:
                 try:
                     db2 = self._get_db() if not own_session else SessionLocal()
@@ -261,11 +435,9 @@ class ZentrimPipeline:
                 except Exception as e:
                     logger.warning(f"[Pipeline] vector_id write-back failed: block={block_id} err={e}")
 
-            # 恢复 entry 状态（fix(P0-5): 使用计数器）
             self._decrement_processing_count(db, entry_id, user_id)
         except Exception as e:
             logger.error(f"[Pipeline] set_completed failed: entry={entry_id} block={block_id} err={e}")
-            # 恢复 entry 状态即使失败
             try:
                 self._decrement_processing_count(db, entry_id, user_id)
             except Exception:
@@ -275,10 +447,6 @@ class ZentrimPipeline:
                 db.close()
 
     async def _set_failed(self, entry_id: str, block_id: str, user_id: int, error: str) -> None:
-        """失败处理：恢复 entry 状态，block.text 写错误
-
-        fix(P0-4): 改为 async，调用方用 await。
-        """
         db = self._get_db()
         own_session = self._db is None
         try:
@@ -286,8 +454,6 @@ class ZentrimPipeline:
             if block:
                 block.text = f"[处理失败: {error[:200]}]"
                 db.commit()
-
-            # fix(P0-5): 使用计数器递减
             self._decrement_processing_count(db, entry_id, user_id)
         except Exception as e:
             logger.error(f"[Pipeline] set_failed failed: entry={entry_id} block={block_id} err={e}")
@@ -295,13 +461,230 @@ class ZentrimPipeline:
             if own_session:
                 db.close()
 
-    # ─── fix(P0-5): entry 级别 processing_count 计数器 ───
+    # ─── V 阶段：photo 管线专用的 DB 更新助手 ───
+
+    def _publish_stage(self, entry_id: str, block_id: str, stage_name: str) -> None:
+        """把当前阶段写入 block.data.processed.current_stage。W 代理的 SSE 端点会轮询/订阅 DB。"""
+        db = self._get_db()
+        own_session = self._db is None
+        try:
+            block = db.query(ZentrimBlock).filter(ZentrimBlock.id == block_id).first()
+            if block:
+                data = block.data if isinstance(block.data, dict) else {}
+                processed = data.get("processed") if isinstance(data.get("processed"), dict) else {}
+                processed["current_stage"] = stage_name
+                processed["status"] = PipelineStatus.PROCESSING
+                data["processed"] = processed
+                block.data = data
+                db.commit()
+        except Exception as e:
+            logger.warning(
+                f"[Pipeline] _publish_stage failed: entry={entry_id} block={block_id} "
+                f"stage={stage_name} err={e}"
+            )
+        finally:
+            if own_session:
+                db.close()
+
+    def _ensure_storage(self):
+        from services.file_storage import create_file_storage
+        return create_file_storage(mode=settings.STORAGE_MODE)
+
+    def _build_block_key(self, user_id: int, block_id: str, suffix: str) -> str:
+        """生成 blocks/ 路径下的 COS key。suffix 如 '_black.webp' / '.html'"""
+        return f"{settings.STORAGE_PREFIX}zentrim/user_{user_id}/blocks/{block_id}{suffix}"
+
+    def _upload_bytes(self, key: str, content: bytes, mime: str) -> str:
+        """上传 bytes 到存储，返回公开 URL。"""
+        storage = self._ensure_storage()
+        storage.put_object(key, content)
+        # 用 ZentrimService.make_public_url 生成可访问 URL
+        db = self._get_db()
+        own_session = self._db is None
+        try:
+            svc = ZentrimService(db)
+            url = svc.make_public_url(key, mime=mime)
+            return url
+        finally:
+            if own_session:
+                db.close()
+
+    async def _set_photo_completed(
+        self,
+        entry_id: str,
+        block_id: str,
+        user_id: int,
+        *,
+        channels: List[dict],
+        fused_key: Optional[str],
+        fused_url: Optional[str],
+        html_source_key: Optional[str],
+        html_source_url: Optional[str],
+        screenshot_key: Optional[str],
+        screenshot_url: Optional[str],
+        display_image: dict,
+        vlm_description: Optional[str],
+        model_name: str,
+    ) -> None:
+        """photo 管线成功完成：写 processed 全字段 + text + vector index。"""
+        db = self._get_db()
+        own_session = self._db is None
+        try:
+            block = db.query(ZentrimBlock).filter(ZentrimBlock.id == block_id).first()
+            if not block:
+                logger.error(f"[Pipeline] _set_photo_completed: block {block_id} not found")
+                return
+            data = block.data if isinstance(block.data, dict) else {}
+
+            binarized = {"channels": channels, "fused": None}
+            if fused_key:
+                binarized["fused"] = {"key": fused_key, "url": fused_url or ""}
+
+            html_dict: Optional[dict] = None
+            if html_source_key or screenshot_key:
+                html_dict = {
+                    "source_key": html_source_key,
+                    "source_url": html_source_url,
+                    "screenshot_key": screenshot_key,
+                    "screenshot_url": screenshot_url,
+                }
+
+            processed = data.get("processed") if isinstance(data.get("processed"), dict) else {}
+            processed.update({
+                "status": PipelineStatus.RENDERED,
+                "current_stage": None,
+                "error": None,
+                "failed_stage": None,
+                "binarized": binarized,
+                "html": html_dict,
+                "display_image": display_image,
+            })
+            data["processed"] = processed
+            data["vlm_description"] = vlm_description
+
+            block.data = data
+            block.text = vlm_description or "[图片无描述]"
+            block.model_name = model_name
+            db.commit()
+
+            # 向量索引（用 vlm_description；为空则跳过）
+            vector_id: Optional[str] = None
+            if vlm_description and vlm_description.strip():
+                vector_id = await self._index_block(
+                    block_id, vlm_description, entry_id, user_id
+                )
+                if vector_id:
+                    try:
+                        db2 = self._get_db() if not own_session else SessionLocal()
+                        try:
+                            blk = db2.query(ZentrimBlock).filter(ZentrimBlock.id == block_id).first()
+                            if blk:
+                                blk.vector_id = vector_id
+                                db2.commit()
+                        finally:
+                            if own_session:
+                                db2.close()
+                    except Exception as e:
+                        logger.warning(f"[Pipeline] vector_id write-back failed: {e}")
+
+            self._decrement_processing_count(db, entry_id, user_id)
+        except Exception as e:
+            logger.exception(f"[Pipeline] _set_photo_completed failed: {e}")
+            try:
+                self._decrement_processing_count(db, entry_id, user_id)
+            except Exception:
+                pass
+        finally:
+            if own_session:
+                db.close()
+
+    async def _set_photo_active(
+        self, entry_id: str, block_id: str, user_id: int, display_kind: str = "original"
+    ) -> None:
+        """随手拍路径：不做优化，状态置 active，显示原图。VLM 描述仍独立跑。"""
+        db = self._get_db()
+        own_session = self._db is None
+        try:
+            block = db.query(ZentrimBlock).filter(ZentrimBlock.id == block_id).first()
+            if block:
+                data = block.data if isinstance(block.data, dict) else {}
+                orig = data.get("original") if isinstance(data.get("original"), dict) else None
+                processed = data.get("processed") if isinstance(data.get("processed"), dict) else {}
+                display_image = {
+                    "kind": display_kind,
+                    "key": (orig or {}).get("key", ""),
+                    "url": (orig or {}).get("url", ""),
+                }
+                processed.update({
+                    "status": PipelineStatus.ACTIVE,
+                    "current_stage": None,
+                    "error": None,
+                    "failed_stage": None,
+                    "display_image": display_image,
+                })
+                data["processed"] = processed
+                block.data = data
+                db.commit()
+            self._decrement_processing_count(db, entry_id, user_id)
+        except Exception as e:
+            logger.exception(f"[Pipeline] _set_photo_active failed: {e}")
+            try:
+                self._decrement_processing_count(db, entry_id, user_id)
+            except Exception:
+                pass
+        finally:
+            if own_session:
+                db.close()
+
+    async def _set_photo_failed(
+        self,
+        entry_id: str,
+        block_id: str,
+        user_id: int,
+        error_code: str,
+        error_msg: str,
+        failed_stage: str,
+    ) -> None:
+        """photo 管线失败：写 processed.status=failed + error + failed_stage。"""
+        db = self._get_db()
+        own_session = self._db is None
+        try:
+            block = db.query(ZentrimBlock).filter(ZentrimBlock.id == block_id).first()
+            if block:
+                data = block.data if isinstance(block.data, dict) else {}
+                orig = data.get("original") if isinstance(data.get("original"), dict) else None
+                processed = data.get("processed") if isinstance(data.get("processed"), dict) else {}
+                processed.update({
+                    "status": PipelineStatus.FAILED,
+                    "current_stage": None,
+                    "error": f"[{error_code}] {error_msg}",
+                    "failed_stage": failed_stage,
+                    "display_image": {
+                        "kind": "original",
+                        "key": (orig or {}).get("key", ""),
+                        "url": (orig or {}).get("url", ""),
+                    },
+                })
+                data["processed"] = processed
+                block.data = data
+                block.text = f"[处理失败: {error_msg[:200]}]"
+                db.commit()
+            self._decrement_processing_count(db, entry_id, user_id)
+        except Exception as e:
+            logger.exception(f"[Pipeline] _set_photo_failed failed: {e}")
+            try:
+                self._decrement_processing_count(db, entry_id, user_id)
+            except Exception:
+                pass
+        finally:
+            if own_session:
+                db.close()
+
+    # ─── entry 级别 processing_count 计数器 ───
 
     def _increment_processing_count(self, db: Session, entry_id: str, user_id: int) -> None:
-        """递增 entry.metadata_.pipeline_active_count；若从 0→1，标记 entry.status='processing'"""
         entry = db.query(ZentrimEntry).filter(
-            ZentrimEntry.id == entry_id,
-            ZentrimEntry.user_id == user_id,
+            ZentrimEntry.id == entry_id, ZentrimEntry.user_id == user_id,
         ).first()
         if not entry:
             return
@@ -315,10 +698,8 @@ class ZentrimPipeline:
         db.commit()
 
     def _decrement_processing_count(self, db: Session, entry_id: str, user_id: int) -> None:
-        """递减 entry.metadata_.pipeline_active_count；若降到 0，恢复 entry.status='active'"""
         entry = db.query(ZentrimEntry).filter(
-            ZentrimEntry.id == entry_id,
-            ZentrimEntry.user_id == user_id,
+            ZentrimEntry.id == entry_id, ZentrimEntry.user_id == user_id,
         ).first()
         if not entry:
             return
@@ -328,57 +709,32 @@ class ZentrimPipeline:
             count = 0
         meta["pipeline_active_count"] = count
         entry.metadata_ = meta
-        # 只有计数归零（最后一个 block 完成）才恢复 active
         if count == 0:
             entry.status = "active"
         entry.updated_at = datetime.now(timezone.utc)
         db.commit()
 
     async def _index_block(self, block_id: str, text: str, entry_id: str, user_id: int) -> Optional[str]:
-        """将 block 文本写入向量索引 idx-zentrim-{user_id}
-
-        fix(P0-4): 改为 async — 直接 await vs.index_text(...)，不再用
-        asyncio.ensure_future / run_until_complete / asyncio.run 三层兜底。
-
-        Returns:
-            vector_id on success, None on failure.
-        """
         if not text or not text.strip():
             return None
         try:
             from services.vector_search_service import VectorSearchService
-
             vs = VectorSearchService(agent_hash=None)
             index_name = f"idx-zentrim-{user_id}"
             vector_id = f"zentrim:{block_id}"
-
-            # fix(P0-4): 直接 await，不再用 fire-and-forget
             await vs.index_text(
-                key=vector_id,
-                text=text,
-                index=index_name,
+                key=vector_id, text=text, index=index_name,
                 metadata={"entry_id": entry_id, "block_id": block_id, "user_id": user_id},
             )
-
             logger.info(f"[Pipeline] indexed block={block_id} to {index_name}")
-            return vector_id  # 返回给调用方写回 DB
+            return vector_id
         except Exception as e:
             logger.warning(f"[Pipeline] vector index failed (non-fatal): block={block_id} err={e}")
             return None
 
     def _download_file(self, cos_key: str, user_id: Optional[int] = None) -> Optional[bytes]:
-        """从存储后端下载文件
-
-        fix(P0-3): 加 cos_key 路径白名单校验（defense-in-depth）。
-        Router 层已做 `_validate_cos_key` 校验，但 pipeline 也可能被
-        `zentrim_service.save_blocks` auto-trigger 直接调用（不经 router），
-        所以这里二次校验。
-        """
-        # fix(P0-3): 白名单校验 — 必须以 feclaw/zentrim/user_{uid}/ 开头
         if not cos_key or not _is_valid_cos_key(cos_key, user_id):
-            logger.error(
-                f"[Pipeline] cos_key rejected by whitelist: key={cos_key!r} user_id={user_id}"
-            )
+            logger.error(f"[Pipeline] cos_key rejected by whitelist: key={cos_key!r} user_id={user_id}")
             return None
         try:
             from services.file_storage import create_file_storage
@@ -388,25 +744,57 @@ class ZentrimPipeline:
             logger.error(f"[Pipeline] download failed: key={cos_key} err={e}")
             return None
 
-    async def _call_vlm(self, image_b64: str, mime: str, prompt: str, max_tokens: int = 2048) -> Optional[str]:
-        """调用 VLM 模型，返回文本结果
+    # ─── VLM 调用 ───
 
-        参考 services/image_describer.py 的调用模式。
-        """
+    async def _call_vlm_heavy(
+        self, image_b64: str, mime: str, prompt: str, max_tokens: Optional[int] = None
+    ) -> Optional[str]:
+        cfg = self.vision_heavy
+        return await self._do_call_vlm(
+            model_name=cfg.name, image_b64=image_b64, mime=mime, prompt=prompt,
+            max_tokens=max_tokens if max_tokens is not None else cfg.max_tokens,
+            timeout_s=cfg.timeout_s,
+        )
+
+    async def _call_vlm_speed(
+        self, image_b64: str, mime: str, prompt: str, max_tokens: Optional[int] = None
+    ) -> Optional[str]:
+        cfg = self.vision_speed
+        return await self._do_call_vlm(
+            model_name=cfg.name, image_b64=image_b64, mime=mime, prompt=prompt,
+            max_tokens=max_tokens if max_tokens is not None else cfg.max_tokens,
+            timeout_s=cfg.timeout_s,
+        )
+
+    async def _call_vlm(
+        self, image_b64: str, mime: str, prompt: str, max_tokens: int = 2048
+    ) -> Optional[str]:
+        """[向后兼容] 默认走 Heavy VLM。"""
+        return await self._call_vlm_heavy(
+            image_b64=image_b64, mime=mime, prompt=prompt, max_tokens=max_tokens
+        )
+
+    async def _do_call_vlm(
+        self, *, model_name: str, image_b64: str, mime: str, prompt: str,
+        max_tokens: int, timeout_s: int,
+    ) -> Optional[str]:
+        info = _model_resolve(model_name)
+        base_url = f"{info['base_url']}/chat/completions"
+        api_key = os.getenv(info.get("api_key_attr", ""), "")
         content = [
             {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{image_b64}"}},
             {"type": "text", "text": prompt},
         ]
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(VLM_TIMEOUT)) as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(timeout_s)) as client:
                 response = await client.post(
-                    VLM_BASE_URL,
+                    base_url,
                     headers={
-                        "Authorization": f"Bearer {VLM_API_KEY}",
+                        "Authorization": f"Bearer {api_key}",
                         "Content-Type": "application/json",
                     },
                     json={
-                        "model": VLM_MODEL,
+                        "model": model_name,
                         "messages": [{"role": "user", "content": content}],
                         "stream": False,
                         "thinking": {"type": "disabled"},
@@ -415,8 +803,8 @@ class ZentrimPipeline:
                 )
             if response.status_code != 200:
                 logger.warning(
-                    f"[Pipeline] VLM API error: HTTP {response.status_code}, "
-                    f"body={response.text[:200]}"
+                    f"[Pipeline] VLM API error: model={model_name} "
+                    f"HTTP {response.status_code}, body={response.text[:200]}"
                 )
                 return None
             result = response.json()
@@ -428,15 +816,14 @@ class ZentrimPipeline:
             )
             return text or None
         except httpx.TimeoutException:
-            logger.warning(f"[Pipeline] VLM timeout after {VLM_TIMEOUT}s")
+            logger.warning(f"[Pipeline] VLM timeout: model={model_name} after {timeout_s}s")
             return None
         except Exception as e:
-            logger.error(f"[Pipeline] VLM call failed: {e}", exc_info=True)
+            logger.error(f"[Pipeline] VLM call failed: model={model_name} err={e}", exc_info=True)
             return None
 
     @staticmethod
     def _detect_image_format(data: bytes) -> str:
-        """通过文件魔数检测图片格式"""
         if data[:8] == b"\x89PNG\r\n\x1a\n":
             return "png"
         if data[:2] in (b"\xff\xd8",):
@@ -449,138 +836,541 @@ class ZentrimPipeline:
 
     @staticmethod
     def _encode_image(image_data: bytes) -> tuple:
-        """base64 编码图片，返回 (b64_str, mime)"""
         ext = ZentrimPipeline._detect_image_format(image_data)
         mime = f"image/{ext}"
         b64 = base64.b64encode(image_data).decode("utf-8")
         return b64, mime
 
-    # ─── 管线实现 ───
+    # ════════════════════════════════════════
+    # V 阶段：photo 管线新步骤
+    # ════════════════════════════════════════
 
-    async def _run_photo_pipeline(self, entry_id: str, block_id: str, cos_key: str, user_id: int) -> None:
-        """拍照管线主流程"""
+    # ─── Step 0: Speed 形态判断 ───
+
+    async def _classify_document(self, image_bytes: bytes) -> Literal["document", "casual"]:
+        """用 Speed VLM 判断是文档类还是随手拍。"""
+        b64, mime = self._encode_image(image_bytes)
+        resp = await self._call_vlm_speed(b64, mime, PROMPT_DOCUMENT_CLASSIFY, max_tokens=16)
+        if resp and "DOCUMENT" in resp.upper():
+            return "document"
+        return "casual"
+
+    # ─── Step 2: 主色识别（Heavy） ───
+
+    async def _detect_main_colors(
+        self, image_bytes: bytes
+    ) -> Tuple[List[ColorChannel], float]:
+        """识别主色 + 返回规整度评分。
+        Returns: (channels, regularity_score)
+        """
+        b64, mime = self._encode_image(image_bytes)
+        resp = await self._call_vlm_heavy(b64, mime, PROMPT_DETECT_COLORS, max_tokens=512)
+        if not resp:
+            # VLM 失败：兜底返回黑色单通道，规整度 0.0
+            logger.warning("[Pipeline] _detect_main_colors: VLM returned None, fallback to black-only")
+            return ([ColorChannel(color="black")], 0.0)
+
+        # 尝试解析 JSON（容错：去掉 ```json 包裹）
+        parsed = self._extract_json(resp)
+        if not isinstance(parsed, dict):
+            logger.warning(f"[Pipeline] _detect_main_colors: bad JSON: {resp[:200]}")
+            return ([ColorChannel(color="black")], 0.0)
+
+        regularity = float(parsed.get("regularity_score", 0.0) or 0.0)
+        colors_raw = parsed.get("colors") or []
+        channels: List[ColorChannel] = []
+        seen = set()
+        for c in colors_raw:
+            if not isinstance(c, dict):
+                continue
+            color_name = str(c.get("color", "")).lower().strip()
+            if color_name not in _COLOR_TO_RGB and color_name != "other":
+                color_name = "other"
+            if color_name in seen:
+                continue
+            seen.add(color_name)
+            hue_ranges = _COLOR_HUE_RANGES.get(color_name, [(0, 0)])
+            # 取第一个范围作为主要范围（red 跨 0° 单独处理）
+            hue_low, hue_high = hue_ranges[0]
+            channels.append(ColorChannel(
+                color=color_name,  # type: ignore[arg-type]
+                hue_low=float(hue_low),
+                hue_high=float(hue_high),
+                description=str(c.get("description", "")),
+            ))
+        # 保证至少有 black 通道（通常黑色是主色）
+        if not channels:
+            channels.append(ColorChannel(color="black"))
+        if "black" not in seen:
+            channels.insert(0, ColorChannel(color="black"))
+        return (channels, regularity)
+
+    @staticmethod
+    def _extract_json(text: str) -> Optional[Any]:
+        """从 VLM 响应中提取 JSON，容错 markdown 包裹。"""
+        if not text:
+            return None
+        # 去除 markdown 代码块
+        m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+        if m:
+            text = m.group(1)
+        # 找第一个 { 到最后一个 }
+        start = text.find("{")
+        end = text.rfind("}")
+        if start >= 0 and end > start:
+            text = text[start:end + 1]
         try:
-            # Step 1: 标记 processing
+            return json.loads(text)
+        except Exception:
+            return None
+
+    # ─── Step 3: 单通道二值化迭代（cv2 + Heavy） ───
+
+    @staticmethod
+    def _decode_cv2(image_bytes: bytes):
+        """bytes → BGR numpy array。cv2 不可用返回 None。"""
+        if not _CV2_AVAILABLE:
+            return None
+        arr = np.frombuffer(image_bytes, dtype=np.uint8)
+        img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        return img
+
+    @staticmethod
+    def _binarize_channel_opencv(
+        img_bgr, channel: ColorChannel, threshold: int
+    ) -> bytes:
+        """对单个通道做二值化，返回 webp bytes（白色背景 + 该色墨水 → 白色背景 + 黑色 mask）。
+        注意：返回的是单通道 mask（白=背景，黑=笔迹），供 fused 阶段染色。
+        """
+        hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
+        if channel.color == "black":
+            # 黑色：V 通道低于 threshold 判定为笔迹
+            v = hsv[:, :, 2]
+            mask = (v < threshold).astype(np.uint8) * 255
+        elif channel.color == "red":
+            # 红色跨 0°：两段 hue 取并集，加上 S > threshold 的约束
+            s = hsv[:, :, 1]
+            mask1 = cv2.inRange(hsv, (0, max(40, threshold - 80), 50), (10, 255, 255))
+            mask2 = cv2.inRange(hsv, (170, max(40, threshold - 80), 50), (179, 255, 255))
+            mask = cv2.bitwise_or(mask1, mask2)
+            # 用 S 阈值再过滤一次
+            s_mask = (s > max(40, threshold - 80)).astype(np.uint8) * 255
+            mask = cv2.bitwise_and(mask, s_mask)
+        else:
+            # 其他颜色：H 在 [hue_low, hue_high] + S 足够高
+            s_thresh = max(40, threshold - 80)
+            mask = cv2.inRange(
+                hsv,
+                (channel.hue_low, s_thresh, 50),
+                (channel.hue_high, 255, 255),
+            )
+        # 反相：mask 中 255=笔迹 → 给 imencode 用的图：背景白(255)，笔迹黑(0)
+        # 但我们直接存 mask（255=笔迹），fused 时按 mask 染色
+        # 做一点去噪（开运算去除椒盐噪点）
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+        # 编码 webp
+        ok, buf = cv2.imencode(".webp", mask, [cv2.IMWRITE_WEBP_QUALITY, 90])
+        if not ok:
+            raise RuntimeError("cv2.imencode webp failed")
+        return buf.tobytes()
+
+    async def _binarize_channel(
+        self, image_bytes: bytes, channel: ColorChannel
+    ) -> BinarizedChannel:
+        """对单个色道跑最多 5 轮迭代阈值调整。"""
+        img_bgr = self._decode_cv2(image_bytes)
+        if img_bgr is None:
+            raise RuntimeError(f"[{ErrorCode.CV2_UNAVAILABLE}] cv2 not available")
+
+        # black 初始阈值 100（V<100 即黑），颜色初始阈值 120（S 阈值映射）
+        threshold = 100 if channel.color == "black" else 120
+        iterations = 0
+        max_iters = 5
+        last_mask_bytes = self._binarize_channel_opencv(img_bgr, channel, threshold)
+
+        for i in range(max_iters):
+            iterations = i + 1
+            # 发给 Heavy 评估
+            # 拼接：原图 + 当前二值化 mask 作为一张左右拼接的 PNG
+            eval_img = self._compose_eval_image(img_bgr, last_mask_bytes)
+            b64, mime = self._encode_image(eval_img)
+            prompt = PROMPT_BINARIZE_EVAL.format(
+                color=channel.color, threshold=threshold
+            )
+            resp = await self._call_vlm_heavy(b64, mime, prompt, max_tokens=128)
+            if not resp:
+                # VLM 无响应：用当前结果
+                break
+            parsed = self._extract_json(resp)
+            if not isinstance(parsed, dict):
+                break
+            adjust = str(parsed.get("adjust", "ok")).lower()
+            amount = int(parsed.get("amount", 10) or 10)
+            amount = max(5, min(30, amount))
+            if adjust == "higher":
+                threshold = min(255, threshold + amount)
+            elif adjust == "lower":
+                threshold = max(20, threshold - amount)
+            else:
+                break
+            last_mask_bytes = self._binarize_channel_opencv(img_bgr, channel, threshold)
+
+        return BinarizedChannel(
+            color=channel.color,
+            threshold=threshold,
+            iterations=iterations,
+            image_bytes_webp=last_mask_bytes,
+        )
+
+    @staticmethod
+    def _compose_eval_image(img_bgr, mask_bytes: bytes) -> bytes:
+        """把原图和 mask 左右拼成一张 PNG 给 VLM 评估。"""
+        mask_arr = np.frombuffer(mask_bytes, dtype=np.uint8)
+        mask_img = cv2.imdecode(mask_arr, cv2.IMREAD_GRAYSCALE)
+        # mask 转 BGR 方便拼接
+        mask_bgr = cv2.cvtColor(mask_img, cv2.COLOR_GRAY2BGR)
+        # 统一高度
+        h1, w1 = img_bgr.shape[:2]
+        h2, w2 = mask_bgr.shape[:2]
+        target_h = max(h1, h2)
+        def _pad(img, target_h):
+            h, w = img.shape[:2]
+            if h == target_h:
+                return img
+            pad = np.full((target_h - h, w, 3), 255, dtype=np.uint8)
+            return np.vstack([img, pad])
+        a = _pad(img_bgr, target_h)
+        b = _pad(mask_bgr, target_h)
+        composed = np.hstack([a, b])
+        ok, buf = cv2.imencode(".png", composed)
+        return buf.tobytes()
+
+    # ─── Step 3.3: 多色融合 ───
+
+    @staticmethod
+    def _fuse_channels(
+        original_bytes: bytes, channels: List[BinarizedChannel]
+    ) -> bytes:
+        """把多个二值化 mask 合成一张白底彩字的 webp。"""
+        if not _CV2_AVAILABLE:
+            raise RuntimeError(f"[{ErrorCode.CV2_UNAVAILABLE}] cv2 not available")
+        orig_arr = np.frombuffer(original_bytes, dtype=np.uint8)
+        orig = cv2.imdecode(orig_arr, cv2.IMREAD_COLOR)
+        h, w = orig.shape[:2]
+        # 白底
+        fused = np.full((h, w, 3), 255, dtype=np.uint8)
+        for ch in channels:
+            mask_arr = np.frombuffer(ch.image_bytes_webp, dtype=np.uint8)
+            mask = cv2.imdecode(mask_arr, cv2.IMREAD_GRAYSCALE)
+            if mask.shape != (h, w):
+                mask = cv2.resize(mask, (w, h), interpolation=cv2.INTER_NEAREST)
+            rgb = _COLOR_TO_RGB.get(ch.color, (0, 0, 0))
+            # mask > 128 即笔迹：把 fused 对应像素染成 RGB
+            # OpenCV BGR 顺序
+            bgr = (rgb[2], rgb[1], rgb[0])
+            fused[mask > 128] = bgr
+        ok, buf = cv2.imencode(".webp", fused, [cv2.IMWRITE_WEBP_QUALITY, 92])
+        if not ok:
+            raise RuntimeError("cv2.imencode fused webp failed")
+        return buf.tobytes()
+
+    # ─── Step 4: HTML 生成 + Playwright 截图 ───
+
+    async def _generate_html(self, image_bytes: bytes) -> Optional[str]:
+        """Heavy VLM 生成 HTML。失败返回 None。"""
+        b64, mime = self._encode_image(image_bytes)
+        html = await self._call_vlm_heavy(
+            b64, mime, PROMPT_GENERATE_HTML, max_tokens=4096
+        )
+        if not html:
+            return None
+        # 剥掉 markdown 代码块
+        m = re.search(r"```(?:html)?\s*(.*?)\s*```", html, re.DOTALL)
+        if m:
+            html = m.group(1)
+        html = html.strip()
+        if not html.lower().startswith("<!doctype") and not html.lower().startswith("<html"):
+            # 包一层
+            html = (
+                "<!DOCTYPE html><html><head><meta charset='utf-8'>"
+                "<style>body{font-family:'PingFang SC','Microsoft YaHei',sans-serif;"
+                "max-width:1000px;margin:40px auto;padding:0 20px;line-height:1.7;"
+                "background:#fff;color:#111;}</style></head><body>"
+                f"{html}</body></html>"
+            )
+        return html
+
+    async def _screenshot_html(self, html: str) -> bytes:
+        """Playwright 加载 HTML → PNG bytes。"""
+        from playwright.async_api import async_playwright
+        async with self._pw_lock:
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(headless=True)
+                try:
+                    page = await browser.new_page(viewport={"width": 1200, "height": 1600})
+                    await page.set_content(html, wait_until="networkidle", timeout=30000)
+                    img = await page.screenshot(type="png", full_page=True)
+                    return img
+                finally:
+                    await browser.close()
+
+    # ─── Step 5: VLM 描述（3 次退避重试，软失败） ───
+
+    async def _describe_with_retry(
+        self, original_bytes: bytes, optimized_bytes: bytes
+    ) -> Optional[str]:
+        """VLM 描述：用优化后图片（优先）/原图，失败静默重试 3 次退避，全失败返回 None。"""
+        # 优先 optimized
+        for attempt, img_bytes in enumerate([optimized_bytes, original_bytes]):
+            if not img_bytes:
+                continue
+            b64, mime = self._encode_image(img_bytes)
+            # 每个图片源试 3 次（退避：2s, 4s）
+            for retry in range(3):
+                try:
+                    resp = await self._call_vlm_heavy(
+                        b64, mime, PROMPT_DESCRIBE_IMAGE, max_tokens=256
+                    )
+                    if resp and resp.strip():
+                        return resp.strip()
+                except Exception as e:
+                    logger.warning(
+                        f"[Pipeline] describe attempt {retry + 1} source={attempt} failed: {e}"
+                    )
+                if retry < 2:
+                    await asyncio.sleep(2 ** (retry + 1))  # 2s, 4s
+            # optimized 失败，尝试 original
+        return None
+
+    # ════════════════════════════════════════
+    # 管线主流程
+    # ════════════════════════════════════════
+
+    async def _run_photo_pipeline(
+        self, entry_id: str, block_id: str, cos_key: str, user_id: int
+    ) -> None:
+        """拍照新管线：形态判断 → 二值化 → HTML → VLM 描述。"""
+        current_stage: Optional[str] = None
+        try:
+            # Step 1: 标记 processing（已写 display_image=original 兜底）
             self._set_processing(entry_id, block_id, user_id)
 
-            # Step 2: 下载图片（fix(P0-3): 传 user_id 做 cos_key 白名单校验）
-            image_data = self._download_file(cos_key, user_id=user_id)
-            if not image_data:
-                await self._set_failed(entry_id, block_id, user_id, "文件下载失败")
+            # Step 2: 下载原图
+            original_bytes = self._download_file(cos_key, user_id=user_id)
+            if not original_bytes:
+                await self._set_photo_failed(
+                    entry_id, block_id, user_id,
+                    ErrorCode.COS_UPLOAD_FAILED, "文件下载失败", FailedStage.COS_UPLOAD,
+                )
+                return
+            if len(original_bytes) > self.max_image_bytes:
+                await self._set_photo_failed(
+                    entry_id, block_id, user_id,
+                    ErrorCode.COS_UPLOAD_FAILED,
+                    f"图片过大 ({len(original_bytes)} bytes)", FailedStage.COS_UPLOAD,
+                )
                 return
 
-            if len(image_data) > VLM_MAX_IMAGE_BYTES:
-                await self._set_failed(entry_id, block_id, user_id, f"图片过大 ({len(image_data)} bytes)")
+            # Step 3: Speed 形态判断
+            current_stage = FailedStage.CLASSIFY
+            self._publish_stage(entry_id, block_id, current_stage)
+            kind = await self._classify_document(original_bytes)
+
+            if kind == "casual":
+                # 随手拍：放弃优化，仅独立跑 VLM 描述
+                await self._set_photo_active(entry_id, block_id, user_id, display_kind="original")
+                # 软失败隔离的 VLM 描述：失败不影响
+                try:
+                    vlm_desc = await self._describe_with_retry(original_bytes, original_bytes)
+                    if vlm_desc:
+                        await self._write_vlm_description(block_id, vlm_desc, entry_id, user_id)
+                except Exception as e:
+                    logger.warning(f"[Pipeline] casual VLM describe failed (non-fatal): {e}")
                 return
 
-            b64, mime = self._encode_image(image_data)
-
-            # Step 3: VLM 形态判断
-            classification = await self._call_vlm(b64, mime, PROMPT_PHOTO_CLASSIFY, max_tokens=32)
-            classification = (classification or "").strip().lower()
-
-            # Step 4: 根据形态选择处理路径
-            if classification == "handwritten":
-                # 纯手写 → VLM 语义描述（替代二值化，直接提取文字+描述）
-                semantic = await self._call_vlm(b64, mime, PROMPT_INK_SEMANTIC, max_tokens=1024)
-                text = semantic or "[手写内容，VLM 描述失败]"
-                await self._set_completed(entry_id, block_id, user_id, text=text, model_name=VLM_MODEL)
-
-            elif classification == "mixed":
-                # 混合 → VLM→HTML + 手写描述
-                html = await self._call_vlm(b64, mime, PROMPT_PHOTO_HTML_MIXED, max_tokens=4096)
-                if not html:
-                    await self._set_failed(entry_id, block_id, user_id, "VLM HTML 生成失败")
-                    return
-                # 从 HTML 中提取纯文本供搜索
-                text = self._strip_html(html)
-                await self._set_completed(
+            # ─── 文档类：必跑二值化 ───
+            current_stage = FailedStage.COLOR_ID
+            self._publish_stage(entry_id, block_id, current_stage)
+            channels_meta, regularity_score = await self._detect_main_colors(original_bytes)
+            if not channels_meta:
+                await self._set_photo_failed(
                     entry_id, block_id, user_id,
-                    text=text, html=html, model_name=VLM_MODEL,
+                    ErrorCode.VLM_INVALID_RESPONSE, "主色识别失败", FailedStage.COLOR_ID,
                 )
+                return
 
-            else:
-                # printed 或未识别 → VLM→HTML
-                html = await self._call_vlm(b64, mime, PROMPT_PHOTO_HTML_PRINTED, max_tokens=4096)
-                if not html:
-                    await self._set_failed(entry_id, block_id, user_id, "VLM HTML 生成失败")
-                    return
-                text = self._strip_html(html)
-                await self._set_completed(
-                    entry_id, block_id, user_id,
-                    text=text, html=html, model_name=VLM_MODEL,
-                )
+            # Step 3: 各通道二值化
+            current_stage = FailedStage.BINARIZE
+            self._publish_stage(entry_id, block_id, current_stage)
+            binarized_channels: List[BinarizedChannel] = []
+            for ch in channels_meta:
+                bn = await self._binarize_channel(original_bytes, ch)
+                binarized_channels.append(bn)
+
+            # 上传各色道 mask + 融合
+            channels_meta_out: List[dict] = []
+            for bn in binarized_channels:
+                suffix = f"_{bn.color}.webp"
+                key = self._build_block_key(user_id, block_id, suffix)
+                url = self._upload_bytes(key, bn.image_bytes_webp, "image/webp")
+                channels_meta_out.append({
+                    "color": bn.color,
+                    "threshold": bn.threshold,
+                    "iterations": bn.iterations,
+                    "key": key,
+                    "url": url,
+                })
+
+            fused_bytes = self._fuse_channels(original_bytes, binarized_channels)
+            fused_key = self._build_block_key(user_id, block_id, "_fused.webp")
+            fused_url = self._upload_bytes(fused_key, fused_bytes, "image/webp")
+
+            # Step 4: HTML 生成（规整度 >= 0.5 才跑）
+            html_source_key: Optional[str] = None
+            html_source_url: Optional[str] = None
+            screenshot_key: Optional[str] = None
+            screenshot_url: Optional[str] = None
+            display_image = {"kind": "fused", "key": fused_key, "url": fused_url}
+
+            if regularity_score >= 0.5:
+                current_stage = FailedStage.HTML
+                self._publish_stage(entry_id, block_id, current_stage)
+                try:
+                    html_source = await self._generate_html(original_bytes)
+                    if html_source:
+                        html_source_key = self._build_block_key(user_id, block_id, ".html")
+                        html_source_url = self._upload_bytes(
+                            html_source_key, html_source.encode("utf-8"), "text/html"
+                        )
+                        current_stage = FailedStage.SCREENSHOT
+                        self._publish_stage(entry_id, block_id, current_stage)
+                        try:
+                            screenshot = await self._screenshot_html(html_source)
+                            screenshot_key = self._build_block_key(
+                                user_id, block_id, "_screenshot.png"
+                            )
+                            screenshot_url = self._upload_bytes(
+                                screenshot_key, screenshot, "image/png"
+                            )
+                            display_image = {
+                                "kind": "screenshot",
+                                "key": screenshot_key,
+                                "url": screenshot_url,
+                            }
+                        except Exception as e:
+                            logger.warning(
+                                f"[Pipeline] playwright screenshot failed, fallback to fused: {e}"
+                            )
+                            # 失败回落到 fused，不进 failed
+                except Exception as e:
+                    logger.warning(
+                        f"[Pipeline] HTML generation failed, fallback to fused: {e}"
+                    )
+
+            # Step 5: VLM 描述（独立，软失败）
+            current_stage = FailedStage.DESCRIBE
+            self._publish_stage(entry_id, block_id, current_stage)
+            vlm_desc: Optional[str] = None
+            optimized_for_desc = screenshot if screenshot_key else fused_bytes
+            try:
+                vlm_desc = await self._describe_with_retry(original_bytes, optimized_for_desc)
+            except Exception as e:
+                logger.warning(f"[Pipeline] VLM describe failed (non-fatal): {e}")
+
+            # Step 6: 落库 rendered
+            await self._set_photo_completed(
+                entry_id, block_id, user_id,
+                channels=channels_meta_out,
+                fused_key=fused_key, fused_url=fused_url,
+                html_source_key=html_source_key, html_source_url=html_source_url,
+                screenshot_key=screenshot_key, screenshot_url=screenshot_url,
+                display_image=display_image,
+                vlm_description=vlm_desc,
+                model_name=self.vision_heavy.name,
+            )
 
         except Exception as e:
             logger.exception(f"[Pipeline] photo pipeline error: entry={entry_id} block={block_id}")
-            await self._set_failed(entry_id, block_id, user_id, str(e))
+            await self._set_photo_failed(
+                entry_id, block_id, user_id,
+                ErrorCode.VLM_TIMEOUT, str(e)[:200],
+                current_stage or FailedStage.CLASSIFY,
+            )
+
+    async def _write_vlm_description(
+        self, block_id: str, text: str, entry_id: str, user_id: int
+    ) -> None:
+        """随手拍路径专用：写完 vlm_description 后补向量索引（不经过 rendered 流程）。"""
+        db = self._get_db()
+        own_session = self._db is None
+        try:
+            block = db.query(ZentrimBlock).filter(ZentrimBlock.id == block_id).first()
+            if block:
+                data = block.data if isinstance(block.data, dict) else {}
+                data["vlm_description"] = text
+                block.data = data
+                if not block.text or block.text.startswith("["):
+                    block.text = text
+                block.model_name = self.vision_heavy.name
+                db.commit()
+            vector_id = await self._index_block(block_id, text, entry_id, user_id)
+            if vector_id:
+                try:
+                    db2 = self._get_db() if not own_session else SessionLocal()
+                    try:
+                        blk = db2.query(ZentrimBlock).filter(ZentrimBlock.id == block_id).first()
+                        if blk:
+                            blk.vector_id = vector_id
+                            db2.commit()
+                    finally:
+                        if own_session:
+                            db2.close()
+                except Exception as e:
+                    logger.warning(f"[Pipeline] vector_id write-back failed: {e}")
+        except Exception as e:
+            logger.warning(f"[Pipeline] _write_vlm_description failed: {e}")
+        finally:
+            if own_session:
+                db.close()
+
+    # ─── Audio / Ink 管线（保留不动） ───
 
     async def _run_audio_pipeline(self, entry_id: str, block_id: str, cos_key: str, user_id: int) -> None:
-        """录音管线 — ASR 占位
-
-        当前版本仅标记处理中 → 恢复 active。
-        ASR 实际调用待接入（需接入DashScope paraformer 或类似服务）。
-        """
         try:
             self._set_processing(entry_id, block_id, user_id)
-
-            # ASR 占位：当前不实现实际转录
-            # TODO: 接入 ASR 服务（DashScope paraformer-v2 等）
-            # fix(P0-3): 传 user_id 做 cos_key 白名单校验
             audio_data = self._download_file(cos_key, user_id=user_id)
             if not audio_data:
                 await self._set_failed(entry_id, block_id, user_id, "音频下载失败")
                 return
-
-            # 写占位文本
             text = "[ASR 转写待接入]"
             await self._set_completed(entry_id, block_id, user_id, text=text, model_name="asr-placeholder")
-
         except Exception as e:
             logger.exception(f"[Pipeline] audio pipeline error: entry={entry_id} block={block_id}")
             await self._set_failed(entry_id, block_id, user_id, str(e))
 
     async def _run_ink_pipeline(self, entry_id: str, block_id: str, cos_key: str, user_id: int) -> None:
-        """手写画布管线
-
-        画布保存为图片（缩略图或瓦片），VLM 提取语义。
-        当前实现：直接对整张图片做 VLM 语义提取。
-        未来扩展：切 1024x1024 瓦片，并行 VLM，LLM 聚合。
-        """
         try:
             self._set_processing(entry_id, block_id, user_id)
-
-            # fix(P0-3): 传 user_id 做 cos_key 白名单校验
             image_data = self._download_file(cos_key, user_id=user_id)
             if not image_data:
                 await self._set_failed(entry_id, block_id, user_id, "画布图片下载失败")
                 return
-
             if len(image_data) > VLM_MAX_IMAGE_BYTES:
                 await self._set_failed(entry_id, block_id, user_id, f"图片过大 ({len(image_data)} bytes)")
                 return
-
             b64, mime = self._encode_image(image_data)
-
-            # VLM 语义提取
             semantic = await self._call_vlm(b64, mime, PROMPT_INK_SEMANTIC, max_tokens=2048)
             text = semantic or "[手写内容，VLM 描述失败]"
-
             await self._set_completed(entry_id, block_id, user_id, text=text, model_name=VLM_MODEL)
-
         except Exception as e:
             logger.exception(f"[Pipeline] ink pipeline error: entry={entry_id} block={block_id}")
             await self._set_failed(entry_id, block_id, user_id, str(e))
 
     @staticmethod
     def _strip_html(html: str) -> str:
-        """简单 HTML → 纯文本提取（供搜索用 blocks.text）"""
-        import re
-        # 移除 script/style
         html = re.sub(r"<(script|style)[^>]*>.*?</\1>", "", html, flags=re.DOTALL | re.IGNORECASE)
-        # 移除标签
         text = re.sub(r"<[^>]+>", " ", html)
-        # 合并空白
         text = re.sub(r"\s+", " ", text).strip()
         return text
 

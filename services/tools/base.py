@@ -6,7 +6,9 @@ Agent 工具服务 - 基类
 import os
 import re
 import json
+import uuid
 import httpx
+import asyncio
 import logging
 import nest_asyncio
 import time
@@ -30,6 +32,7 @@ from services.tool_registry import tool
 from models.database import SessionLocal, AgentProfile
 from services.virtual_filesystem import VirtualFileSystem
 from services.permission_service import PermissionService, Permission
+from services.tool_log_service import TOOL_LOG_ROOT, cleanup_tool_logs
 
 logger = logging.getLogger(__name__)
 
@@ -169,6 +172,47 @@ class AgentToolsServiceBase:
     TOOL_RESULT_MAX_SIZE = 50000      # 50KB - 超过此大小保存到 VFS
     TOOL_RESULT_PREVIEW_SIZE = 2000   # 2KB - 保留在上下文中的预览大小
 
+    async def _log_tool_result(
+        self,
+        tool_name: str,
+        result: str,
+        call_id: str = None,
+    ) -> str:
+        """将完整工具结果写入系统管理的只读 VFS 日志并返回相对路径。"""
+        now = datetime.now()
+        safe_tool = re.sub(r"[^A-Za-z0-9_.-]+", "_", tool_name or "unknown")
+        safe_tool = safe_tool.strip("._-")[:80] or "unknown"
+        raw_id = call_id or uuid.uuid4().hex
+        safe_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(raw_id))
+        safe_id = safe_id.strip("._-")[:128] or uuid.uuid4().hex
+        log_path = (
+            f"{TOOL_LOG_ROOT}/{now.strftime('%Y-%m-%d')}/"
+            f"{safe_tool}/{safe_id}.log"
+        )
+
+        try:
+            write_result = await asyncio.to_thread(
+                self._vfs.write_tool_log,
+                log_path,
+                result,
+            )
+            if write_result.startswith("OK"):
+                return log_path
+            logger.warning(
+                "[ToolLogs] Failed to persist tool=%s call_id=%s: %s",
+                tool_name,
+                call_id,
+                write_result,
+            )
+        except Exception as e:
+            logger.warning(
+                "[ToolLogs] Failed to persist tool=%s call_id=%s: %s",
+                tool_name,
+                call_id,
+                e,
+            )
+        return ""
+
     async def _truncate_tool_result(
         self,
         result: str,
@@ -176,72 +220,67 @@ class AgentToolsServiceBase:
         tool_args: Dict = None,
         call_id: str = None
     ) -> str:
-        """
-        截断超大的工具结果（P0-Tool-Result-Budget 功能）
-
-        当工具结果超过 50KB 时，将完整结果保存到 VFS，
-        仅返回 2KB 预览 + 提示信息，避免上下文膨胀。
-
-        Args:
-            result: 工具返回的原始结果字符串
-            tool_name: 工具名称（用于日志和路径生成）
-            tool_args: 工具参数（用于日志）
-            call_id: 调用 ID（用于路径生成，可选）
-
-        Returns:
-            截断后的结果字符串（如果需要截断）或原始结果
-        """
-        import uuid
-
+        """双写工具结果；仅在超过 50KB 时缩减返回给上下文的内容。"""
         if result is None:
-            return ""
+            result = ""
         if not isinstance(result, str):
             result = str(result)
 
-        result_bytes = len(result.encode('utf-8'))
+        result_bytes = len(result.encode("utf-8"))
+        log_path = await self._log_tool_result(
+            tool_name=tool_name,
+            result=result,
+            call_id=call_id,
+        )
 
         if result_bytes <= self.TOOL_RESULT_MAX_SIZE:
             return result
 
-        logger.info(f"[P0-Tool-Result-Budget] 工具 {tool_name} 结果 {result_bytes} bytes > {self.TOOL_RESULT_MAX_SIZE}，开始截断")
+        logger.info(
+            "[P0-Tool-Result-Budget] 工具 %s 结果 %s bytes > %s，开始截断",
+            tool_name,
+            result_bytes,
+            self.TOOL_RESULT_MAX_SIZE,
+        )
 
-        now = datetime.now()
-        date_str = now.strftime("%Y-%m-%d")
-        time_str = now.strftime("%H-%M-%S")
-        if call_id:
-            safe_id = call_id[:8] if len(call_id) >= 8 else call_id
+        preview = result[:self.TOOL_RESULT_PREVIEW_SIZE]
+        while len(preview.encode("utf-8")) > self.TOOL_RESULT_PREVIEW_SIZE:
+            preview = preview[:-1]
+
+        if log_path:
+            hint = (
+                f"\n\n---\n[结果超过 50KB ({result_bytes} bytes)，已保存到 VFS: "
+                f"`{log_path}`，此处仅显示前 2KB 预览]\n---\n\n"
+            )
         else:
-            safe_id = uuid.uuid4().hex[:8]
-        filename = f"{date_str}_{time_str}_{safe_id}.md"
-        vfs_path = f"workspace/tool_results/{filename}"
+            hint = (
+                "\n\n---\n[结果超过 50KB，尝试保存到 VFS 失败，"
+                "此处仅显示前 2KB 预览]\n---\n\n"
+            )
+        return preview + hint
 
-        full_content = f"""# 工具结果详情
-
-**工具**: {tool_name}
-**时间**: {now.strftime("%Y-%m-%d %H:%M:%S")}
-**大小**: {result_bytes} bytes
-
-## 参数
-```json
-{json.dumps(tool_args or {}, ensure_ascii=False, indent=2)}
-```
-
-## 结果
-{result}
-"""
-
-        write_result = await self.file_write(path=vfs_path, content=full_content)
-
-        preview_bytes = result[:self.TOOL_RESULT_PREVIEW_SIZE]
-        while len(preview_bytes.encode('utf-8')) > self.TOOL_RESULT_PREVIEW_SIZE:
-            preview_bytes = preview_bytes[:-1]
-
-        if "OK" in write_result or "已写入" in write_result:
-            hint = f"\n\n---\n[结果超过 50KB ({result_bytes} bytes)，已保存到 VFS: `{vfs_path}`，此处仅显示前 2KB 预览]\n---\n\n"
-            return preview_bytes + hint
-        else:
-            hint = f"\n\n---\n[结果超过 50KB，尝试保存到 VFS 失败: {write_result}，此处仅显示前 2KB 预览]\n---\n\n"
-            return preview_bytes + hint
+    @tool(
+        description="清理当前 Agent 的工具调用日志。默认删除 7 天前的日志；可减小 retention_days 提前清理。",
+        category="file",
+    )
+    def cleanup_logs(self, retention_days: int = 7) -> str:
+        """手动清理当前 Agent 的过期工具调用日志。"""
+        if retention_days < 0 or retention_days > 365:
+            return "Error: retention_days 必须在 0 到 365 之间"
+        try:
+            result = cleanup_tool_logs(
+                agent_hash=self.agent_hash,
+                retention_days=retention_days,
+                storage=self._vfs.storage,
+            )
+            return (
+                "OK: 工具日志清理完成，"
+                f"扫描 {result['scanned']} 个，删除 {result['deleted']} 个，"
+                f"失败 {result['failed']} 个，截止日期 {result['cutoff_date']}"
+            )
+        except Exception as e:
+            logger.error(f"[ToolLogs] Manual cleanup failed: {e}")
+            return f"Error: 工具日志清理失败: {e}"
 
     # ========== 配置管理 ==========
 

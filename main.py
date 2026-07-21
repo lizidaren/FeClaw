@@ -398,9 +398,10 @@ async def lifespan(app: FastAPI):
             logger.error("FUSE 不可用，请检查环境（/dev/fuse, fusermount3, pyfuse3）")
             raise RuntimeError("FUSE is required but not available")
 
-    # 启动定期清理任务（每小时清理过期的 ShareReference）
+    # 启动定期清理任务
     import asyncio
     from services.share_service import cleanup_expired_references
+    from services.tool_log_service import cleanup_tool_logs
 
     async def periodic_share_ref_cleanup():
         while True:
@@ -416,17 +417,35 @@ async def lifespan(app: FastAPI):
             except Exception as e:
                 logger.warning(f"Periodic share reference cleanup failed: {e}")
 
+    async def periodic_tool_log_cleanup():
+        while True:
+            try:
+                result = await asyncio.to_thread(cleanup_tool_logs)
+                if result["deleted"] or result["failed"]:
+                    logger.info(
+                        "Tool log cleanup: deleted=%s failed=%s cutoff=%s",
+                        result["deleted"],
+                        result["failed"],
+                        result["cutoff_date"],
+                    )
+            except Exception as e:
+                logger.warning(f"Periodic tool log cleanup failed: {e}")
+            await asyncio.sleep(86400)  # 每天
+
     cleanup_task = asyncio.create_task(periodic_share_ref_cleanup())
+    tool_log_cleanup_task = asyncio.create_task(periodic_tool_log_cleanup())
 
     try:
         yield
     finally:
         # 取消定期清理任务
         cleanup_task.cancel()
-        try:
-            await cleanup_task
-        except asyncio.CancelledError:
-            pass
+        tool_log_cleanup_task.cancel()
+        for task in (cleanup_task, tool_log_cleanup_task):
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
         # Agent V2: 停止所有协处理器
         try:

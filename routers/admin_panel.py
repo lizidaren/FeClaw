@@ -45,7 +45,7 @@ from services.setup_service import (
     update_env,
     verify_provider as svc_verify_provider,
 )
-from utils.auth_dependencies import get_admin_user
+from utils.auth_dependencies import get_admin_user, get_current_user_optional
 
 logger = logging.getLogger(__name__)
 
@@ -60,14 +60,23 @@ router = APIRouter(prefix="/admin", tags=["Admin Panel"])
 
 @router.get("", response_class=HTMLResponse)
 @router.get("/", response_class=HTMLResponse)
-async def admin_index(_admin: User = Depends(get_admin_user)):
+async def admin_index(request: Request, user = Depends(get_current_user_optional)):
     """管理后台首页 → 重定向到 /admin/settings"""
+    if not user:
+        return RedirectResponse(url="/login", status_code=302)
+    if not user.is_admin:
+        return HTMLResponse(FORBIDDEN_PAGE_HTML, status_code=403)
     return RedirectResponse(url="/admin/settings", status_code=302)
 
 
 @router.get("/settings", response_class=HTMLResponse)
-async def admin_settings_page(request: Request, _admin: User = Depends(get_admin_user)):
+async def admin_settings_page(request: Request, db: Session = Depends(get_db),
+                              user = Depends(get_current_user_optional)):
     """渲染 admin_settings.html。前端通过 JS fetch /admin/config 和 /admin/stats 加载数据。"""
+    if not user:
+        return RedirectResponse(url="/login", status_code=302)
+    if not user.is_admin:
+        return HTMLResponse(FORBIDDEN_PAGE_HTML, status_code=403)
     from fastapi.templating import Jinja2Templates
     templates = Jinja2Templates(
         directory=os.path.join(
@@ -78,7 +87,7 @@ async def admin_settings_page(request: Request, _admin: User = Depends(get_admin
     resp = templates.TemplateResponse(
         request,
         "admin_settings.html",
-        {"request": request, "current_user": _admin},
+        {"request": request, "current_user": user},
     )
     resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
     return resp

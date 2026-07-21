@@ -260,6 +260,8 @@ async def vfs_file_delete(path: str, request: Request):
     cos_key, err = manager.vfs._resolve_path(path)
     if err:
         return {"error": err}
+    if manager.vfs._is_tool_log_path(cos_key):
+        return {"error": "/.logs/ is a read-only system directory"}
     manager.vfs.storage.delete_file_by_key(cos_key)
     manager.meta_cache.invalidate_dir(
         cos_key.rsplit("/", 1)[0] if "/" in cos_key else ""

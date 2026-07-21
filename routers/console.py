@@ -110,10 +110,20 @@ async def create_agent(
        新端点支持 agent_type 参数。
        计划迁移方向 → /api/user/agents
        新端点在 routers/user.py。
+
+    Body:
+        name: Agent 名称
+        agent_mode: "classic" | "im"（默认 classic）
+        template_id: 可选。提供时调用 TemplateManager.apply_template 绑定模板
+                     （写入 agent.template_id / agent.template_version）。
+                     前端应在随后的 /initialize 调用里再传入同一 template_id，
+                     以便 initialize_agent 用模板的 persona/tools 覆盖默认值。
     """
     body = await request.json()
     name = body.get("name", "")
     agent_mode = body.get("agent_mode", "classic")
+    template_id = body.get("template_id")
+
     if agent_mode not in ("classic", "im"):
         raise HTTPException(status_code=400, detail={"message": "agent_mode must be 'classic' or 'im'"})
 
@@ -121,6 +131,13 @@ async def create_agent(
         agent = agent_init_service.create_agent(db, user.id, name=name, agent_mode=agent_mode)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+    template_info = None
+    if template_id:
+        from services.template_manager import TemplateManager
+        template_info = TemplateManager.apply_template(db, agent, template_id)
+        # 同一事务内 flush 即可，由调用方（前端 /initialize）决定 commit 时机。
+        # 这里只 flush 一次，metadata 随后续 init 一起 commit。
 
     return JSONResponse(content={
         "status": "success",
@@ -130,7 +147,8 @@ async def create_agent(
             "name": agent.name,
             "status": agent.status,
             "created_at": agent.created_at.isoformat() if agent.created_at else None
-        }
+        },
+        "template": template_info
     })
 
 

@@ -3,7 +3,7 @@
 """
 import json
 import pytest
-from unittest.mock import Mock, patch, MagicMock
+from unittest.mock import Mock, patch, MagicMock, AsyncMock
 
 
 class TestSubagentSummary:
@@ -12,9 +12,9 @@ class TestSubagentSummary:
     def test_summarize_output_structure(self):
         """测试结构化摘要生成"""
         # Mock 依赖
-        with patch('services.agent_tools_service.VirtualFileSystem') as mock_vfs_class, \
-             patch('services.agent_tools_service.PermissionService') as mock_perm_class, \
-             patch('services.agent_tools_service.SessionLocal') as mock_session:
+        with patch('services.tools.base.VirtualFileSystem') as mock_vfs_class, \
+             patch('services.tools.base.PermissionService') as mock_perm_class, \
+             patch('services.tools.base.SessionLocal') as mock_session:
 
             # Mock 数据库查询
             mock_db = Mock()
@@ -47,8 +47,6 @@ class TestSubagentSummary:
                 result = service._summarize_subagent_output(
                     task="创建项目配置文件",
                     output="这是一个很长的输出..." * 100,
-                    model="test-model",
-                    elapsed_time=10.5
                 )
 
             # 验证返回结构
@@ -66,9 +64,9 @@ class TestSubagentSummary:
 
     def test_format_summary_output_success(self):
         """测试格式化摘要输出（成功情况）"""
-        with patch('services.agent_tools_service.VirtualFileSystem') as mock_vfs_class, \
-             patch('services.agent_tools_service.PermissionService') as mock_perm_class, \
-             patch('services.agent_tools_service.SessionLocal') as mock_session:
+        with patch('services.tools.base.VirtualFileSystem') as mock_vfs_class, \
+             patch('services.tools.base.PermissionService') as mock_perm_class, \
+             patch('services.tools.base.SessionLocal') as mock_session:
 
             # Mock 数据库查询
             mock_db = Mock()
@@ -89,7 +87,11 @@ class TestSubagentSummary:
                 "failure_reason": None
             }
 
-            result = service._format_summary_output(summary, 5000, "workspace/subagent_logs/test.md")
+            result = service._format_summary_output(
+                summary,
+                5000,
+                ".logs/tools/2026-07-19/subagent/test.log",
+            )
 
             # 验证输出格式
             assert "📋 **输出摘要**" in result
@@ -97,13 +99,13 @@ class TestSubagentSummary:
             assert "📝 **关键结果**" in result
             assert "📁 **创建的文件**" in result
             assert "✏️ **修改的文件**" in result
-            assert "workspace/subagent_logs/test.md" in result
+            assert ".logs/tools/2026-07-19/subagent/test.log" in result
 
     def test_format_summary_output_failure(self):
         """测试格式化摘要输出（失败情况）"""
-        with patch('services.agent_tools_service.VirtualFileSystem') as mock_vfs_class, \
-             patch('services.agent_tools_service.PermissionService') as mock_perm_class, \
-             patch('services.agent_tools_service.SessionLocal') as mock_session:
+        with patch('services.tools.base.VirtualFileSystem') as mock_vfs_class, \
+             patch('services.tools.base.PermissionService') as mock_perm_class, \
+             patch('services.tools.base.SessionLocal') as mock_session:
 
             # Mock 数据库查询
             mock_db = Mock()
@@ -132,9 +134,9 @@ class TestSubagentSummary:
 
     def test_json_extraction_from_markdown(self):
         """测试从 markdown 代码块中提取 JSON"""
-        with patch('services.agent_tools_service.VirtualFileSystem') as mock_vfs_class, \
-             patch('services.agent_tools_service.PermissionService') as mock_perm_class, \
-             patch('services.agent_tools_service.SessionLocal') as mock_session:
+        with patch('services.tools.base.VirtualFileSystem') as mock_vfs_class, \
+             patch('services.tools.base.PermissionService') as mock_perm_class, \
+             patch('services.tools.base.SessionLocal') as mock_session:
 
             # Mock 数据库查询
             mock_db = Mock()
@@ -167,50 +169,45 @@ class TestSubagentSummary:
                 result = service._summarize_subagent_output(
                     task="测试任务",
                     output="长输出...",
-                    model="test-model",
-                    elapsed_time=5.0
                 )
 
             assert result["task_completed"] == True
             assert result["key_results"] == "测试成功"
 
-    def test_read_subagent_log(self):
-        """测试读取子代理日志"""
-        with patch('services.agent_tools_service.VirtualFileSystem') as mock_vfs_class, \
-             patch('services.agent_tools_service.PermissionService') as mock_perm_class, \
-             patch('services.agent_tools_service.SessionLocal') as mock_session:
-
-            # Mock 数据库查询
-            mock_db = Mock()
-            mock_agent = Mock()
-            mock_agent.user_id = 1
-            mock_db.query.return_value.filter.return_value.first.return_value = mock_agent
-            mock_session.return_value = mock_db
+    @pytest.mark.asyncio
+    async def test_read_subagent_log(self):
+        """测试读取新路径子代理日志，并兼容旧日志。"""
+        with patch('services.tools.base.VirtualFileSystem'), \
+             patch('services.tools.base.PermissionService'), \
+             patch('services.tools.base.SessionLocal'):
 
             from services.agent_tools_service import AgentToolsService
 
             service = AgentToolsService(agent_hash="test")
+            service.file_read = AsyncMock(return_value="# 日志内容\n测试日志...")
 
-            # Mock file_read 方法
-            service.file_read = Mock(return_value="# 日志内容\n测试日志...")
+            new_path = ".logs/tools/2026-07-19/subagent/call_123.log"
+            result = await service.read_subagent_log(new_path)
+            assert result == "# 日志内容\n测试日志..."
+            service.file_read.assert_awaited_with(new_path)
 
-            # 测试有效路径
-            result = service.read_subagent_log("workspace/subagent_logs/2024-01-15_10-30-00_test.md")
+            legacy_path = "workspace/subagent_logs/2024-01-15_10-30-00_test.md"
+            result = await service.read_subagent_log(legacy_path)
             assert result == "# 日志内容\n测试日志..."
 
-            # 测试无效路径
-            result = service.read_subagent_log("invalid/path.md")
+            result = await service.read_subagent_log("invalid/path.md")
             assert "Error: 无效的日志路径" in result
 
-            # 测试非 .md 文件
-            result = service.read_subagent_log("workspace/subagent_logs/test.txt")
-            assert "Error: 日志文件应为 .md 格式" in result
+            result = await service.read_subagent_log(
+                ".logs/tools/2026-07-19/subagent/test.txt"
+            )
+            assert "Error: 无效的日志路径" in result
 
     def test_fallback_on_json_parse_error(self):
         """测试 JSON 解析失败时的降级处理"""
-        with patch('services.agent_tools_service.VirtualFileSystem') as mock_vfs_class, \
-             patch('services.agent_tools_service.PermissionService') as mock_perm_class, \
-             patch('services.agent_tools_service.SessionLocal') as mock_session:
+        with patch('services.tools.base.VirtualFileSystem') as mock_vfs_class, \
+             patch('services.tools.base.PermissionService') as mock_perm_class, \
+             patch('services.tools.base.SessionLocal') as mock_session:
 
             # Mock 数据库查询
             mock_db = Mock()
@@ -235,8 +232,6 @@ class TestSubagentSummary:
                 result = service._summarize_subagent_output(
                     task="测试任务",
                     output="这是一个长输出..." * 100,
-                    model="test-model",
-                    elapsed_time=5.0
                 )
 
             # 验证降级处理：返回基本摘要

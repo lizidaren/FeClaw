@@ -13,6 +13,7 @@
 """
 
 import logging
+from dataclasses import dataclass
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -128,6 +129,13 @@ MODEL_REGISTRY = {
         "provider": "doubao",
         "supports_thinking": False,
         "supports_vision": True,
+    },
+    # T 阶段别名：vision.heavy.name 的稳定短名（不带日期版本号）
+    "doubao-seed-2.0-lite": {
+        "provider": "doubao",
+        "supports_thinking": False,
+        "supports_vision": True,
+        "_alias_of": "doubao-seed-2-0-lite-260215",
     },
     "doubao-seed-2-1-turbo-260628": {
         "provider": "doubao",
@@ -436,3 +444,99 @@ def list_tts_models() -> list:
         [model_name, ...]
     """
     return list(TTS_MODEL_REGISTRY.keys())
+
+
+# ════════════════════════════════════════
+# Vision Model 分级配置（T 代理：拆 zentrim_pipeline 硬编码）
+# ════════════════════════════════════════
+
+@dataclass
+class VisionModelConfig:
+    """多模态（Vision）模型配置 — 集中管理 Speed / Heavy 两档。
+
+    Zentrim pipeline 把视觉任务拆成两档：
+      - Speed:  轻量快速多模态，用于形态判断（文档/随手拍）
+      - Heavy:  重量级多模态，用于主色识别 / HTML 生成 / VLM 描述
+
+    两者都是多模态模型（都支持图片输入），只是成本和速度不同。
+    """
+    name: str                # 实际模型名（注册表 key），e.g. "qwen3.6-flash"
+    display_name: str        # 给人看的名称
+    cost_per_call: float     # 单次调用成本（用于计费/监控）
+    max_image_size_mb: int   # 单图上限
+    max_tokens: int          # 单次输出 token 上限
+    timeout_s: int           # HTTP 超时秒数
+
+
+# 兜底默认 — 没从 env/config 读到时用这套
+# 注：name 是人/代码里用的稳定标识符（不一定是 registry key — registry key 可能带日期版本号）
+#     resolve() 未命中时会回退到 MAIN_TEXT_MODEL 的 provider，不阻断调用
+_DEFAULT_VISION_SPEED = VisionModelConfig(
+    name="qwen3.6-flash",
+    display_name="Qwen3.6 Flash",
+    cost_per_call=0.001,
+    max_image_size_mb=20,
+    max_tokens=2048,
+    timeout_s=15,
+)
+
+_DEFAULT_VISION_HEAVY = VisionModelConfig(
+    name="doubao-seed-2.0-lite",
+    display_name="豆包 Seed 2.0 Lite",
+    cost_per_call=0.01,
+    max_image_size_mb=20,
+    max_tokens=4096,
+    timeout_s=60,
+)
+
+
+def _resolve_vision_config(
+    configured_name: Optional[str],
+    default: VisionModelConfig,
+    role: str,
+) -> VisionModelConfig:
+    """把 settings.VISION_*_MODEL 解析成 VisionModelConfig。
+
+    解析规则：
+      1. settings 中有值 → 复用 default 的成本/超时/tokens，只换 name + display_name
+         （避免每个新模型都要在 settings 里塞 6 个字段）
+      2. settings 为空 → 用 default 并打 warning
+      3. settings 中的名字不在 MODEL_REGISTRY → 仍接受（不强制校验，
+         因为 registry 可能滞后于配置；z 阶段再统一）
+    """
+    if configured_name and configured_name.strip():
+        # 有配置：name 用配置的，display_name 沿用 default
+        if configured_name != default.name:
+            logger.info(
+                f"[model_registry] vision.{role} overridden: "
+                f"{default.name} → {configured_name}"
+            )
+        from dataclasses import replace
+        return replace(default, name=configured_name)
+
+    # 没配置：兜底
+    logger.warning(
+        f"[model_registry] vision.{role} not configured, using fallback default: "
+        f"{default.name}"
+    )
+    return default
+
+
+def get_vision_speed() -> VisionModelConfig:
+    """轻量快速多模态 — 形态判断用（文档/随手拍）"""
+    try:
+        from config import settings
+        configured = getattr(settings, "VISION_SPEED_MODEL", None)
+    except Exception:
+        configured = None
+    return _resolve_vision_config(configured, _DEFAULT_VISION_SPEED, "speed")
+
+
+def get_vision_heavy() -> VisionModelConfig:
+    """重量级多模态 — 主色识别 / HTML 生成 / VLM 描述"""
+    try:
+        from config import settings
+        configured = getattr(settings, "VISION_HEAVY_MODEL", None)
+    except Exception:
+        configured = None
+    return _resolve_vision_config(configured, _DEFAULT_VISION_HEAVY, "heavy")

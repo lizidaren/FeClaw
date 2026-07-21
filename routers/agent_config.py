@@ -18,10 +18,31 @@ from config import settings
 from models.database import get_db, AgentProfile, AgentConfig
 from services.agent_init_service import agent_init_service, DEFAULT_SOUL, DEFAULT_IDENTITY
 from utils.auth import get_current_user, User
+from services.model_registry import resolve as resolve_model, PROVIDER_META
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Agent Config"])
+
+
+# ── 根据 AGENT_LLM_MODEL 配置获取 API 请求参数 ─────
+def _llm_request_params() -> tuple:
+    """返回 (base_url, api_key, model_name) 三元组。"""
+    model = settings.AGENT_LLM_MODEL or settings.MAIN_TEXT_MODEL or "deepseek-chat"
+    info = resolve_model(model)
+    provider_id = info.get("provider", "deepseek")
+    api_key_attr = info.get("api_key_attr", "DEEPSEEK_API_KEY")
+    api_key = getattr(settings, api_key_attr, "") or ""
+    meta = PROVIDER_META.get(provider_id, {})
+    base_url = meta.get("base_url", info.get("base_url", ""))
+    if provider_id == "kimi" and not base_url:
+        base_url = getattr(settings, "KIMI_BASE_URL", "https://api.moonshot.cn/v1")
+    if not api_key:
+        api_key = settings.DEEPSEEK_API_KEY or ""
+    if not base_url:
+        base_url = "https://api.deepseek.com"
+        model = "deepseek-chat"
+    return base_url.rstrip("/"), api_key, model
 
 
 # ── AI 生成的 prompt 安全红线（附加到 system_prompt 末尾） ─────
@@ -94,15 +115,16 @@ async def generate_persona(
     )
 
     try:
+        base_url, api_key, model_name = _llm_request_params()
         async with httpx.AsyncClient(timeout=60) as client:
             resp = await client.post(
-                "https://api.deepseek.com/chat/completions",
+                base_url + "/chat/completions",
                 headers={
-                    "Authorization": f"Bearer {settings.DEEPSEEK_API_KEY}",
+                    "Authorization": f"Bearer {api_key}",
                     "Content-Type": "application/json"
                 },
                 json={
-                    "model": settings.AGENT_LLM_MODEL,
+                    "model": model_name,
                     "messages": [
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": f"我想要一个这样的 Agent：{user_description}"}
@@ -114,7 +136,7 @@ async def generate_persona(
             data = resp.json()
             content = data["choices"][0]["message"]["content"]
     except Exception as e:
-        logger.error(f"DeepSeek API call failed: {e}")
+        logger.error(f"AI generation API call failed: {e}")
         raise HTTPException(status_code=502, detail=f"AI 生成失败: {str(e)}")
 
     # Parse sections
@@ -182,17 +204,18 @@ async def generate_persona_stream(
 
     async def event_stream():
         buffer = ""
+        base_url, api_key, model_name = _llm_request_params()
         try:
             async with httpx.AsyncClient(timeout=120) as client:
                 async with client.stream(
                         "POST",
-                        "https://api.deepseek.com/chat/completions",
+                        base_url + "/chat/completions",
                         headers={
-                            "Authorization": f"Bearer {settings.DEEPSEEK_API_KEY}",
+                            "Authorization": f"Bearer {api_key}",
                             "Content-Type": "application/json"
                         },
                         json={
-                            "model": settings.AGENT_LLM_MODEL,
+                            "model": model_name,
                             "messages": [
                                 {"role": "system", "content": system_prompt},
                                 {"role": "user", "content": "我想要一个这样的 Agent：" + user_description}

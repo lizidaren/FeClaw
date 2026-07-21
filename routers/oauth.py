@@ -330,10 +330,45 @@ async def oauth_callback(
 
 
 class OAuthExchangeRequest(BaseModel):
-    """Mobile 用 Platform access_token 换 FeClaw JWT pair（P0-A-1）"""
-    platform_token: str = Field(..., description="Platform 登录后拿到的 access_token")
-    # 可选：客户端拿到 id_token 时一并传，服务端可选择验签（此处暂不强制）
-    id_token: Optional[str] = Field(default=None, description="可选 Platform id_token（OIDC）")
+    """
+    Mobile OAuth exchange request — supports two flows:
+
+    1. **Legacy (P0-A-1)** — mobile already exchanged the code against Platform
+       and got a Platform access_token. Just send ``platform_token`` and FeClaw
+       verifies it via ``Platform /api/auth/me`` and issues FeClaw JWT pair.
+
+    2. **PKCE (FeClaw-Mobile)** — mobile generated a ``code_verifier`` and
+       sent the ``code`` straight to FeClaw. FeClaw relays both to Platform
+       ``/token`` (no client_secret — PKCE replaces shared-secret trust),
+       then fetches userinfo and issues FeClaw JWT pair.
+
+    All three fields are optional individually but **at least one of the two
+    flows must be present**. ``extra="forbid"`` is intentionally NOT set so
+    the mobile client can also forward ``redirect_uri`` (Platform ignores
+    unknown fields on the token endpoint when it accepts them).
+    """
+    # Legacy flow
+    platform_token: Optional[str] = Field(
+        default=None,
+        description="Platform access_token（legacy 流程，mobile 已自行换过 code）",
+    )
+    id_token: Optional[str] = Field(
+        default=None,
+        description="可选 Platform id_token（OIDC）",
+    )
+    # PKCE flow（FeClaw-Mobile 主流）
+    code: Optional[str] = Field(
+        default=None,
+        description="Platform 授权码（PKCE 流程）",
+    )
+    code_verifier: Optional[str] = Field(
+        default=None,
+        description="PKCE code_verifier（RFC 7636）",
+    )
+    redirect_uri: Optional[str] = Field(
+        default=None,
+        description="可选：mobile callback URI（与 /authorize 时一致）",
+    )
 
 
 class OAuthRefreshRequest(BaseModel):
@@ -386,34 +421,130 @@ async def _verify_platform_token_via_me(access_token: str) -> dict:
 
 @router.post("/exchange")
 async def oauth_exchange(
-    body: OAuthExchangeRequest,
+    body: Optional[OAuthExchangeRequest] = None,
     db: Session = Depends(get_db),
 ):
     """
-    Mobile OAuth — 用 Platform access_token 换 FeClaw JWT pair（P0-A-1）。
+    Mobile OAuth — exchange Platform credentials for FeClaw JWT pair.
 
-    请求: { "platform_token": "<Platform access_token>" }
-    响应: {
-      "status": "success",
-      "token": "<FeClaw access_token>",
-      "refresh_token": "<FeClaw refresh_token>",
-      "expires_in": <seconds>,
-      "refresh_expires_in": <seconds>,
-      "user_id": <int>,
-      "username": <str>,
-      "auth_method": "platform"
-    }
+    Two flows supported (auto-detected by request body):
 
-    行为：
-    1. 调 Platform /api/auth/me 验证 platform_token
-    2. 按 platform_user_id 匹配/创建 FeClaw User（helper 抽自 desktop_api）
-    3. 签发 access_token (HS256, type=access) + refresh_token (HS256, type=refresh)
+    **PKCE flow (FeClaw-Mobile):**
+      请求: { "code": "...", "code_verifier": "..." }
+      流程: POST Platform /token (code + code_verifier) → Platform /userinfo →
+            find/create FeClaw User → issue FeClaw access + refresh
+
+    **Legacy flow (P0-A-1):**
+      请求: { "platform_token": "<Platform access_token>" }
+      流程: Platform /api/auth/me → find/create FeClaw User → issue FeClaw
+            access + refresh
+
+    响应（两种流程一致）:
+      {
+        "status": "success",
+        "token": "<FeClaw access_token>",
+        "refresh_token": "<FeClaw refresh_token>",
+        "expires_in": <seconds>,
+        "refresh_expires_in": <seconds>,
+        "user_id": <int>,
+        "username": <str>,
+        "auth_method": "platform"
+      }
+
+    Body 全空 → 400；body 完全缺失（None）同样 400（不返回 422）。
     """
+    if body is None:
+        raise HTTPException(status_code=400, detail={
+            "status": "invalid_request",
+            "message": "either code+code_verifier (PKCE) or platform_token (legacy) required",
+        })
+
+    # ────────────────────────────────────────────────────────────
+    # 输入校验：两种流程必须二选一
+    # ────────────────────────────────────────────────────────────
+    # 半截 PKCE 请求（只给了 code 或 verifier 之一）— 先报更具体的错
+    if (body.code and not body.code_verifier) or (body.code_verifier and not body.code):
+        raise HTTPException(status_code=400, detail={
+            "status": "invalid_request",
+            "message": "code and code_verifier must be provided together (PKCE)",
+        })
+
+    has_pkce = bool(body.code and body.code_verifier)
+    has_legacy = bool(body.platform_token)
+
+    if not has_pkce and not has_legacy:
+        raise HTTPException(status_code=400, detail={
+            "status": "invalid_request",
+            "message": "either code+code_verifier (PKCE) or platform_token (legacy) required",
+        })
+
+    # ────────────────────────────────────────────────────────────
+    # 流程 A：PKCE（FeClaw-Mobile）
+    # ────────────────────────────────────────────────────────────
+    if has_pkce:
+        # 使用 verbose 版本，区分 invalid_grant（4xx）和网络错误（5xx / 0）
+        pkce_result = await oauth_service.exchange_code_with_pkce_verbose(
+            code=body.code,
+            code_verifier=body.code_verifier,
+            redirect_uri=body.redirect_uri,
+        )
+        if not pkce_result.get("ok"):
+            status = pkce_result.get("status", 0)
+            error_code = pkce_result.get("error", "unknown")
+            error_desc = pkce_result.get("error_description", "")
+            # 4xx（如 invalid_grant / invalid_request）→ 502 给客户端，
+            # 让上层明确知道是 Platform 拒绝了 code，而不是 FeClaw 自身故障
+            logger.warning(
+                f"[oauth.exchange.pkce] Platform rejected code: "
+                f"status={status} error={error_code} description={error_desc}"
+            )
+            raise HTTPException(
+                status_code=502,
+                detail={
+                    "status": "platform_token_exchange_failed",
+                    "error": error_code,
+                    "message": error_desc or "Platform rejected the authorization code",
+                    "upstream_status": status,
+                },
+            )
+
+        token_data = pkce_result["data"]
+        access_token = token_data.get("access_token")
+        if not access_token:
+            logger.error("[oauth.exchange.pkce] Platform /token returned no access_token")
+            raise HTTPException(status_code=502, detail={
+                "status": "platform_token_exchange_failed",
+                "message": "Platform /token response missing access_token",
+            })
+
+        # 拿 userinfo（复用现有 helper，与 web callback 一致）
+        user_info = await oauth_service.get_userinfo(access_token)
+        if not user_info:
+            raise HTTPException(status_code=502, detail={
+                "status": "platform_userinfo_failed",
+                "message": "Platform userinfo endpoint unreachable",
+            })
+
+        # 复用一站式 helper：platform user_info -> FeClaw access + refresh
+        # 这一步会 match/create FeClaw User，并签发 HS256 token pair。
+        token_pair = issue_token_pair_for_platform_user(db, user_info)
+        logger.info(
+            f"[oauth.exchange.pkce] user_id={token_pair['user_id']} "
+            f"username={token_pair['username']} auth_method=platform"
+        )
+        return JSONResponse(content={
+            "status": "success",
+            **token_pair,
+        })
+
+    # ────────────────────────────────────────────────────────────
+    # 流程 B：Legacy platform_token
+    # ────────────────────────────────────────────────────────────
     user_info = await _verify_platform_token_via_me(body.platform_token)
     token_pair = issue_token_pair_for_platform_user(db, user_info)
 
     logger.info(
-        f"[oauth.exchange] user_id={token_pair['user_id']} "
+        f"[oauth.exchange.legacy] user_id={token_pair['user_id']} "
         f"username={token_pair['username']} auth_method=platform"
     )
 
@@ -476,17 +607,21 @@ async def oauth_mobile_login(
     request: Request,
     scheme: str = Query(default="feclaw", description="Mobile app 自定义 URL scheme（如 feclaw）"),
     state: str = Query(default="", description="Mobile 生成的 CSRF token（必填）"),
+    code_challenge: str = Query(default="", description="PKCE code_challenge（FeClaw-Mobile 推荐）"),
+    code_challenge_method: str = Query(default="S256", description="PKCE method（默认 S256，可选 plain）"),
 ):
     """
     Mobile 入口：302 跳转到 Platform authorize，redirect_uri 用 `<scheme>://oauth/callback`（P1-A-3）。
 
-    Mobile 端流程：
-      1. App 启动 → 调 `GET /api/oauth/mobile-login?scheme=feclaw&state=<random>`
+    Mobile 端流程（PKCE 推荐，FeClaw-Mobile 默认走此路径）：
+      1. App 启动 → 生成 code_verifier + code_challenge
+         → 调 `GET /api/oauth/mobile-login?scheme=feclaw&state=<random>&code_challenge=<...>&code_challenge_method=S256`
       2. 拿到 authorize URL → `Linking.openURL(url)`
       3. 在系统浏览器完成 Platform 登录
       4. Platform 302 → `feclaw://oauth/callback?code=...&state=...`
-      5. Mobile 捕获 deep link → 用 code 调 Platform `/api/oauth/token` 拿 access_token
-      6. 调 `POST /api/oauth/exchange` 拿 FeClaw token pair
+      5. Mobile 捕获 deep link → 调 `POST /api/oauth/exchange`
+         body = { code, code_verifier, redirect_uri: "<scheme>://oauth/callback" }
+      6. FeClaw 用 code + code_verifier 换 Platform token → 拿 userinfo → 签 FeClaw JWT pair
 
     本端点也会把 state 写到 cookie（domain 设为 mobile 域），但因为 redirect_uri 是
     自定义 scheme，cookie 校验不可靠 —— **Mobile 必须自行在 /exchange 调用前用
@@ -506,6 +641,19 @@ async def oauth_mobile_login(
             "status": "invalid_state",
             "message": "state 必填且长度 ≥ 8（防 CSRF）",
         })
+
+    # PKCE 参数校验：method 必须是 S256 或 plain；challenge 必须 base64url 安全字符
+    if code_challenge:
+        if code_challenge_method not in ("S256", "plain"):
+            raise HTTPException(status_code=400, detail={
+                "status": "invalid_pkce",
+                "message": "code_challenge_method 必须是 'S256' 或 'plain'",
+            })
+        if not re.match(r"^[A-Za-z0-9_\-]{43,128}$", code_challenge):
+            raise HTTPException(status_code=400, detail={
+                "status": "invalid_pkce",
+                "message": "code_challenge 必须是 43-128 个字符的 [A-Za-z0-9_-] 串",
+            })
 
     # 平台必须支持 mobile custom scheme 回调，否则 authorize 时 Platform 会拒绝
     redirect_uri = f"{scheme}://oauth/callback"
@@ -528,10 +676,17 @@ async def oauth_mobile_login(
         "state": state,
         "scope": "openid profile email",
     }
+    # 转发 PKCE 参数（如有）— Platform 会把它们存进 auth code 上下文，
+    # 等 FeClaw 后续 POST /token 时校验 code_verifier 与之匹配。
+    if code_challenge:
+        params["code_challenge"] = code_challenge
+        params["code_challenge_method"] = code_challenge_method
+
     authorize_url = f"{base_authorize}?{urlencode(params)}"
 
     logger.info(
-        f"[oauth.mobile-login] 302 -> Platform authorize (scheme={scheme}, state={state[:8]}...)"
+        f"[oauth.mobile-login] 302 -> Platform authorize (scheme={scheme}, state={state[:8]}..., "
+        f"pkce={'yes' if code_challenge else 'no'})"
     )
 
     # 可选：在 cookie 里写一份 state（best-effort，对 mobile scheme 不保证可用）

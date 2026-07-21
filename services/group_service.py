@@ -708,7 +708,12 @@ class GroupDispatchService:
                     per_timeout = max(1.0, min(GROUP_TOOL_PER_TIMEOUT, remaining))
 
                     tool_result = await self._execute_group_tool(
-                        agent_hash, group_id, func_name, args, timeout=per_timeout
+                        agent_hash,
+                        group_id,
+                        func_name,
+                        args,
+                        timeout=per_timeout,
+                        call_id=tool_call_id,
                     )
 
                     if tool_result.startswith("Error:"):
@@ -832,26 +837,40 @@ class GroupDispatchService:
         tool_name: str,
         args: Dict[str, Any],
         timeout: float,
+        call_id: str = None,
     ) -> str:
-        """执行单个群聊工具调用，带超时和权限过滤。"""
+        """执行单个群聊工具调用，带超时、权限过滤和统一结果日志。"""
+        tools_service = await self._get_or_create_tools(agent_hash, group_id)
+
+        async def finalize(value, tool_args=None) -> str:
+            result_str = value if isinstance(value, str) else json.dumps(
+                value, ensure_ascii=False
+            )
+            return await tools_service._truncate_tool_result(
+                result=result_str,
+                tool_name=tool_name,
+                tool_args=tool_args or {},
+                call_id=call_id,
+            )
+
         # 权限过滤：不允许的工具直接拒绝
         if tool_name not in GROUP_ALLOWED_TOOLS:
-            return f"Error: 工具 {tool_name} 不允许在群聊中使用"
+            return await finalize(f"Error: 工具 {tool_name} 不允许在群聊中使用")
 
+        valid_args: Dict[str, Any] = {}
         try:
             from services.tool_registry import get_tool
             tool_entry = get_tool(tool_name)
             if not tool_entry:
-                return f"Error: 未知工具 {tool_name}"
+                return await finalize(f"Error: 未知工具 {tool_name}")
 
-            # 懒加载 AgentToolsService
-            tools_service = await self._get_or_create_tools(agent_hash, group_id)
             method = getattr(tools_service, tool_name, None)
             if not method:
-                return f"Error: 工具 {tool_name} 在 AgentToolsService 上不可用"
+                return await finalize(
+                    f"Error: 工具 {tool_name} 在 AgentToolsService 上不可用"
+                )
 
             # 过滤参数
-            valid_args: Dict[str, Any] = {}
             for key in tool_entry["param_names"]:
                 if key in args:
                     valid_args[key] = args[key]
@@ -859,35 +878,31 @@ class GroupDispatchService:
             # 异步/同步分派
             coro_or_result = method(**valid_args)
             if inspect.iscoroutine(coro_or_result):
-                result_str = await asyncio.wait_for(coro_or_result, timeout=timeout)
+                result = await asyncio.wait_for(coro_or_result, timeout=timeout)
             else:
                 # 同步工具放入默认执行器
                 loop = asyncio.get_event_loop()
-                result_str = await asyncio.wait_for(
+                result = await asyncio.wait_for(
                     loop.run_in_executor(None, lambda: method(**valid_args)),
                     timeout=timeout,
                 )
 
-            # 统一为字符串
-            if not isinstance(result_str, str):
-                result_str = json.dumps(result_str, ensure_ascii=False)
-
-            # 应用 P0 截断
-            result_str = await tools_service._truncate_tool_result(
-                result=result_str,
-                tool_name=tool_name,
-                tool_args=valid_args,
-            )
-            return result_str
+            return await finalize(result, valid_args)
 
         except asyncio.TimeoutError:
-            return f"Error: 工具 {tool_name} 执行超时（>{timeout:.1f}s）"
+            return await finalize(
+                f"Error: 工具 {tool_name} 执行超时（>{timeout:.1f}s）",
+                valid_args,
+            )
         except Exception as e:
             logger.warning(
                 f"[GroupDispatch] tool {tool_name} failed for agent={agent_hash}: {e}",
                 exc_info=True,
             )
-            return f"Error: 工具 {tool_name} 执行失败: {e}"
+            return await finalize(
+                f"Error: 工具 {tool_name} 执行失败: {e}",
+                valid_args,
+            )
 
     async def _get_or_create_tools(self, agent_hash: str, group_id: str):
         """懒加载 AgentToolsService（群聊作用域）。"""

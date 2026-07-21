@@ -49,11 +49,11 @@ def _make_mock_tools(with_truncate_side_effect=True):
     tools = MagicMock()
     tools.vfs = MagicMock()
     if with_truncate_side_effect:
-        tools._truncate_tool_result = MagicMock(
-            side_effect=lambda result, tool_name, tool_args: result
+        tools._truncate_tool_result = AsyncMock(
+            side_effect=lambda result, tool_name, tool_args, call_id=None: result
         )
     else:
-        tools._truncate_tool_result = MagicMock(return_value="truncated_result")
+        tools._truncate_tool_result = AsyncMock(return_value="truncated_result")
     return tools
 
 
@@ -691,9 +691,18 @@ class TestAgentExecutorExecuteTool:
         """同步工具应在线程池执行并通过 _truncate_tool_result 截断"""
         mock_entry = {"param_names": ["query"]}
         with patch("services.tool_registry.get_tool", return_value=mock_entry):
-            result = await executor.execute_tool("search_file", {"query": "test.py"})
+            result = await executor.execute_tool(
+                "search_file",
+                {"query": "test.py"},
+                call_id="call-123",
+            )
             executor.tools.search_file.assert_called_once_with(query="test.py")
-            executor.tools._truncate_tool_result.assert_called_once()
+            executor.tools._truncate_tool_result.assert_awaited_once_with(
+                result="result: found file",
+                tool_name="search_file",
+                tool_args={"query": "test.py"},
+                call_id="call-123",
+            )
             assert result == "result: found file"
 
     @pytest.mark.asyncio

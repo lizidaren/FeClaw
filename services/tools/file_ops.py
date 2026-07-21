@@ -196,7 +196,7 @@ class FileOpsMixin(AgentToolsServiceBase):
                 return "（空目录）"
             names = []
             for e in entries:
-                if e.name == ".directory":
+                if e.name == ".directory" or e.is_hidden:
                     continue
                 name = e.name + "/" if e.type == "directory" else e.name
                 # 返回绝对路径

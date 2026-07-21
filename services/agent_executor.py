@@ -587,6 +587,12 @@ class AgentExecutor:
                 except json.JSONDecodeError as e:
                     error_msg = f"Error: tool_calls 参数 JSON 解析失败: {e}。原始参数: {args_str[:500]}"
                     logger.error(f"[AgentExecutor] {error_msg}")
+                    error_msg = await self.tools._truncate_tool_result(
+                        result=error_msg,
+                        tool_name=func_name,
+                        tool_args={},
+                        call_id=tc.get("id", ""),
+                    )
                     working_messages.append({
                         "role": "tool",
                         "tool_call_id": tc["id"],
@@ -603,8 +609,12 @@ class AgentExecutor:
                     await _tool_progress_queue.put(chunk)
 
                 tool_task = asyncio.create_task(
-                    self.execute_tool(func_name, args,
-                        on_progress=_on_tool_progress if func_name == "web_search" else None)
+                    self.execute_tool(
+                        func_name,
+                        args,
+                        call_id=tc.get("id", ""),
+                        on_progress=_on_tool_progress if func_name == "web_search" else None,
+                    )
                 )
                 tool_result = None
                 try:
@@ -713,41 +723,48 @@ class AgentExecutor:
         # 超过最大轮次，返回提示
         yield Step(step_type="final", content="抱歉，工具调用次数过多，请简化请求。")
 
-    async def execute_tool(self, tool_name: str, arguments: Dict, *, on_progress=None) -> str:
-        """执行工具调用（异步）
-
-        Args:
-            tool_name: 工具名称
-            arguments: 工具参数字典
-            on_progress: 可选进度回调，用于流式传输工具执行的中间结果
-        """
+    async def execute_tool(
+        self,
+        tool_name: str,
+        arguments: Dict,
+        *,
+        call_id: str = None,
+        on_progress=None,
+    ) -> str:
+        """执行工具调用，并统一持久化完整结果。"""
         from services.tool_registry import get_tool
 
-        # 检查禁用工具
-        if tool_name in self.blocked_tools:
-            return f"Error: 工具 {tool_name} 已被禁用"
-
-        # list_subagent_roles 特殊处理（无参数工具，直接调用）
-        if tool_name == "list_subagent_roles":
-            result = self.tools.list_subagent_roles()
-            result_str = result if isinstance(result, str) else json.dumps(result)
+        async def finalize(value, tool_args=None) -> str:
+            result_str = value if isinstance(value, str) else json.dumps(value)
             return await self.tools._truncate_tool_result(
                 result=result_str,
                 tool_name=tool_name,
-                tool_args={}
+                tool_args=tool_args or {},
+                call_id=call_id,
             )
+
+        # 检查禁用工具
+        if tool_name in self.blocked_tools:
+            return await finalize(f"Error: 工具 {tool_name} 已被禁用")
+
+        # list_subagent_roles 特殊处理（无参数工具，直接调用）
+        if tool_name == "list_subagent_roles":
+            try:
+                return await finalize(self.tools.list_subagent_roles())
+            except Exception as e:
+                return await finalize(f"Error: {e}")
 
         tool_entry = get_tool(tool_name)
         if not tool_entry:
-            return f"Error: 未知工具 {tool_name}"
+            return await finalize(f"Error: 未知工具 {tool_name}")
 
         method = getattr(self.tools, tool_name, None)
         if not method:
-            return f"Error: 工具 {tool_name} 在 AgentToolsService 上不可用"
+            return await finalize(f"Error: 工具 {tool_name} 在 AgentToolsService 上不可用")
 
+        valid_args = {}
         try:
             # 过滤参数：只传 tool_entry 中声明的参数
-            valid_args = {}
             import inspect
             for key in tool_entry["param_names"]:
                 if key in arguments:
@@ -770,18 +787,9 @@ class AgentExecutor:
             if inspect.iscoroutine(result):
                 result = await result
 
-            result_str = result if isinstance(result, str) else json.dumps(result)
-
-            # P0-Tool-Result-Budget: 截断超大工具结果
-            result_str = await self.tools._truncate_tool_result(
-                result=result_str,
-                tool_name=tool_name,
-                tool_args=valid_args
-            )
-
-            return result_str
+            return await finalize(result, valid_args)
         except Exception as e:
-            return f"Error: {e}"
+            return await finalize(f"Error: {e}", valid_args)
 
     def _estimate_tokens(self, messages: List[Dict]) -> int:
         """估算消息的 token 数"""

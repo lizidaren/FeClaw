@@ -57,6 +57,12 @@ class Settings(BaseSettings):
     MAIN_VISION_MODEL: str = "qwen3.6-35b-a3b"       # 主视觉模型
     MAIN_EMBEDDING_MODEL: str = "text-embedding-v4"   # 主嵌入模型
 
+    # ─── Vision 分级配置（T 阶段新增） ───
+    # Zentrim pipeline 把视觉任务拆成两档：Speed（形态判断）+ Heavy（HTML/描述）
+    # 留空 = 用 model_registry 的硬编码兜底
+    VISION_SPEED_MODEL: str = ""   # 轻量快速多模态；空 → fallback "qwen3.6-flash"
+    VISION_HEAVY_MODEL: str = ""   # 重量级多模态；空 → fallback "doubao-seed-2.0-lite"
+
     # TTS 模型（model_registry.TTS_MODEL_REGISTRY 中的 key）
     TTS_MODEL: str = "cosyvoice-v1"
 

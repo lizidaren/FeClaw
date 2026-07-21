@@ -33,6 +33,7 @@ Zentrim（格物所）API 路由
 - 所有 endpoint 返回 JSON
 - 错误格式：{"detail": "..."}
 """
+import asyncio
 import json
 import logging
 from datetime import datetime
@@ -47,6 +48,7 @@ from fastapi import (
     Query,
     UploadFile,
 )
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -740,3 +742,107 @@ async def get_pipeline_status(
         "entry_id": entry_id,
         "entry_status": entry.status,
     }
+
+
+# ────────────────────────────────────────────────────────────────────
+# SSE: photo pipeline 实时状态推送（W 代理，第四轮）
+# ────────────────────────────────────────────────────────────────────
+@router.get("/entries/{entry_id}/pipeline-stream")
+async def pipeline_stream(
+    entry_id: str,
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+):
+    """SSE 订阅 entry 的 photo pipeline 状态变化。
+    Mobile 端 createPhotoEntry 后开监听。
+
+    事件:
+      event: processing   data: {"block_id": "...", "stage": "classify"|"color_id"|"binarize"|"html"|"describe"}
+      event: rendered     data: {"block_id": "...", "status": "rendered"}
+      event: failed       data: {"block_id": "...", "error": "...", "failed_stage": "binarize"|...}
+      event: active       data: {"block_id": "..."}
+      event: done         data: {}  (所有 block 都到达终态)
+      event: ping         data: {}  (2s 心跳)
+    """
+    svc = ZentrimService(db)
+    # 鉴权 + entry 存在
+    entry = svc.get_entry(entry_id, user_id=user_id)
+    if not entry:
+        raise HTTPException(status_code=404, detail="Entry not found")
+
+    max_duration = 300  # 5min, 类比 group stream
+    start = asyncio.get_event_loop().time()
+
+    # 记录上次各 block 的状态 hash, 用于 diff
+    last_state: Dict[str, str] = {}
+
+    async def event_generator():
+        nonlocal last_state
+        while asyncio.get_event_loop().time() - start < max_duration:
+            # 拉取当前 entry 的 photo blocks 状态
+            blocks = svc.get_entry_photo_blocks(entry_id, user_id=user_id)
+            for blk in blocks:
+                blk_id = blk.id
+                data = blk.data or {}
+                processed = data.get("processed", {})
+                status = processed.get("status", "unknown")
+                error = processed.get("error")
+                failed_stage = processed.get("failed_stage")
+                stage = processed.get("current_stage")  # V 写这个字段
+                state_key = f"{status}:{stage or ''}:{error or ''}:{failed_stage or ''}"
+
+                if last_state.get(blk_id) != state_key:
+                    last_state[blk_id] = state_key
+                    if status == "processing":
+                        yield {
+                            "event": "processing",
+                            "data": json.dumps({"block_id": blk_id, "stage": stage}),
+                        }
+                    elif status == "rendered":
+                        yield {
+                            "event": "rendered",
+                            "data": json.dumps({"block_id": blk_id, "status": "rendered"}),
+                        }
+                    elif status == "failed":
+                        yield {
+                            "event": "failed",
+                            "data": json.dumps(
+                                {
+                                    "block_id": blk_id,
+                                    "error": error or "unknown",
+                                    "failed_stage": failed_stage,
+                                }
+                            ),
+                        }
+                    elif status == "active":
+                        yield {
+                            "event": "active",
+                            "data": json.dumps({"block_id": blk_id}),
+                        }
+
+            # 所有 block 都终态(rendered/failed/active) → 发 done 并结束
+            terminal = all(
+                (blk.data or {}).get("processed", {}).get("status")
+                in ("rendered", "failed", "active")
+                for blk in blocks
+            )
+            if terminal and blocks:
+                yield {"event": "done", "data": json.dumps({})}
+                return
+
+            yield {"event": "ping", "data": "{}"}
+            await asyncio.sleep(2)  # 2s 轮询
+
+    async def format_events():
+        async for ev in event_generator():
+            yield f"event: {ev['event']}\ndata: {ev['data']}\n\n"
+
+    return StreamingResponse(
+        format_events(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )

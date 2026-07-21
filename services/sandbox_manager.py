@@ -38,6 +38,7 @@ from .sandbox.base import (
     _check_fuse_cached,
 )
 from .network_isolation import NetworkIsolationManager
+from .tool_log_service import is_tool_log_cos_key
 
 logger = logging.getLogger(__name__)
 
@@ -1000,6 +1001,8 @@ class SandboxManager:
             return {"error": err}
 
         if mode == "upload" and "content" in data:
+            if is_tool_log_cos_key(cos_key):
+                return {"error": "/.logs/ is a read-only system directory"}
             content = base64.b64decode(data["content"])
             self.vfs.storage.put_object(cos_key, content)
             self.meta_cache.invalidate_dir(
@@ -1027,7 +1030,7 @@ class SandboxManager:
         # 检查元数据缓存
         cached = self.meta_cache.get_dir(path)
         if cached is not None:
-            return {"entries": [e.name for e in cached]}
+            return {"entries": [e.name for e in cached if not e.is_hidden]}
 
         cos_prefix, err = self.vfs._resolve_to_dir_prefix(path)
         if err:
@@ -1035,7 +1038,7 @@ class SandboxManager:
 
         entries = self.vfs._parse_dir_contents(cos_prefix)
         self.meta_cache.set_dir(path, entries)
-        return {"entries": [e.name for e in entries]}
+        return {"entries": [e.name for e in entries if not e.is_hidden]}
 
     def _vfs_stat_handler(self, path: str) -> dict:
         """处理 stat 请求"""
@@ -1068,6 +1071,8 @@ class SandboxManager:
         cos_key, err = self.vfs._resolve_path(path)
         if err:
             return {"error": err}
+        if is_tool_log_cos_key(cos_key):
+            return {"error": "/.logs/ is a read-only system directory"}
 
         dir_key = cos_key.rstrip("/") + "/.directory"
         
@@ -1095,6 +1100,8 @@ class SandboxManager:
         cos_key, err = self.vfs._resolve_path(path)
         if err:
             return {"error": err}
+        if is_tool_log_cos_key(cos_key):
+            return {"error": "/.logs/ is a read-only system directory"}
 
         if recursive:
             objects = self.vfs.storage.list_objects(cos_key.rstrip("/") + "/")
@@ -1114,6 +1121,8 @@ class SandboxManager:
         dst_key, err = self.vfs._resolve_path(dst)
         if err:
             return {"error": err}
+        if is_tool_log_cos_key(src_key) or is_tool_log_cos_key(dst_key):
+            return {"error": "/.logs/ is a read-only system directory"}
 
         content = self.vfs.storage.get_file_content(src_key)
         if content is not None:

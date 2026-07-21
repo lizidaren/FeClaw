@@ -14,6 +14,8 @@ import errno
 import logging
 from typing import Dict, Optional, Tuple
 
+from services.tool_log_service import is_tool_log_cos_key
+
 # pyfuse3 延迟导入：允许 check_fuse_available() 在 import 失败时返回 False
 try:
     import pyfuse3
@@ -163,9 +165,12 @@ class VFSFuseDaemon(_FUSE_BASE):  # type: ignore[valid-type,misc]
         if vpath == "/" or vpath == "":
             return self.cos_prefix
         clean = vpath.strip("/")
-        # sandbox 模式：/workspace/xxx → agents/{agent_hash}/workspace/xxx
+        # sandbox 模式：/workspace/.logs 是 Agent 根目录 .logs 的只读别名
         if self.agent_hash:
-            if clean == "workspace" or clean.startswith("workspace/"):
+            if clean == "workspace/.logs" or clean.startswith("workspace/.logs/"):
+                suffix = clean[len("workspace/"):]
+                clean = f"agents/{self.agent_hash}/{suffix}"
+            elif clean == "workspace" or clean.startswith("workspace/"):
                 clean = f"agents/{self.agent_hash}/{clean}"
         return f"{self.cos_prefix}{clean}/"
 
@@ -174,9 +179,12 @@ class VFSFuseDaemon(_FUSE_BASE):  # type: ignore[valid-type,misc]
         if vpath == "/":
             return self.cos_prefix.rstrip("/")
         clean = vpath.strip("/")
-        # sandbox 模式：/workspace/xxx → agents/{agent_hash}/workspace/xxx
+        # sandbox 模式：/workspace/.logs 是 Agent 根目录 .logs 的只读别名
         if self.agent_hash:
-            if clean == "workspace" or clean.startswith("workspace/"):
+            if clean == "workspace/.logs" or clean.startswith("workspace/.logs/"):
+                suffix = clean[len("workspace/"):]
+                clean = f"agents/{self.agent_hash}/{suffix}"
+            elif clean == "workspace" or clean.startswith("workspace/"):
                 clean = f"agents/{self.agent_hash}/{clean}"
         return f"{self.cos_prefix}{clean}"
 
@@ -440,6 +448,11 @@ class VFSFuseDaemon(_FUSE_BASE):  # type: ignore[valid-type,misc]
         if cos_key.startswith(public_prefix):
             raise pyfuse3.FUSEError(errno.EACCES)
 
+    def _check_not_tool_logs(self, cos_key: str):
+        """拒绝 Agent 通过 FUSE 修改系统工具日志。"""
+        if is_tool_log_cos_key(cos_key):
+            raise pyfuse3.FUSEError(errno.EACCES)
+
     def _check_agents_path(self, config_key: str):
         """验证 config_key 中的 agent_hash 是否匹配当前实例
 
@@ -463,6 +476,25 @@ class VFSFuseDaemon(_FUSE_BASE):  # type: ignore[valid-type,misc]
                 if entry.name == name:
                     return (child_path, entry)
             return None
+
+        if parent_path == "/workspace" and name == ".logs" and self.agent_hash:
+            log_prefix = self._cos_prefix_for(child_path)
+            if self._cos_list_objects(log_prefix):
+                from services.virtual_filesystem import VirtualDirEntry
+                return (
+                    child_path,
+                    VirtualDirEntry(
+                        name=".logs",
+                        path=".logs",
+                        type="directory",
+                        size=4096,
+                        mtime=0,
+                        mode="dr-xr-xr-x",
+                        inode=self.vfs._gen_inode(log_prefix),
+                        is_hidden=True,
+                        nlink=2,
+                    ),
+                )
 
         # /config/ 下的文件或目录：从树结构查询
         if parent_path == "/config":
@@ -515,6 +547,24 @@ class VFSFuseDaemon(_FUSE_BASE):  # type: ignore[valid-type,misc]
             except Exception as e:
                 logger.warning(f"FUSE _get_dir_entries error: {e}")
                 entries = []
+
+        if parent_path == "/workspace" and self.agent_hash:
+            log_path = "/workspace/.logs"
+            log_prefix = self._cos_prefix_for(log_path)
+            if self._cos_list_objects(log_prefix) and not any(
+                entry.name == ".logs" for entry in entries
+            ):
+                entries.append(VirtualDirEntry(
+                    name=".logs",
+                    path=".logs",
+                    type="directory",
+                    size=4096,
+                    mtime=0,
+                    mode="dr-xr-xr-x",
+                    inode=self.vfs._gen_inode(log_prefix),
+                    is_hidden=True,
+                    nlink=2,
+                ))
 
         # 过滤 VFS 内部标记文件 .directory
         entries = [e for e in entries if e.name != ".directory"]
@@ -740,6 +790,7 @@ class VFSFuseDaemon(_FUSE_BASE):  # type: ignore[valid-type,misc]
 
         cos_key = self._vpath_to_cos_key(vpath)
         self._check_not_public(cos_key)
+        self._check_not_tool_logs(cos_key)
         logger.info(f"FUSE write: fh={fh}, path={vpath}, offset={offset}, size={len(buf)}")
 
         # per-file 锁，只对同一个 cos_key 互斥
@@ -815,6 +866,7 @@ class VFSFuseDaemon(_FUSE_BASE):  # type: ignore[valid-type,misc]
 
         cos_key = self._vpath_to_cos_key(vpath)
         self._check_not_public(cos_key)
+        self._check_not_tool_logs(cos_key)
         self.vfs.storage.put_object(cos_key, b"")
         logger.info(f"FUSE create: {cos_key}")
 
@@ -841,6 +893,7 @@ class VFSFuseDaemon(_FUSE_BASE):  # type: ignore[valid-type,misc]
             raise pyfuse3.FUSEError(errno.EACCES)
         cos_key = self._vpath_to_cos_key(vpath)
         self._check_not_public(cos_key)
+        self._check_not_tool_logs(cos_key)
         self.vfs.storage.put_object(cos_key, b"")
         logger.info(f"FUSE mknod: {cos_key}")
 
@@ -858,6 +911,7 @@ class VFSFuseDaemon(_FUSE_BASE):  # type: ignore[valid-type,misc]
         vpath = self._vpath_from_parent(parent_inode, name_str)
         cos_key = self._vpath_to_cos_key(vpath)
         self._check_not_public(cos_key)
+        self._check_not_tool_logs(cos_key)
         self.vfs.storage.put_object(cos_key.rstrip("/") + "/.placeholder", b"")
         logger.info(f"FUSE mkdir: {cos_key}")
 
@@ -884,6 +938,7 @@ class VFSFuseDaemon(_FUSE_BASE):  # type: ignore[valid-type,misc]
 
         cos_key = self._vpath_to_cos_key(vpath)
         self._check_not_public(cos_key)
+        self._check_not_tool_logs(cos_key)
         self.vfs.storage.delete_file_by_key(cos_key)
         logger.info(f"FUSE unlink: {cos_key}")
         self._invalidate_dir_cache(vpath)
@@ -895,6 +950,7 @@ class VFSFuseDaemon(_FUSE_BASE):  # type: ignore[valid-type,misc]
         vpath = self._vpath_from_parent(parent_inode, name_str)
         cos_key = self._vpath_to_cos_key(vpath)
         self._check_not_public(cos_key)
+        self._check_not_tool_logs(cos_key)
         cos_prefix = self._cos_prefix_for(vpath)
         objects = self._cos_list_objects(cos_prefix)
         # 过滤 COS 目录标记文件（.placeholder / .directory），剩下的才是实际内容
@@ -923,6 +979,8 @@ class VFSFuseDaemon(_FUSE_BASE):  # type: ignore[valid-type,misc]
         # public 是只读的，禁止 rename 进出
         self._check_not_public(src_key)
         self._check_not_public(dst_key)
+        self._check_not_tool_logs(src_key)
+        self._check_not_tool_logs(dst_key)
 
         # 判断是文件还是目录：检查 COS prefix 下是否有子对象
         src_prefix = self._cos_prefix_for(src)

@@ -34,6 +34,11 @@ from .vfs.paths import (
     parse_cut_fields as _parse_cut_fields_impl,
 )
 from .vfs.cos_client import CosClient
+from services.tool_log_service import (
+    canonicalize_tool_log_path,
+    is_tool_log_cos_key,
+    is_tool_log_vfs_path,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -235,6 +240,11 @@ class VirtualFileSystem:
 
         path = path.strip()
 
+        # 工具日志位于 Agent 根目录；同时支持 /workspace/.logs/ 作为只读别名。
+        tool_log_path = is_tool_log_vfs_path(path)
+        if tool_log_path:
+            path = canonicalize_tool_log_path(path)
+
         # 处理 ~ 展开为用户根目录
         if path == "~":
             path = ""
@@ -260,8 +270,8 @@ class VirtualFileSystem:
                     return (None, "Error: 路径不允许 ..")
                 cos_key = self._get_public_base_path() + subpath
                 return (cos_key, None)
-        elif self._cwd:
-            # 相对路径：加上当前目录
+        elif self._cwd and not tool_log_path:
+            # 相对路径：加上当前目录（.logs 始终相对于 Agent 根目录）
             path = f"{self._cwd}/{path}"
 
         # 处理 . 和 ..
@@ -1033,6 +1043,34 @@ class VirtualFileSystem:
         public_base = self._get_public_base_path()
         return cos_key.startswith(public_base)
 
+    def _is_tool_log_path(self, path_or_key: str) -> bool:
+        """检查 VFS 路径或存储 key 是否属于只读工具日志目录。"""
+        if is_tool_log_vfs_path(path_or_key) or is_tool_log_cos_key(path_or_key):
+            return True
+        cos_key, err = self._resolve_path(path_or_key)
+        return not err and is_tool_log_cos_key(cos_key)
+
+    def write_tool_log(self, path: str, content: str) -> str:
+        """由工具框架写入受保护日志；Agent 文件命令不能调用此入口。"""
+        canonical_path = canonicalize_tool_log_path(path)
+        if not is_tool_log_vfs_path(canonical_path):
+            return f"Error: 非法工具日志路径: {path}"
+        cos_key, err = self._resolve_path(canonical_path)
+        if err:
+            return err
+        try:
+            data = content.encode("utf-8") if isinstance(content, str) else content
+            self.storage.put_object(cos_key, data)
+            self._dir_cache.pop(self.base_path, None)
+            self._dir_cache.pop(
+                cos_key.rsplit("/", 1)[0] + "/" if "/" in cos_key else self.base_path,
+                None,
+            )
+            return f"OK: 已写入 {canonical_path}"
+        except Exception as e:
+            logger.error(f"[VFS] 工具日志写入失败: {cos_key}: {e}")
+            return f"Error: 工具日志写入失败: {e}"
+
     def _get_public_files(self, prefix: str = "") -> List[Dict]:
         """列出公共目录下的文件"""
         cos_prefix = self._get_public_base_path()
@@ -1198,9 +1236,11 @@ class VirtualFileSystem:
         if err:
             return err
 
-        # 禁止写入 /public/ 目录
+        # 禁止 Agent 写入系统目录
         if self._is_public_path(cos_key):
             return f"Error: /public/ is a read-only system directory"
+        if is_tool_log_cos_key(cos_key):
+            return "Error: /.logs/ is a read-only system directory"
 
         # 处理虚拟配置路径
         if cos_key.startswith("__CONFIG__:"):
@@ -1494,17 +1534,19 @@ class VirtualFileSystem:
     def touch(self, path: str) -> str:
         """创建空文件或更新 mtime"""
         logger.info(f"[VFS] touch: path={path}")
-        
+
         # 验证文件名
         import os
         filename = os.path.basename(path)
         err = self._validate_filename(filename)
         if err:
             return f"Error: {err}"
-        
+
         cos_key, err = self._resolve_path(path)
         if err:
             return err
+        if is_tool_log_cos_key(cos_key):
+            return "Error: /.logs/ is a read-only system directory"
 
         from services.file_locker import DistributedFileLock
         locker = DistributedFileLock()
@@ -1537,10 +1579,12 @@ class VirtualFileSystem:
         """
         logger.info(f"[VFS] mkdir: path={path}, parents={parents}")
         
-        # 禁止在 /public/ 下创建目录
+        # 禁止在系统只读目录下创建目录
         normalized = path.lstrip("/")
         if normalized == "public" or normalized.startswith("public/"):
             return f"Error: /public/ is a read-only system directory"
+        if is_tool_log_vfs_path(path):
+            return "Error: /.logs/ is a read-only system directory"
         
         # 验证目录名
         import os
@@ -1619,9 +1663,11 @@ class VirtualFileSystem:
         if err:
             return err
 
-        # 禁止删除 /public/ 文件
+        # 禁止删除系统只读目录中的文件
         if self._is_public_path(cos_key):
             return f"Error: /public/ is a read-only system directory"
+        if is_tool_log_cos_key(cos_key):
+            return "Error: /.logs/ is a read-only system directory"
 
         from services.file_locker import DistributedFileLock
         locker = DistributedFileLock()
@@ -1676,9 +1722,11 @@ class VirtualFileSystem:
         if err:
             return err
 
-        # 禁止删除 /public/ 目录
+        # 禁止删除系统只读目录
         if self._is_public_path(cos_key):
             return f"Error: /public/ is a read-only system directory"
+        if is_tool_log_cos_key(cos_key):
+            return "Error: /.logs/ is a read-only system directory"
 
         cos_prefix = cos_key.rstrip("/") + "/"
         entries = self._parse_dir_contents(cos_prefix)
@@ -1722,9 +1770,11 @@ class VirtualFileSystem:
         if err:
             return err
         
-        # 禁止写入 /public/ 目录
+        # 禁止写入系统只读目录
         if self._is_public_path(dst_key):
             return f"Error: /public/ is a read-only system directory"
+        if is_tool_log_cos_key(dst_key):
+            return "Error: /.logs/ is a read-only system directory"
 
         # 禁止从 /public/ 移出
         if self._is_public_path(src_key):
@@ -1811,13 +1861,17 @@ class VirtualFileSystem:
             return err
         if self._is_public_path(dst_key):
             return f"Error: /public/ is a read-only system directory"
+        if is_tool_log_cos_key(dst_key):
+            return "Error: /.logs/ is a read-only system directory"
 
-        # 禁止从 /public/ 移出
+        # 禁止从系统只读目录移出（移动会删除源文件）
         src_key, err = self._resolve_path(src)
         if err:
             return err
         if self._is_public_path(src_key):
             return f"Error: /public/ files cannot be moved"
+        if is_tool_log_cos_key(src_key):
+            return "Error: /.logs/ is a read-only system directory"
 
         # 验证目标文件名
         import os

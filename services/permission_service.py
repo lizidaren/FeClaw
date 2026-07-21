@@ -8,6 +8,7 @@ from datetime import datetime
 
 from sqlalchemy.orm import Session
 from models.database import FilePermission, SessionLocal, AgentProfile
+from services.tool_log_service import is_tool_log_vfs_path
 
 
 # 权限级别
@@ -94,10 +95,12 @@ class PermissionService:
         特殊路径：
         - /public/* 目录默认只读（平台公共信息，任何人可读）
         """
-        # /public/ 路径默认只读（平台公共信息，不可写入）
+        # /public/ 和工具日志路径默认只读
         import fnmatch
         normalized = file_path.strip("/")
         if normalized == "public" or normalized.startswith("public/") or fnmatch.fnmatch(normalized, "public/*"):
+            return Permission.READ
+        if is_tool_log_vfs_path(file_path):
             return Permission.READ
 
         # 敏感文件可以在这里设置更严格的默认权限
@@ -139,6 +142,10 @@ class PermissionService:
         # 标准化路径
         file_path = file_path.strip("/")
 
+        # 工具日志是系统管理的固定只读路径，显式授权也不能覆盖。
+        if required_permission == Permission.WRITE and is_tool_log_vfs_path(file_path):
+            return False
+
         # 构建查询条件
         query = self.db.query(FilePermission)
         if self._agent_hash:
@@ -174,6 +181,8 @@ class PermissionService:
             True 如果成功，False 如果权限无效
         """
         if not Permission.is_valid(permission):
+            return False
+        if Permission.has_write(permission) and is_tool_log_vfs_path(file_path):
             return False
 
         # 标准化路径

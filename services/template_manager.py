@@ -378,6 +378,43 @@ Persona: {persona}
         return defn.get("persona")
 
     @staticmethod
+    def apply_template(db: Session, agent: Any, template_id: str) -> Dict[str, Any]:
+        """
+        将模板绑定到 Agent
+
+        记录 template_id 和 template_version 到 AgentProfile，不直接写 persona。
+        实际的 persona / tools / config 写入由 agent_init_service.initialize_agent
+        在下一步完成（传入 template_id 参数即可触发模板加载）。
+
+        Args:
+            db: 数据库会话
+            agent: AgentProfile 实例
+            template_id: 模板 ID
+
+        Returns:
+            {"applied": bool, "template_id": str, "template_version": Optional[str]}
+        """
+        tpl = TemplateManager.get_template(db, template_id)
+        if tpl is None:
+            return {
+                "applied": False,
+                "template_id": template_id,
+                "template_version": None,
+                "reason": "template not found",
+            }
+
+        agent.template_id = template_id
+        agent.template_version = tpl.version
+        # 立即 flush，但不 commit（让调用方决定事务边界）
+        db.flush()
+
+        return {
+            "applied": True,
+            "template_id": template_id,
+            "template_version": tpl.version,
+        }
+
+    @staticmethod
     async def check_compliance(db: Session, template_id: str) -> Dict[str, Any]:
         """
         调用 LLM 对模板进行合规检测。

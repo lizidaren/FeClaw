@@ -61,16 +61,37 @@ async def agent_config_chat(
     body = await request.json()
 
     # 从配置好的模型注册表解析 LLM（支持 MiMo / DeepSeek / Qwen / GLM 等）
-    from services.model_registry import resolve
+    from services.model_registry import resolve as resolve_model, PROVIDER_META
     llm_model = body.get("model", getattr(settings, "MAIN_TEXT_MODEL", "mimo-v2.5-pro-ultraspeed"))
-    model_info = resolve(llm_model)
+    model_info = resolve_model(llm_model)
     if model_info:
-        api_key_env = model_info.get("api_key_attr")
-        api_key = getattr(settings, api_key_env, "") if api_key_env else ""
-        llm_base = model_info.get("base_url", "https://api.deepseek.com")
-    else:
-        api_key = ""
-        llm_base = "https://api.deepseek.com" 
+        provider_id = model_info.get("provider", "deepseek")
+        api_key_attr = model_info.get("api_key_attr", "DEEPSEEK_API_KEY")
+        api_key = getattr(settings, api_key_attr, "") or ""
+        meta = PROVIDER_META.get(provider_id, {})
+        llm_base = meta.get("base_url", "https://api.deepseek.com")
+        if provider_id == "kimi" and not llm_base:
+            llm_base = getattr(settings, "KIMI_BASE_URL", "https://api.moonshot.cn/v1")
+        # 如果 Key 为空，fallback 到 MAIN_TEXT_MODEL
+        if not api_key:
+            fallback_model = getattr(settings, "MAIN_TEXT_MODEL", "")
+            if fallback_model and fallback_model != llm_model:
+                fb_info = resolve_model(fallback_model)
+                if fb_info:
+                    fb_key_attr = fb_info.get("api_key_attr", "")
+                    api_key = getattr(settings, fb_key_attr, "") or ""
+                    fb_meta = PROVIDER_META.get(fb_info.get("provider", ""), {})
+                    llm_base = fb_meta.get("base_url", llm_base)
+                    llm_model = fallback_model
+    # 最后兜底（所有 Key 都为空时）
+    if not api_key:
+        api_key = getattr(settings, "DEEPSEEK_API_KEY", "") or ""
+    if not api_key:
+        api_key = getattr(settings, "QWEN_API_KEY", "") or ""
+    if not api_key:
+        api_key = getattr(settings, "MIMO_API_KEY", "") or ""
+    if not llm_base:
+        llm_base = "https://api.deepseek.com"
 
     async def proxy_stream():
         async with httpx.AsyncClient(timeout=120) as client:
@@ -91,7 +112,17 @@ async def agent_config_chat(
                     ) as resp:
                         if resp.status_code != 200:
                             error_body = await resp.aread()
-                            yield f"data: {json.dumps({'type': 'error', 'content': f'LLM API Error ({resp.status_code})'})}\n\n"
+                            err_text = f"❌ LLM API Error ({resp.status_code})"
+                            try:
+                                err_json = json.loads(error_body)
+                                msg = err_json.get("error", {}).get("message", "") or err_json.get("message", "")
+                                if msg:
+                                    err_text += f": {msg}"
+                            except Exception:
+                                if error_body:
+                                    err_text += f": {error_body.decode()[:200]}"
+                            # 把错误当文本发给前端（前端只认 choices[0].delta.content）
+                            yield f"data: {json.dumps({'choices': [{'delta': {'content': err_text}}]})}\n\n"
                             yield "data: [DONE]\n\n"
                             return
 
@@ -101,7 +132,7 @@ async def agent_config_chat(
 
             except Exception as e:
                 logger.error(f"LLM proxy error: {e}")
-                yield f"data: {json.dumps({'type': 'error', 'content': str(e)})}\n\n"
+                yield f"data: {json.dumps({'choices': [{'delta': {'content': f"❌ 请求失败: {e}"}}]})}\n\n"
                 yield "data: [DONE]\n\n"
 
     return StreamingResponse(

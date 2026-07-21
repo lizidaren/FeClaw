@@ -445,13 +445,21 @@ async def delete_agent(
     user_id: int = Depends(get_current_user_id),
     db: Session = Depends(get_db)
 ):
-    """Delete an agent by hash."""
+    """Delete an agent by hash (full cleanup)."""
     agent = _get_agent_or_404(db, hash, user_id)
+
+    from services.agent_cleanup_service import AgentCleanupService
+    cleanup = AgentCleanupService()
+    cleanup_result = cleanup.cleanup_agent(db, agent, delete_chat=False)
+
     db.delete(agent)
     db.commit()
+
+    logger.info(f"Agent deleted: hash={hash}, cleanup={cleanup_result}")
     return JSONResponse(content={
         "status": "ok",
-        "message": f"Agent {hash} deleted"
+        "message": f"Agent {hash} deleted",
+        "cleaned": cleanup_result,
     })
 
 

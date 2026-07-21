@@ -16,6 +16,11 @@ qrcode[pil]     # QR code generation
 numpy>=1.26.0
 bcrypt>=4.0.0   # 密码哈希（自 2026-07 起逐步替代 SHA-256+salt）
 
+# ─── V 阶段：照片管线二值化 ───
+# opencv-python-headless 提供 cv2（无 GUI 依赖，适合服务器）；
+# 若本地已装 opencv-python 可跳过，两者二选一。
+opencv-python-headless>=4.8.0   # 智能二值化 / 多色融合
+
 jinja2>=3.1.0           # 模板引擎（FastAPI Jinja2Templates）
 nest_asyncio>=1.5.0     # 嵌套事件循环支持
 apscheduler>=3.10.0     # 定时任务调度

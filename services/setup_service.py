@@ -457,9 +457,13 @@ async def verify_provider(provider_id: str) -> Dict[str, Any]:
             err_msg = body.get("error", {}).get("message", "") or body.get("message", "")
             return {"ok": False, "provider": provider_id, "error": f"认证失败: {err_msg or 'API Key 无效'}"}
 
-        # 4xx（除 401/403）= Key 有效但其他问题（余额不足、模型不存在等）
+        # 4xx（除 401/403）= Key 有效但账户可能有问题
         if 400 <= status < 500:
+            err_code = body.get("error", {}).get("code", "")
             err_msg = body.get("error", {}).get("message", "") or body.get("message", "")
+            # 欠费/账户冻结 → 标记为失败
+            if err_code in ("Arrearage", "Overdue", "InsufficientBalance", "Forbidden"):
+                return {"ok": False, "provider": provider_id, "error": f"账户异常: {err_msg}"}
             logger.info("verify_provider(%s) got 4xx but not auth: %s — Key 有效", provider_id, err_msg)
             return {"ok": True, "provider": provider_id, "key_name": key_name, "detail": f"API Key 有效 (状态 {status})"}
 

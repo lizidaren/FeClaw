@@ -971,6 +971,81 @@ class ZentrimService:
         return True
 
     # ════════════════════════════════════════
+    # Photo blocks helper (W SSE 第四轮)
+    # ════════════════════════════════════════
+    def get_entry_photo_blocks(self, entry_id, user_id) -> List[ZentrimBlock]:
+        """返回 entry 所有 type=photo 的 blocks, W SSE 用。
+        V 代理会把 photo block 的 data.processed.current_stage 在处理中更新。
+        """
+        # 先确认 entry 归属
+        entry = self.get_entry(entry_id, user_id=user_id)
+        if not entry:
+            return []
+        return (
+            self.db.query(ZentrimBlock)
+            .filter(ZentrimBlock.entry_id == entry_id, ZentrimBlock.type == "photo")
+            .order_by(ZentrimBlock.sort_order.asc())
+            .all()
+        )
+
+    # ════════════════════════════════════════
+    # Pipeline 状态查询（W 代理 SSE 端点用）
+    # ════════════════════════════════════════
+    def get_entry_pipeline_status(self, entry_id: str, user_id: int) -> Dict[str, Any]:
+        """返回一个 entry 下每个 photo/audio/ink block 的当前 pipeline 状态。
+
+        供 GET /entries/{id}/pipeline-stream SSE 端点轮询/订阅用。
+        返回结构：
+          {
+            "entry_id": ...,
+            "entry_status": "active" | "processing" | ...,
+            "blocks": [
+              {
+                "id": block_id,
+                "type": "photo" | "audio" | "ink",
+                "status": "processing" | "rendered" | "failed" | "active",
+                "current_stage": "classify" | "binarize" | ... | None,
+                "failed_stage": ... | None,
+                "error": ... | None,
+                "display_image": {...} | None,
+              },
+              ...
+            ]
+          }
+        """
+        entry = self.get_entry(entry_id, user_id=user_id)
+        if not entry:
+            return {"entry_id": entry_id, "entry_status": "not_found", "blocks": []}
+
+        rows = (
+            self.db.query(ZentrimBlock)
+            .filter(ZentrimBlock.entry_id == entry_id)
+            .order_by(ZentrimBlock.sort_order.asc(), ZentrimBlock.created_at.asc())
+            .all()
+        )
+        pipeline_types = {"photo", "audio", "ink"}
+        blocks_out = []
+        for b in rows:
+            if b.type not in pipeline_types:
+                continue
+            data = b.data if isinstance(b.data, dict) else {}
+            processed = data.get("processed") if isinstance(data.get("processed"), dict) else {}
+            blocks_out.append({
+                "id": b.id,
+                "type": b.type,
+                "status": processed.get("status", "idle"),
+                "current_stage": processed.get("current_stage"),
+                "failed_stage": processed.get("failed_stage"),
+                "error": processed.get("error"),
+                "display_image": processed.get("display_image"),
+            })
+        return {
+            "entry_id": entry_id,
+            "entry_status": entry.status,
+            "blocks": blocks_out,
+        }
+
+    # ════════════════════════════════════════
     # 状态管理
     # ════════════════════════════════════════
     def update_entry_status(

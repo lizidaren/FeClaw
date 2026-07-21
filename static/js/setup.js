@@ -564,6 +564,13 @@
             } catch (e) {
                 console.warn('verify failed', e);
             }
+        } else {
+            // 冷启动：使用 Step 4 测试结果
+            const results = [];
+            for (const [keyName, r] of Object.entries(STATE.verifyResults)) {
+                results.push({ provider: r.provider || keyName, ok: r.ok });
+            }
+            verifyData = { results, overall_ok: results.some(r => r.ok) };
         }
 
         const textOpts = collectAvailableModels('text');

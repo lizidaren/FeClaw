@@ -64,7 +64,7 @@ class OAuthService:
         return f"{self.authorize_url}?{urlencode(params)}"
 
     async def exchange_code_for_token(self, code: str) -> Optional[Dict[str, Any]]:
-        """用授权码换取 token"""
+        """用授权码换取 token（legacy: client_secret 鉴权）"""
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
                 response = await client.post(
@@ -83,6 +83,104 @@ class OAuthService:
         except httpx.HTTPError as e:
             logger.error(f"Failed to exchange code for token: {e}")
             return None
+
+    async def exchange_code_with_pkce(
+        self,
+        code: str,
+        code_verifier: str,
+        redirect_uri: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        PKCE-aware authorization code exchange (RFC 7636).
+
+        POST {token_url} with:
+          - grant_type=authorization_code
+          - code
+          - code_verifier
+          - client_id
+          - redirect_uri
+
+        **No client_secret** — PKCE replaces the shared-secret trust with
+        per-flow challenge/verifier binding. Returns the raw token dict on
+        non-2xx responses (so the caller can surface invalid_grant etc.) by
+        raising the underlying HTTPStatusError; callers should inspect
+        response.json() themselves when they need error detail.
+
+        For most callers, returning None on HTTP error (matching the existing
+        exchange_code_for_token behavior) is sufficient; the router layer
+        will surface a 502 in that case. Use `exchange_code_with_pkce_verbose`
+        when you need the response body on failure (e.g., to distinguish
+        invalid_grant from a network outage).
+        """
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.post(
+                    self.token_url,
+                    data={
+                        "grant_type": "authorization_code",
+                        "code": code,
+                        "code_verifier": code_verifier,
+                        "client_id": self.client_id,
+                        "redirect_uri": redirect_uri or self.redirect_uri,
+                    },
+                    headers={"Accept": "application/json"},
+                )
+                response.raise_for_status()
+                return response.json()
+        except httpx.HTTPError as e:
+            logger.error(f"Failed to exchange code with PKCE: {e}")
+            return None
+
+    async def exchange_code_with_pkce_verbose(
+        self,
+        code: str,
+        code_verifier: str,
+        redirect_uri: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        PKCE-aware exchange that returns a structured result on failure.
+
+        Returns one of:
+          {"ok": True,  "data": {<token dict>}}
+          {"ok": False, "status": <int>, "error": <str>, "error_description": <str>}
+
+        Use this when the caller needs to distinguish invalid_grant (4xx) from
+        upstream outage (5xx / network).
+        """
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.post(
+                    self.token_url,
+                    data={
+                        "grant_type": "authorization_code",
+                        "code": code,
+                        "code_verifier": code_verifier,
+                        "client_id": self.client_id,
+                        "redirect_uri": redirect_uri or self.redirect_uri,
+                    },
+                    headers={"Accept": "application/json"},
+                )
+        except httpx.HTTPError as e:
+            logger.error(f"PKCE exchange network error: {e}")
+            return {"ok": False, "status": 0, "error": "network_error", "error_description": str(e)}
+
+        if response.status_code >= 400:
+            try:
+                payload = response.json()
+            except Exception:
+                payload = {}
+            logger.warning(
+                f"PKCE exchange rejected by Platform: status={response.status_code} "
+                f"error={payload.get('error')} description={payload.get('error_description')}"
+            )
+            return {
+                "ok": False,
+                "status": response.status_code,
+                "error": payload.get("error", "http_error"),
+                "error_description": payload.get("error_description", ""),
+            }
+
+        return {"ok": True, "data": response.json()}
 
     async def refresh_token(self, refresh_token: str) -> Optional[Dict[str, Any]]:
         """刷新 token"""
