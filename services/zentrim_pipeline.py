@@ -196,6 +196,21 @@ PROMPT_INK_SEMANTIC = (
     "3. 总结整张瓦片的核心内容"
 )
 
+PROMPT_INK_OCR = (
+    "你是一个手写 OCR 助手。请仔细提取这张画布图片中所有可辨识的文字内容。\n"
+    "要求：\n"
+    "1. 逐行提取文字，保留换行和段落结构\n"
+    "2. 对于图表、公式、箭头等非文字元素，用 [图表]、[公式]、[箭头标注] 等标记其位置\n"
+    "3. 如果图片中有多种颜色，标注颜色变化（如 [红色]重点内容[/红色]）\n"
+    "4. 不要添加任何解释或总结，只输出提取的内容\n"
+    "5. 如果某区域完全无法辨认，标注 [无法辨识]"
+)
+
+# 单块最大边长（像素），超过则分块
+INK_TILE_MAX_SIZE = 2048
+# 分块重叠比例
+INK_TILE_OVERLAP = 0.1
+
 # ─── V 阶段新增提示词 ───
 PROMPT_DOCUMENT_CLASSIFY = (
     "你是图像分类器。判断这张图片是「文档类内容」还是「随手拍」。\n"
@@ -316,6 +331,10 @@ class ZentrimPipeline:
                 name="doubao-seed-2.0-lite", display_name="豆包 Seed 2.0 Lite",
                 cost_per_call=0.01, max_image_size_mb=20, max_tokens=4096, timeout_s=60,
             )
+        # L0 OCR 模型（专用文字提取，非通用 VLM）
+        self.ocr_model = "qwen3.5-ocr"
+        self.ocr_max_tokens = 4096
+        self.ocr_timeout_s = 15
         self.max_image_bytes = self.vision_heavy.max_image_size_mb * 1024 * 1024
         # Playwright 浏览器单例（lazy init，避免每次请求 launch）
         self._pw_browser = None
@@ -339,9 +358,18 @@ class ZentrimPipeline:
         task.add_done_callback(lambda t: _running_tasks.pop(_task_key(entry_id, block_id), None))
         return task
 
-    def process_ink(self, entry_id: str, block_id: str, cos_key: str, user_id: int) -> asyncio.Task:
+    def process_ink(
+        self, entry_id: str, block_id: str, cos_key: str, user_id: int,
+        tier: str = "ocr",
+    ) -> asyncio.Task:
+        """触发 ink 管线。
+
+        tier:
+        - "ocr" (L0): qwen3.5-ocr 专用模型，单图无分块，用于每次保存后更新
+        - "vlm" (L1): Heavy VLM + 分块 + 结构化，用于首次创建 / 定时 / 手动触发
+        """
         task = asyncio.create_task(
-            self._run_ink_pipeline(entry_id, block_id, cos_key, user_id)
+            self._run_ink_pipeline(entry_id, block_id, cos_key, user_id, tier=tier)
         )
         _running_tasks[_task_key(entry_id, block_id)] = task
         task.add_done_callback(lambda t: _running_tasks.pop(_task_key(entry_id, block_id), None))
@@ -406,6 +434,7 @@ class ZentrimPipeline:
         text: str,
         html: Optional[str] = None,
         model_name: Optional[str] = None,
+        tier: Optional[str] = None,
     ) -> None:
         db = self._get_db()
         own_session = self._db is None
@@ -418,22 +447,39 @@ class ZentrimPipeline:
                     data = block.data if isinstance(block.data, dict) else {}
                     data["html"] = html
                     block.data = data
+
+                # 写入 OCR/VLM 分级元数据
+                if tier:
+                    data = block.data if isinstance(block.data, dict) else {}
+                    ocr_meta = data.get("ocr") or {}
+                    if not isinstance(ocr_meta, dict):
+                        ocr_meta = {}
+                    ocr_meta[f"{tier}_at"] = datetime.utcnow().isoformat()
+                    # 记录此时的笔划数（用于后续冷却判断）
+                    strokes = data.get("strokes")
+                    if isinstance(strokes, list):
+                        ocr_meta["stroke_count"] = len(strokes)
+                    data["ocr"] = ocr_meta
+                    block.data = data
+
                 db.commit()
 
-            vector_id = await self._index_block(block_id, text, entry_id, user_id)
-            if vector_id:
+            result = await self._index_block(block_id, text, entry_id, user_id)
+            if result:
+                vector_id, emb_model = result
                 try:
                     db2 = self._get_db() if not own_session else SessionLocal()
                     try:
                         blk = db2.query(ZentrimBlock).filter(ZentrimBlock.id == block_id).first()
                         if blk:
                             blk.vector_id = vector_id
+                            blk.model_name = emb_model
                             db2.commit()
                     finally:
                         if own_session:
                             db2.close()
                 except Exception as e:
-                    logger.warning(f"[Pipeline] vector_id write-back failed: block={block_id} err={e}")
+                    logger.warning(f"[Pipeline] vector/embedding write-back failed: block={block_id} err={e}")
 
             self._decrement_processing_count(db, entry_id, user_id)
         except Exception as e:
@@ -568,18 +614,19 @@ class ZentrimPipeline:
             db.commit()
 
             # 向量索引（用 vlm_description；为空则跳过）
-            vector_id: Optional[str] = None
             if vlm_description and vlm_description.strip():
-                vector_id = await self._index_block(
+                result = await self._index_block(
                     block_id, vlm_description, entry_id, user_id
                 )
-                if vector_id:
+                if result:
+                    vector_id, emb_model = result
                     try:
                         db2 = self._get_db() if not own_session else SessionLocal()
                         try:
                             blk = db2.query(ZentrimBlock).filter(ZentrimBlock.id == block_id).first()
                             if blk:
                                 blk.vector_id = vector_id
+                                blk.model_name = emb_model
                                 db2.commit()
                         finally:
                             if own_session:
@@ -714,7 +761,12 @@ class ZentrimPipeline:
         entry.updated_at = datetime.now(timezone.utc)
         db.commit()
 
-    async def _index_block(self, block_id: str, text: str, entry_id: str, user_id: int) -> Optional[str]:
+    async def _index_block(self, block_id: str, text: str, entry_id: str, user_id: int) -> Optional[tuple]:
+        """索引一个 block 的文本到向量存储。
+
+        Returns:
+            (vector_id, embedding_model) 或 None（索引失败/文本为空）
+        """
         if not text or not text.strip():
             return None
         try:
@@ -722,12 +774,21 @@ class ZentrimPipeline:
             vs = VectorSearchService(agent_hash=None)
             index_name = f"idx-zentrim-{user_id}"
             vector_id = f"zentrim:{block_id}"
+            emb_model = settings.MAIN_EMBEDDING_MODEL
             await vs.index_text(
                 key=vector_id, text=text, index=index_name,
-                metadata={"entry_id": entry_id, "block_id": block_id, "user_id": user_id},
+                metadata={
+                    "entry_id": entry_id,
+                    "block_id": block_id,
+                    "user_id": user_id,
+                    "embedding_model": emb_model,
+                },
             )
-            logger.info(f"[Pipeline] indexed block={block_id} to {index_name}")
-            return vector_id
+            logger.info(
+                f"[Pipeline] indexed block={block_id} to {index_name} "
+                f"model={emb_model}"
+            )
+            return (vector_id, emb_model)
         except Exception as e:
             logger.warning(f"[Pipeline] vector index failed (non-fatal): block={block_id} err={e}")
             return None
@@ -764,6 +825,23 @@ class ZentrimPipeline:
             model_name=cfg.name, image_b64=image_b64, mime=mime, prompt=prompt,
             max_tokens=max_tokens if max_tokens is not None else cfg.max_tokens,
             timeout_s=cfg.timeout_s,
+        )
+
+    async def _call_ocr(
+        self, image_b64: str, mime: str, prompt: Optional[str] = None,
+    ) -> Optional[str]:
+        """L0: 调用 qwen3.5-ocr 专用 OCR 模型提取文字。
+
+        比通用 VLM 便宜 ~10x、更快（~2-3s），适合每次保存时更新 block.text 以保证搜索实时性。
+        输出纯文本，不带 bbox 坐标。
+        """
+        ocr_prompt = prompt or "逐行提取图中所有文字，保留换行和段落结构。对于图表和公式，用 [图表] [公式] 标注其位置。"
+        return await self._do_call_vlm(
+            model_name=self.ocr_model,
+            image_b64=image_b64, mime=mime,
+            prompt=ocr_prompt,
+            max_tokens=self.ocr_max_tokens,
+            timeout_s=self.ocr_timeout_s,
         )
 
     async def _call_vlm(
@@ -840,6 +918,59 @@ class ZentrimPipeline:
         mime = f"image/{ext}"
         b64 = base64.b64encode(image_data).decode("utf-8")
         return b64, mime
+
+    @staticmethod
+    def _tile_image(image_data: bytes, max_size: int = INK_TILE_MAX_SIZE,
+                    overlap: float = INK_TILE_OVERLAP) -> list:
+        """将大图拆成重叠的分块，每块边长不超过 max_size。
+        返回 [(b64, mime, (x, y, w, h)), ...] 列表。
+        如果原图不需要拆分，返回单元素列表。
+        """
+        from PIL import Image as PILImage
+        import io
+
+        img = PILImage.open(io.BytesIO(image_data))
+        orig_w, orig_h = img.size
+
+        # 不需要拆分
+        if orig_w <= max_size and orig_h <= max_size:
+            b64, mime = ZentrimPipeline._encode_image(image_data)
+            return [(b64, mime, (0, 0, orig_w, orig_h))]
+
+        tiles = []
+        step_w = int(max_size * (1 - overlap))
+        step_h = int(max_size * (1 - overlap))
+
+        y = 0
+        while y < orig_h:
+            x = 0
+            tile_h = min(max_size, orig_h - y)
+            while x < orig_w:
+                tile_w = min(max_size, orig_w - x)
+                box = (x, y, x + tile_w, y + tile_h)
+                tile = img.crop(box)
+                # 如果分块仍超过 byte 限制，缩放到 max_size 以内
+                buf = io.BytesIO()
+                tile.save(buf, format="PNG")
+                tile_bytes = buf.getvalue()
+                if len(tile_bytes) > VLM_MAX_IMAGE_BYTES:
+                    ratio = (VLM_MAX_IMAGE_BYTES / len(tile_bytes)) ** 0.5 * 0.9
+                    new_w = max(1, int(tile_w * ratio))
+                    new_h = max(1, int(tile_h * ratio))
+                    tile = tile.resize((new_w, new_h), PILImage.LANCZOS)
+                    buf = io.BytesIO()
+                    tile.save(buf, format="PNG")
+                    tile_bytes = buf.getvalue()
+                b64, mime = ZentrimPipeline._encode_image(tile_bytes)
+                tiles.append((b64, mime, box))
+                x += step_w
+            y += step_h
+
+        logger.info(
+            f"[Pipeline] tiled image {orig_w}x{orig_h} → {len(tiles)} tiles "
+            f"(max={max_size}, overlap={overlap})"
+        )
+        return tiles
 
     # ════════════════════════════════════════
     # V 阶段：photo 管线新步骤
@@ -1314,14 +1445,16 @@ class ZentrimPipeline:
                     block.text = text
                 block.model_name = self.vision_heavy.name
                 db.commit()
-            vector_id = await self._index_block(block_id, text, entry_id, user_id)
-            if vector_id:
+            result = await self._index_block(block_id, text, entry_id, user_id)
+            if result:
+                vector_id, emb_model = result
                 try:
                     db2 = self._get_db() if not own_session else SessionLocal()
                     try:
                         blk = db2.query(ZentrimBlock).filter(ZentrimBlock.id == block_id).first()
                         if blk:
                             blk.vector_id = vector_id
+                            blk.model_name = emb_model
                             db2.commit()
                     finally:
                         if own_session:
@@ -1337,34 +1470,136 @@ class ZentrimPipeline:
     # ─── Audio / Ink 管线（保留不动） ───
 
     async def _run_audio_pipeline(self, entry_id: str, block_id: str, cos_key: str, user_id: int) -> None:
+        from services.asr_service import transcribe as asr_transcribe
+        from services.storage_service import CosStorage
+
         try:
             self._set_processing(entry_id, block_id, user_id)
-            audio_data = self._download_file(cos_key, user_id=user_id)
-            if not audio_data:
-                await self._set_failed(entry_id, block_id, user_id, "音频下载失败")
+
+            # 生成 COS 预签名 GET URL（48h 有效，阿里云可访问）
+            storage = CosStorage()
+            audio_url = storage.generate_presigned_get_url(cos_key, expired=172800)
+            if not audio_url:
+                # fallback: 用公开 URL 试试
+                audio_url = f"https://{settings.TENCENT_COS_BUCKET}.cos.{settings.TENCENT_COS_REGION}.myqcloud.com/{cos_key}"
+
+            # 调 ASR 服务（异步，等待完成）
+            result = await asr_transcribe(audio_url)
+            if not result:
+                await self._set_failed(entry_id, block_id, user_id, "ASR 识别失败")
                 return
-            text = "[ASR 转写待接入]"
-            await self._set_completed(entry_id, block_id, user_id, text=text, model_name="asr-placeholder")
+
+            # 写入 block
+            db = self._get_db()
+            own_session = self._db is None
+            try:
+                block = db.query(ZentrimBlock).filter(ZentrimBlock.id == block_id).first()
+                if block:
+                    # text 字段：全文，供搜索和列表预览
+                    block.text = result.full_text
+                    block.model_name = result.model
+                    # data 字段：完整转写结果（segments, words, diarization 等）
+                    data = block.data if isinstance(block.data, dict) else {}
+                    data["transcription"] = result.to_dict()
+                    block.data = data
+                    db.commit()
+
+                # 向量索引
+                result = await self._index_block(block_id, result.full_text, entry_id, user_id)
+                if result and block:
+                    vector_id, emb_model = result
+                    try:
+                        db2 = self._get_db() if not own_session else SessionLocal()
+                        try:
+                            blk = db2.query(ZentrimBlock).filter(ZentrimBlock.id == block_id).first()
+                            if blk:
+                                blk.vector_id = vector_id
+                                blk.model_name = emb_model
+                                db2.commit()
+                        finally:
+                            if own_session:
+                                db2.close()
+                    except Exception as e:
+                        logger.warning(f"[Pipeline] vector_id write-back failed: block={block_id} err={e}")
+
+                self._decrement_processing_count(db, entry_id, user_id)
+                logger.info(
+                    f"[Pipeline] audio ASR completed: entry={entry_id} block={block_id} "
+                    f"model={result.model} segments={len(result.segments)}"
+                )
+            except Exception as e:
+                logger.exception(f"[Pipeline] audio result write failed: {e}")
+                self._decrement_processing_count(db, entry_id, user_id)
+            finally:
+                if own_session:
+                    db.close()
         except Exception as e:
             logger.exception(f"[Pipeline] audio pipeline error: entry={entry_id} block={block_id}")
             await self._set_failed(entry_id, block_id, user_id, str(e))
 
-    async def _run_ink_pipeline(self, entry_id: str, block_id: str, cos_key: str, user_id: int) -> None:
+    async def _run_ink_pipeline(
+        self, entry_id: str, block_id: str, cos_key: str, user_id: int,
+        tier: str = "ocr",
+    ) -> None:
+        """Ink 管线主入口。
+
+        tier 参数：
+        - "ocr" (L0): 调用 qwen3.5-ocr 专用模型，单图无分块，~3s，¥0.01。
+          用于每次保存时快速更新 block.text 以保证搜索实时性。
+        - "vlm" (L1): 调用 Heavy VLM + 分块 + 结构化提取，~30-60s。
+          用于首次创建 / 定时（30min 冷却）/ 手动触发。解析复杂排版（公式、图表）。
+        """
         try:
             self._set_processing(entry_id, block_id, user_id)
             image_data = self._download_file(cos_key, user_id=user_id)
             if not image_data:
                 await self._set_failed(entry_id, block_id, user_id, "画布图片下载失败")
                 return
-            if len(image_data) > VLM_MAX_IMAGE_BYTES:
-                await self._set_failed(entry_id, block_id, user_id, f"图片过大 ({len(image_data)} bytes)")
-                return
-            b64, mime = self._encode_image(image_data)
-            semantic = await self._call_vlm(b64, mime, PROMPT_INK_SEMANTIC, max_tokens=2048)
-            text = semantic or "[手写内容，VLM 描述失败]"
-            await self._set_completed(entry_id, block_id, user_id, text=text, model_name=VLM_MODEL)
+
+            if tier == "ocr":
+                # L0: 单图 OCR，不分块
+                b64, mime = self._encode_image(image_data)
+                text = await self._call_ocr(b64, mime)
+                if text:
+                    await self._set_completed(
+                        entry_id, block_id, user_id,
+                        text=text, model_name=self.ocr_model, tier=tier,
+                    )
+                else:
+                    await self._set_completed(
+                        entry_id, block_id, user_id,
+                        text="[手写内容，OCR 识别失败]",
+                        model_name=self.ocr_model, tier=tier,
+                    )
+            else:
+                # L1: VLM + 分块
+                tiles = self._tile_image(image_data)
+                tile_count = len(tiles)
+                parts: list[str] = []
+
+                for i, (b64, mime, box) in enumerate(tiles):
+                    x, y, w, h = box
+                    if tile_count > 1:
+                        prompt = (
+                            f"这是画布的第 {i+1}/{tile_count} 块（位置: x={x}, y={y}, {w}x{h}）。\n"
+                            + PROMPT_INK_OCR
+                        )
+                    else:
+                        prompt = PROMPT_INK_OCR
+
+                    text = await self._call_vlm(b64, mime, prompt, max_tokens=2048)
+                    if text:
+                        parts.append(f"[块 {i+1}/{tile_count}]\n{text}")
+                    else:
+                        parts.append(f"[块 {i+1}/{tile_count} 识别失败]")
+
+                merged = "\n\n".join(parts) if parts else "[手写内容，VLM OCR 失败]"
+                await self._set_completed(
+                    entry_id, block_id, user_id,
+                    text=merged, model_name=VLM_MODEL, tier=tier,
+                )
         except Exception as e:
-            logger.exception(f"[Pipeline] ink pipeline error: entry={entry_id} block={block_id}")
+            logger.exception(f"[Pipeline] ink pipeline error: entry={entry_id} block={block_id} tier={tier}")
             await self._set_failed(entry_id, block_id, user_id, str(e))
 
     @staticmethod

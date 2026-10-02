@@ -73,7 +73,7 @@ class TestMomentsServiceCreateMoment:
 
         moment = svc.create_moment(
             db=mock_db,
-            group_id="group-123",
+            group_id=123,
             agent_hash="abcd",
             kind="manual",
             title="Test Title",
@@ -83,7 +83,7 @@ class TestMomentsServiceCreateMoment:
         # Verify object was created with correct attributes
         assert len(added_objects) == 1
         obj = added_objects[0]
-        assert obj.group_id == "group-123"
+        assert obj.group_id == 123
         assert obj.agent_hash == "abcd"
         assert obj.kind == "manual"
         assert obj.title == "Test Title"
@@ -105,7 +105,7 @@ class TestMomentsServiceCreateMoment:
 
         moment = svc.create_moment(
             db=mock_db,
-            group_id="group-123",
+            group_id=123,
             agent_hash=None,
             kind="manual",
             title="User Post",
@@ -132,7 +132,7 @@ class TestMomentsServiceCreateMoment:
         attachments = [{"type": "image", "url": "http://example.com/img.jpg"}]
         moment = svc.create_moment(
             db=mock_db,
-            group_id="group-123",
+            group_id=123,
             agent_hash="abcd",
             kind="auto",
             title=None,
@@ -298,7 +298,7 @@ class TestMomentsServicePushMomentsEvent:
             mock_sl.return_value = mock_db
             mock_db.query.return_value.filter.return_value.first.return_value = None
 
-            with patch("routers.desktop_ws.manager") as mock_manager:
+            with patch("routers.client_ws.manager") as mock_manager:
                 mock_manager.send = AsyncMock(side_effect=Exception("WS error"))
 
                 # Should not raise

@@ -57,6 +57,7 @@ from models.database import SessionLocal, get_db
 from models.zentrim import ZentrimBlock
 from services.zentrim_pipeline import pipeline as zentrim_pipeline
 from services.zentrim_service import ZentrimService, _generate_ulid
+from services.storage_service import CosStorage
 from utils.auth import get_current_user_id
 
 logger = logging.getLogger(__name__)
@@ -116,7 +117,15 @@ class PipelineProcessRequest(BaseModel):
     """触发管线处理请求"""
     block_id: str
     cos_key: str
+    tier: str = "ocr"  # "ocr" (L0) | "vlm" (L1)
     block_type: str  # "photo" | "audio" | "ink"
+
+
+class PresignUploadRequest(BaseModel):
+    """预签名上传 URL 请求"""
+    entry_id: str
+    mime: str = Field(default="application/octet-stream", max_length=64)
+    file_type: str = Field(default="audio", pattern=r"^[a-z0-9_-]{1,32}$")
 
 
 # fix(P0-3): cos_key 白名单正则 — 必须以 feclaw/zentrim/user_{uid}/ 开头，
@@ -616,9 +625,9 @@ async def search_entries(
     user_id: int = Depends(get_current_user_id),
     db: Session = Depends(get_db),
 ):
-    """混合搜索（向量优先 + LIKE 兜底合并）"""
+    """混合搜索（向量 + FULLTEXT + Reranker 精排，返回 block 级匹配信息）"""
     svc = ZentrimService(db)
-    entries = svc.search_zentrim(
+    entries, match_blocks = svc.search_zentrim(
         user_id=user_id,
         query=q,
         limit=limit,
@@ -627,7 +636,10 @@ async def search_entries(
     return {
         "query": q,
         "count": len(entries),
-        "results": [ZentrimService.serialize_entry(e) for e in entries],
+        "results": [
+            {**ZentrimService.serialize_entry(e), "match_blocks": match_blocks.get(e.id, [])}
+            for e in entries
+        ],
     }
 
 
@@ -671,7 +683,7 @@ async def trigger_pipeline(
     # fix(P0-2): 从 DB 读 block.data.key 作为权威 cos_key，忽略前端传入的 cos_key
     # （如果前端传入的 cos_key 与 DB 不一致，记 warning 但以 DB 为准）
     block_data = block.data if isinstance(block.data, dict) else {}
-    db_cos_key = block_data.get("key") or block_data.get("cos_key")
+    db_cos_key = block_data.get("key") or block_data.get("cos_key") or block_data.get("canvas_key")
     if not db_cos_key:
         raise HTTPException(
             status_code=400,
@@ -694,7 +706,8 @@ async def trigger_pipeline(
     elif bt == "audio":
         zentrim_pipeline.process_audio(entry_id, body.block_id, cos_key, user_id)
     elif bt == "ink":
-        zentrim_pipeline.process_ink(entry_id, body.block_id, cos_key, user_id)
+        tier = getattr(body, "tier", None) or "ocr"
+        zentrim_pipeline.process_ink(entry_id, body.block_id, cos_key, user_id, tier=tier)
     else:
         raise HTTPException(
             status_code=400,
@@ -846,3 +859,60 @@ async def pipeline_stream(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+# ────────────────────────────────────────────────────────────────────
+# 文件直传 COS（预签名 PUT URL）
+# ────────────────────────────────────────────────────────────────────
+@router.post("/upload/presign")
+async def presign_upload(
+    body: PresignUploadRequest,
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+):
+    """
+    生成 COS 预签名上传 URL，让前端直接将文件传到 COS，不经后端转发。
+
+    返回：
+    {
+      "upload_url": "https://bucket.cos.region.myqcloud.com/key?...",
+      "key": "feclaw/zentrim/user_{uid}/blocks/{entry_id}_{file_type}_{ts}.{ext}",
+      "cos_url": "https://bucket.cos.region.myqcloud.com/key"
+    }
+    """
+    svc = ZentrimService(db)
+    entry = svc.get_entry(body.entry_id, user_id=user_id)
+    if not entry:
+        raise HTTPException(status_code=404, detail="Entry not found")
+
+    # 生成唯一 key：前缀限定在当前用户的 zentrim 目录下
+    ts = int(datetime.utcnow().timestamp())
+    ext = body.mime.split("/")[-1].split(";")[0].lower()
+    # 对未知/异常扩展兜底
+    if not ext or len(ext) > 8:
+        ext = "bin"
+    from urllib.parse import quote
+    safe_ext = quote(ext, safe="")
+    key = (
+        f"{settings.STORAGE_PREFIX}zentrim/user_{user_id}/blocks/"
+        f"{body.entry_id}_{body.file_type}_{ts}.{safe_ext}"
+    )
+
+    # 生成预签名 PUT URL（10 分钟有效）
+    storage = CosStorage()
+    upload_url = storage.generate_presigned_put_url(key, expired=600)
+    if not upload_url:
+        raise HTTPException(status_code=500, detail="无法生成预签名上传 URL")
+
+    # 生成公开访问 URL（前端直显时用预签名 GET URL 兜底）
+    cos_url = svc.make_public_url(key, body.mime)
+
+    logger.info(
+        f"[audit] zentrim.presign_upload user={user_id} entry={body.entry_id} "
+        f"key={key} file_type={body.file_type}"
+    )
+    return {
+        "upload_url": upload_url,
+        "key": key,
+        "cos_url": cos_url,
+    }

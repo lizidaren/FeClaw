@@ -414,9 +414,9 @@ class TestGroupDispatchServiceOnMessage:
             mock_db = MagicMock()
             mock_sl.return_value = mock_db
 
-            with patch.object(svc, "dispatch_to_members", new_callable=AsyncMock) as mock_dispatch:
+            with patch.object(svc, "_dispatch_after_message", new_callable=AsyncMock) as mock_dispatch:
                 msg_id = await svc.on_message(
-                    group_id="group-123",
+                    group_id=123,
                     sender_type="user",
                     sender_hash="",
                     content="Test message",
@@ -426,7 +426,7 @@ class TestGroupDispatchServiceOnMessage:
                 assert msg_id is not None
                 mock_db.add.assert_called()
                 mock_db.commit.assert_called()
-                mock_dispatch.assert_called_once()
+                mock_dispatch.assert_called_once_with(123, "")
 
     @pytest.mark.asyncio
     async def test_on_message_with_attachments(self):
@@ -440,7 +440,7 @@ class TestGroupDispatchServiceOnMessage:
             with patch.object(svc, "dispatch_to_members", new_callable=AsyncMock):
                 attachments = [{"type": "image", "url": "http://example.com/img.jpg"}]
                 msg_id = await svc.on_message(
-                    group_id="group-123",
+                    group_id=123,
                     sender_type="user",
                     sender_hash="",
                     content="Check this out",

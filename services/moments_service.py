@@ -26,7 +26,7 @@ class MomentsService:
     def create_moment(
         self,
         db: Session,
-        group_id: str,
+        group_id: int,
         agent_hash: Optional[str],
         kind: str,
         title: Optional[str],
@@ -53,7 +53,7 @@ class MomentsService:
     def get_moments(
         self,
         db: Session,
-        group_id: str,
+        group_id: int,
         before: Optional[datetime] = None,
         limit: int = 50,
     ) -> List[GroupMoments]:
@@ -71,7 +71,7 @@ class MomentsService:
         self,
         db: Session,
         user_id: int,
-        group_id: Optional[str] = None,
+        group_id: Optional[int] = None,
         before: Optional[datetime] = None,
         limit: int = 50,
     ) -> List[GroupMoments]:
@@ -103,7 +103,7 @@ class MomentsService:
             .all()
         )
 
-    def delete_moment(self, db: Session, moment_id: str, group_id: str, user_id: int) -> bool:
+    def delete_moment(self, db: Session, moment_id: str, group_id: int, user_id: int) -> bool:
         """Delete a moment (owner or owning group's user only)."""
         from models.group import Group
 
@@ -126,7 +126,7 @@ class MomentsService:
 
     # ========== WS Push ==========
 
-    async def push_moments_event(self, group_id: str, moment: GroupMoments):
+    async def push_moments_event(self, group_id: int, moment: GroupMoments):
         """Push a moments_event to connected Desktop WS clients."""
         try:
             from routers.client_ws import manager
@@ -168,7 +168,7 @@ class MomentsService:
     def auto_publish(
         self,
         db: Session,
-        group_id: str,
+        group_id: int,
         agent_hash: Optional[str],
         kind: str,
         title: str,

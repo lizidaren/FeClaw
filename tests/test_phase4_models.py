@@ -61,13 +61,13 @@ class TestGroupMemberModel:
     def test_group_member_create(self):
         """GroupMember can be created"""
         member = GroupMember(
-            group_id="group-123",
+            group_id=123,
             agent_hash="abcd",
             role="member",
             is_silent=False,
         )
 
-        assert member.group_id == "group-123"
+        assert member.group_id == 123
         assert member.agent_hash == "abcd"
         assert member.role == "member"
         assert member.is_silent is False
@@ -75,7 +75,7 @@ class TestGroupMemberModel:
     def test_group_member_owner_role(self):
         """GroupMember can have owner role"""
         owner = GroupMember(
-            group_id="group-123",
+            group_id=123,
             agent_hash="",
             role="owner",
         )
@@ -98,7 +98,7 @@ class TestGroupMessageModel:
     def test_group_message_create(self):
         """GroupMessage can be created"""
         msg = GroupMessage(
-            group_id="group-123",
+            group_id=123,
             sender_type="user",
             sender_hash="",
             content="Hello world",
@@ -106,7 +106,7 @@ class TestGroupMessageModel:
             round=0,
         )
 
-        assert msg.group_id == "group-123"
+        assert msg.group_id == 123
         assert msg.sender_type == "user"
         assert msg.content == "Hello world"
         assert msg.message_type == "text"
@@ -116,7 +116,7 @@ class TestGroupMessageModel:
     def test_group_message_with_mentions(self):
         """GroupMessage handles mentions"""
         msg = GroupMessage(
-            group_id="group-123",
+            group_id=123,
             sender_type="user",
             sender_hash="",
             content="@agent1 @agent2",
@@ -129,7 +129,7 @@ class TestGroupMessageModel:
         """GroupMessage handles attachments"""
         attachments = [{"type": "image", "url": "http://example.com/img.jpg"}]
         msg = GroupMessage(
-            group_id="group-123",
+            group_id=123,
             sender_type="agent",
             sender_hash="abcd",
             content="Check this",
@@ -141,7 +141,7 @@ class TestGroupMessageModel:
     def test_group_message_agent_sender(self):
         """GroupMessage works with agent sender"""
         msg = GroupMessage(
-            group_id="group-123",
+            group_id=123,
             sender_type="agent",
             sender_hash="abcd",
             content="Reply",
@@ -157,14 +157,14 @@ class TestGroupMomentsModel:
     def test_group_moments_create(self):
         """GroupMoments can be created"""
         moment = GroupMoments(
-            group_id="group-123",
+            group_id=123,
             agent_hash="abcd",
             kind="manual",
             title="Test Moment",
             content="Content here",
         )
 
-        assert moment.group_id == "group-123"
+        assert moment.group_id == 123
         assert moment.agent_hash == "abcd"
         assert moment.kind == "manual"
         assert moment.title == "Test Moment"
@@ -173,7 +173,7 @@ class TestGroupMomentsModel:
     def test_group_moments_without_agent(self):
         """GroupMoments can be created without agent (user post)"""
         moment = GroupMoments(
-            group_id="group-123",
+            group_id=123,
             agent_hash=None,
             kind="manual",
             title="User Post",
@@ -185,7 +185,7 @@ class TestGroupMomentsModel:
         """GroupMoments handles attachments"""
         attachments = [{"type": "file", "name": "doc.pdf"}]
         moment = GroupMoments(
-            group_id="group-123",
+            group_id=123,
             agent_hash="abcd",
             kind="auto",
             title="Auto Post",

@@ -321,3 +321,15 @@ class PathResolver:
             "is_hidden": is_hidden,
             "nlink": nlink,
         }
+
+
+# ──────────── 群共享空间目录常量 ────────────
+# 对应 COS 路径：feclaw/groups/{group_id}/{DIR_NAME}/{filename}
+# 设计哲学：三层共享空间
+#   .attach/ — 聊天附件，只读不可变，按日期分组
+#   .share/  — 共享活文档，可编辑，canvas-editor 格式
+#   .ref/    — 参考库，Agent 策展的知识，只读浏览
+
+GROUP_ATTACH_DIR = ".attach"   # 聊天附件：只读不可变，按日期分组
+GROUP_SHARE_DIR = ".share"     # 活文档：可编辑，canvas-editor 格式
+GROUP_REF_DIR = ".ref"         # 参考库：Agent 策展的知识，只读浏览

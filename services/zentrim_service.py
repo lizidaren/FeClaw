@@ -33,6 +33,56 @@ def _escape_like(s: str) -> str:
         return s
     return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
+
+def _snippet_blocks(blocks: List[dict], query: str, ctx: int = 80) -> List[dict]:
+    """为每个匹配 block 生成带上下文的 snippet。
+
+    在 block.text 中查找 query 的位置，截取前后 ctx 字符作为摘要；
+    用 <b>...</b> 标记匹配位置（前端可解析为高亮）。
+    """
+    if not query:
+        return blocks
+    q_lower = query.lower()
+    out = []
+    for b in blocks:
+        text = b.get("text", "")
+        if not text:
+            out.append({**b, "snippet": ""})
+            continue
+        # 查找 query 位置
+        idx = text.lower().find(q_lower)
+        if idx < 0 and len(text) > 400:
+            # query 不在前 400 字符中——尝试全文搜索
+            idx = text.lower().find(q_lower)
+        if idx >= 0:
+            start = max(0, idx - ctx)
+            end = min(len(text), idx + len(query) + ctx)
+            snippet = text[start:end]
+            if start > 0:
+                snippet = "…" + snippet
+            if end < len(text):
+                snippet = snippet + "…"
+            # 用 <b> 标记匹配
+            match_start = idx - start + (1 if start > 0 else 0)
+            match_end = match_start + len(query)
+            snippet = (
+                snippet[:match_start]
+                + "<b>"
+                + snippet[match_start:match_end]
+                + "</b>"
+                + snippet[match_end:]
+            )
+        else:
+            snippet = text[:ctx * 2] + ("…" if len(text) > ctx * 2 else "")
+        out.append({
+            "block_id": b["block_id"],
+            "type": b["type"],
+            "snippet": snippet,
+            "score": b.get("score", 0),
+            "source": b.get("source", ""),
+        })
+    return out
+
 from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
 
@@ -47,6 +97,49 @@ from models.zentrim import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _get_primary_key(blk_data: dict, btype: str) -> str | None:
+    """
+    从 block.data 中提取该类型的 primary file key。
+
+    每种 block 类型的 key 位置由其 schema 定义：
+    - photo: data.original.key（原图，pipeline 的输入）
+    - audio: data.key（录音文件）
+    - ink:   data.canvas_key（画布渲染快照，pipeline OCR 输入）
+    - file:  data.key
+    """
+    if btype == "photo":
+        original = blk_data.get("original")
+        if isinstance(original, dict):
+            return original.get("key")  # type: ignore[return-value]
+        return None
+    if btype in ("audio", "file"):
+        return blk_data.get("key")  # type: ignore[return-value]
+    if btype == "ink":
+        return blk_data.get("canvas_key")  # type: ignore[return-value]
+    return None
+
+
+def _block_stable_key(blk_data: dict, btype: str) -> str:
+    """计算 block 的稳定匹配键，用于 upsert 时识别"同一个逻辑 block"。
+
+    - Singleton 类型（ink, text）：每个 entry 只有一个，键 = type
+    - 文件类型（photo, audio, image, file）：键 = type:cos_key
+    - 无 key 的 block：退化为 ULID（总是不匹配，始终 INSERT）
+    """
+    if btype in ("ink", "text"):
+        return btype
+    pk = _get_primary_key(blk_data, btype)
+    if pk:
+        return f"{btype}:{pk}"
+    # 没有可识别 key 的 block（不应发生，但安全起见）
+    return f"{btype}:{_generate_ulid()}"
+
+
+# OCR / VLM 冷却配置
+OCR_COOLDOWN_SECONDS = 120       # L0 OCR: 2 分钟
+VLM_COOLDOWN_SECONDS = 1800      # L1 VLM: 30 分钟
 
 
 # fix(P1-9): ULID 单调递增保护 — 防止系统时钟回拨导致时间戳倒退
@@ -381,16 +474,14 @@ class ZentrimService:
         blocks: List[Dict[str, Any]],
         user_id: Optional[int] = None,
     ) -> int:
-        """全量替换一个 entry 的所有 blocks。
+        """Upsert 模式替换 entry 的所有 blocks。
 
         流程：
         1. 校验 entry 存在 + user_id 匹配
-        2. 事务内：删除旧 blocks → 插入新 blocks（生成 ULID + sort_order）
-        3. 更新 entry.updated_at
-        4. 返回 block_count
-
-        每个 block dict 至少需要 {'type': str}；
-        可选字段：'data' (dict), 'text' (str), 'model_name' (str), 'vector_id' (str)
+        2. 按稳定键匹配已有 blocks → UPDATE 或 INSERT 或 DELETE
+        3. 对于 ink blocks：根据 OCR 冷却状态决定是否触发管线
+        4. 更新 entry.updated_at
+        5. 返回 block_count
         """
         entry = self.get_entry(entry_id, user_id=user_id)
         if not entry:
@@ -399,18 +490,27 @@ class ZentrimService:
         if not isinstance(blocks, list):
             raise ValueError("blocks must be a list")
 
-        # fix(blocks-migration): 防止单条目 blocks 数量被滥用撑爆表
         if len(blocks) > 1000:
             raise ValueError("Too many blocks in one entry (max 1000)")
 
         try:
-            # 1. 删除旧的
-            self.db.query(ZentrimBlock).filter(
-                ZentrimBlock.entry_id == entry_id
-            ).delete(synchronize_session=False)
+            # 1. 读取已有 blocks，按稳定键建索引
+            existing_blocks = (
+                self.db.query(ZentrimBlock)
+                .filter(ZentrimBlock.entry_id == entry_id)
+                .all()
+            )
+            existing_by_key: Dict[str, ZentrimBlock] = {}
+            for eb in existing_blocks:
+                eb_data = eb.data if isinstance(eb.data, dict) else {}
+                key = _block_stable_key(eb_data, eb.type)
+                existing_by_key[key] = eb
 
-            # 2. 插入新的
-            inserted_blocks: List[tuple] = []  # (block_id, block_type, cos_key)
+            # 2. 逐块匹配
+            incoming_keys: set = set()
+            new_blocks: List[tuple] = []       # (block_id, btype, cos_key) — 管线触发候选
+            reocr_blocks: List[tuple] = []     # (block_id, cos_key, tier) — ink OCR 重触发
+
             for idx, blk in enumerate(blocks):
                 if not isinstance(blk, dict):
                     raise ValueError(f"blocks[{idx}] must be a dict")
@@ -420,27 +520,51 @@ class ZentrimService:
                         f"blocks[{idx}].type must be one of {BLOCK_TYPES}, got: {btype!r}"
                     )
 
-                new_block_id = _generate_ulid()
-                new_block = ZentrimBlock(
-                    id=new_block_id,
-                    entry_id=entry_id,
-                    sort_order=idx,
-                    type=btype,
-                    data=blk.get("data"),
-                    text=blk.get("text"),
-                    model_name=blk.get("model_name"),
-                    vector_id=blk.get("vector_id"),
-                )
-                self.db.add(new_block)
-
-                # 收集需要触发管线的 block
                 blk_data = blk.get("data") or {}
-                if isinstance(blk_data, dict):
-                    cos_key = blk_data.get("key") or blk_data.get("cos_key")
-                    if cos_key and btype in ("photo", "audio", "ink"):
-                        inserted_blocks.append((new_block_id, btype, cos_key))
+                if not isinstance(blk_data, dict):
+                    blk_data = {}
+                key = _block_stable_key(blk_data, btype)
+                incoming_keys.add(key)
 
-            # 3. 刷新 entry.updated_at
+                existing = existing_by_key.get(key)
+                if existing is not None:
+                    # UPSERT: 保留 id、created_at、vector_id、model_name
+                    existing.sort_order = idx
+                    existing.data = blk.get("data")
+                    existing.text = blk.get("text")
+
+                    # ink block: 检查是否需要重新 OCR
+                    if btype == "ink":
+                        cos_key = _get_primary_key(blk_data, btype)
+                        if cos_key:
+                            tier = self._ink_ocr_tier(existing, blk_data)
+                            if tier:
+                                reocr_blocks.append((existing.id, cos_key, tier))
+                else:
+                    # INSERT: 新 block
+                    new_id = _generate_ulid()
+                    new_block = ZentrimBlock(
+                        id=new_id,
+                        entry_id=entry_id,
+                        sort_order=idx,
+                        type=btype,
+                        data=blk.get("data"),
+                        text=blk.get("text"),
+                        model_name=blk.get("model_name"),
+                        vector_id=blk.get("vector_id"),
+                    )
+                    self.db.add(new_block)
+
+                    cos_key = _get_primary_key(blk_data, btype)
+                    if cos_key:
+                        new_blocks.append((new_id, btype, cos_key))
+
+            # 3. DELETE: 旧 blocks 中不在 incoming 的
+            removed_keys = set(existing_by_key.keys()) - incoming_keys
+            for key in removed_keys:
+                self.db.delete(existing_by_key[key])
+
+            # 4. 刷新 entry.updated_at
             entry.updated_at = datetime.now(timezone.utc)
             self.db.commit()
         except Exception as e:
@@ -450,29 +574,87 @@ class ZentrimService:
             )
             raise
 
-        # 4. auto-trigger pipeline for photo/audio/ink blocks (§9 Pipeline)
-        if inserted_blocks and user_id is not None:
+        # 5. 触发管线
+        if user_id is not None:
             try:
                 from services.zentrim_pipeline import pipeline as _pipeline
-                for bid, btype, cos_key in inserted_blocks:
+
+                # 新 block（首次创建）→ L0 + L1
+                for bid, btype, cos_key in new_blocks:
                     if btype == "photo":
                         _pipeline.process_photo(entry_id, bid, cos_key, user_id)
                     elif btype == "audio":
                         _pipeline.process_audio(entry_id, bid, cos_key, user_id)
                     elif btype == "ink":
-                        _pipeline.process_ink(entry_id, bid, cos_key, user_id)
+                        # 新 ink block: L0 OCR 立即 + L1 VLM 首次
+                        _pipeline.process_ink(entry_id, bid, cos_key, user_id, tier="ocr")
+                        _pipeline.process_ink(entry_id, bid, cos_key, user_id, tier="vlm")
                     logger.info(
-                        f"[ZentrimService] auto-triggered pipeline: entry={entry_id} "
+                        f"[ZentrimService] auto-triggered pipeline (new): entry={entry_id} "
                         f"block={bid} type={btype}"
                     )
+
+                # 已有 ink block（upsert）→ 按冷却触发
+                for bid, cos_key, tier in reocr_blocks:
+                    _pipeline.process_ink(entry_id, bid, cos_key, user_id, tier=tier)
+                    logger.info(
+                        f"[ZentrimService] auto-triggered ink re-OCR ({tier}): "
+                        f"entry={entry_id} block={bid}"
+                    )
             except Exception as e:
-                # 管线触发失败不阻塞 save_blocks（用户数据已落库）
                 logger.warning(
                     f"[ZentrimService] pipeline auto-trigger failed (non-fatal): "
                     f"entry={entry_id} err={e}"
                 )
 
         return len(blocks)
+
+    @staticmethod
+    def _ink_ocr_tier(existing_block: 'ZentrimBlock', incoming_data: dict) -> Optional[str]:
+        """判断 ink block 是否需要重新 OCR，返回 tier 或 None。
+
+        冷却规则：
+        - L0 OCR: 距上次 ≥ 2min AND 笔划数变化 → 返回 "ocr"
+        - L1 VLM: 距上次 ≥ 30min AND 笔划数变化超过阈值 → 返回 "vlm"
+        - 否则返回 None（跳过）
+        """
+        now = datetime.now(timezone.utc)
+        existing_data = existing_block.data if isinstance(existing_block.data, dict) else {}
+        ocr_meta = existing_data.get("ocr") or {}
+        if not isinstance(ocr_meta, dict):
+            ocr_meta = {}
+
+        incoming_strokes = len((incoming_data.get("strokes") or []))
+        last_stroke_count = ocr_meta.get("stroke_count") or 0
+
+        l0_at_str = ocr_meta.get("l0_at")
+        l1_at_str = ocr_meta.get("l1_at")
+
+        # L0 OCR: 2min 冷却 + 笔划数有变化
+        if incoming_strokes != last_stroke_count:
+            if not l0_at_str:
+                return "ocr"  # 从未 OCR 过
+            try:
+                l0_at = datetime.fromisoformat(l0_at_str)
+                if (now - l0_at).total_seconds() >= OCR_COOLDOWN_SECONDS:
+                    return "ocr"
+            except (ValueError, TypeError):
+                return "ocr"  # 时间戳损坏，重跑
+
+        # L1 VLM: 30min 冷却 + 从未跑过或超时
+        if not l1_at_str:
+            return "vlm"  # 从未 VLM 过（upsert 场景：旧 block 没有 L1 记录）
+        try:
+            l1_at = datetime.fromisoformat(l1_at_str)
+            if (now - l1_at).total_seconds() >= VLM_COOLDOWN_SECONDS:
+                # 只有当笔划数有实质性变化时才跑 VLM（>10% 变化或 >50 笔）
+                stroke_delta = abs(incoming_strokes - last_stroke_count)
+                if stroke_delta > max(50, last_stroke_count * 0.1):
+                    return "vlm"
+        except (ValueError, TypeError):
+            return "vlm"
+
+        return None
 
     def load_blocks(
         self,
@@ -657,38 +839,149 @@ class ZentrimService:
         query: str,
         limit: int = 20,
         include_archived: bool = False,
-    ) -> List[ZentrimEntry]:
+    ):
         """
         混合搜索：
         1. 向量搜索 idx-zentrim-{uid}（如有向量服务）
-        2. FULLTEXT / LIKE 搜索
-        3. 合并去重，按相关性排序
+        2. MySQL FULLTEXT 搜索（MATCH ... AGAINST，回退 LIKE）
+        3. Qwen3-Rerank 精排
+        4. 返回 (entries, match_blocks_map)
+
+        match_blocks_map: {entry_id: [{block_id, type, text, score, source}, ...]}
         """
         if not query or not query.strip():
-            return []
+            return [], {}
 
-        results: Dict[str, ZentrimEntry] = {}
+        q = query.strip()
+        candidates: Dict[str, dict] = {}  # entry_id -> {entry, match_blocks, max_score}
 
-        # 1. 向量搜索（可选）
+        # ── 1. 向量搜索 ──────────────────────────────────────
         try:
-            vector_hits = self._vector_search(user_id, query, top_k=limit)
-            for entry, score in vector_hits:
-                results[entry.id] = entry  # 向量结果按命中度已排序
+            vector_hits = self._vector_search(user_id, q, top_k=limit * 2)
+            for entry, score, block_info in vector_hits:
+                mb = [block_info] if block_info else []
+                candidates[entry.id] = {
+                    "entry": entry,
+                    "match_blocks": mb,
+                    "max_score": score,
+                }
         except Exception as e:
             logger.debug(f"[ZentrimService] vector search skipped: {e}")
 
-        # 2. 字面匹配（entry.title + blocks.text LIKE，子查询去重）
+        # ── 2. FULLTEXT / LIKE 搜索 ──────────────────────────
         try:
-            # fix(P1-1): 先转义 %/_，避免用户输入作为通配符导致全表扫描或绕过匹配
-            safe_query = _escape_like(query)
-            pat = f"%{safe_query}%"
+            text_hits = self._text_search(user_id, q, limit * 2, include_archived)
+            for entry, score, block_matches in text_hits:
+                if entry.id not in candidates:
+                    candidates[entry.id] = {
+                        "entry": entry,
+                        "match_blocks": block_matches,
+                        "max_score": score,
+                    }
+                else:
+                    existing = candidates[entry.id]
+                    existing["max_score"] = max(existing["max_score"], score)
+                    seen_ids = {b["block_id"] for b in existing["match_blocks"]}
+                    for bm in block_matches:
+                        if bm["block_id"] not in seen_ids:
+                            existing["match_blocks"].append(bm)
+                            seen_ids.add(bm["block_id"])
+        except Exception as e:
+            logger.debug(f"[ZentrimService] text search skipped: {e}")
 
-            # fix(blocks-migration): 从 ZentrimBlock.text 找匹配的 entry_id
-            # 使用 EXISTS 子查询避免 SAWarning + 减少 DISTINCT 开销
+        if not candidates:
+            return [], {}
+
+        # ── 3. Reranker 精排 ─────────────────────────────────
+        cand_list = list(candidates.values())
+        if len(cand_list) > 1:
+            try:
+                cand_list = self._rerank_candidates(q, cand_list, limit)
+            except Exception as e:
+                logger.debug(f"[ZentrimService] rerank skipped: {e}")
+                cand_list.sort(key=lambda c: c["max_score"], reverse=True)
+
+        # ── 4. 生成 snippet + 构建返回值 ─────────────────────
+        entries: List[ZentrimEntry] = []
+        match_blocks_map: Dict[str, List[dict]] = {}
+
+        for c in cand_list[:limit]:
+            entry = c["entry"]
+            entries.append(entry)
+            match_blocks_map[entry.id] = _snippet_blocks(c["match_blocks"], q)
+
+        return entries, match_blocks_map
+
+    def _text_search(
+        self, user_id: int, query: str, limit: int, include_archived: bool
+    ) -> List[tuple]:
+        """
+        FULLTEXT + LIKE 混合字面搜索。
+
+        优先使用 MySQL MATCH ... AGAINST (FULLTEXT)；
+        如无结果或索引不可用，回退到 LIKE。
+
+        Returns:
+            [(ZentrimEntry, score, match_blocks), ...]
+            match_blocks: [{block_id, type, text, score, source: "fulltext"|"like"}]
+        """
+        results: Dict[str, list] = {}  # entry_id -> [entry, score, [match_blocks]]
+        safe_query = _escape_like(query)
+
+        # ── 2a. FULLTEXT MATCH（优先） ────────────────────────
+        try:
+            from sqlalchemy import func, text as sa_text
+
+            # MATCH ... AGAINST in NATURAL LANGUAGE MODE
+            # 需要 MySQL ngram parser 才能正确分词中文
+            ft_query = (
+                self.db.query(
+                    ZentrimBlock.entry_id,
+                    ZentrimBlock.id,
+                    ZentrimBlock.type,
+                    ZentrimBlock.text,
+                    func.match(ZentrimBlock.text).against(query).label("relevance"),
+                )
+                .filter(
+                    ZentrimBlock.text.isnot(None),
+                    func.match(ZentrimBlock.text).against(query) > 0,
+                )
+                .order_by(func.match(ZentrimBlock.text).against(query).desc())
+                .limit(limit * 3)
+            )
+            ft_rows = ft_query.all()
+            if ft_rows:
+                for row in ft_rows:
+                    entry_id, block_id, block_type, block_text, relevance = row
+                    entry = self.get_entry(entry_id, user_id=user_id)
+                    if not entry or (not include_archived and entry.status == "archived"):
+                        continue
+                    score = float(relevance or 0)
+                    bm = {
+                        "block_id": block_id,
+                        "type": block_type,
+                        "text": (block_text or "")[:400],
+                        "score": score,
+                        "source": "fulltext",
+                    }
+                    if entry_id not in results or score > results[entry_id][1]:
+                        results[entry_id] = [entry, score, [bm]]
+                    elif entry_id in results:
+                        results[entry_id][1] = max(results[entry_id][1], score)
+                        results[entry_id][2].append(bm)
+        except Exception as e:
+            logger.debug(f"[ZentrimService] FULLTEXT degraded: {e}")
+
+        # ── 2b. LIKE 搜索（兜底 + 标题匹配） ──────────────────
+        try:
+            pat = f"%{safe_query}%"
             from sqlalchemy import exists, select
-            block_text_match = select(ZentrimBlock.entry_id).where(
-                ZentrimBlock.text.like(pat, escape="\\")
-            ).exists()
+
+            block_text_match = (
+                select(ZentrimBlock.entry_id)
+                .where(ZentrimBlock.text.like(pat, escape="\\"))
+                .exists()
+            )
             like_query = self.db.query(ZentrimEntry).filter(
                 ZentrimEntry.user_id == user_id,
                 or_(
@@ -699,16 +992,96 @@ class ZentrimService:
             if not include_archived:
                 like_query = like_query.filter(ZentrimEntry.status != "archived")
             like_hits = like_query.order_by(ZentrimEntry.created_at.desc()).limit(limit).all()
-            for entry in like_hits:
-                if entry.id not in results:
-                    results[entry.id] = entry
-        except Exception as e:
-            logger.debug(f"[ZentrimService] fulltext search skipped: {e}")
 
-        # 合并结果，向量优先（已按顺序插入），字面命中按时间倒序追加
-        combined = list(results.values())
-        # 截断到 limit
-        return combined[:limit]
+            for entry in like_hits:
+                if entry.id in results and results[entry.id][0] is not None:
+                    continue  # FULLTEXT already has this entry
+                # Collect matched blocks for this entry
+                matched_blocks = (
+                    self.db.query(ZentrimBlock)
+                    .filter(
+                        ZentrimBlock.entry_id == entry.id,
+                        ZentrimBlock.text.like(pat, escape="\\"),
+                    )
+                    .limit(5)
+                    .all()
+                )
+                bms = []
+                for blk in matched_blocks:
+                    bms.append({
+                        "block_id": blk.id,
+                        "type": blk.type,
+                        "text": (blk.text or "")[:400],
+                        "score": 0.5,
+                        "source": "like",
+                    })
+                results[entry.id] = [entry, 0.3, bms]
+
+            # Also match by title for entries without block matches
+            title_query = self.db.query(ZentrimEntry).filter(
+                ZentrimEntry.user_id == user_id,
+                ZentrimEntry.title.like(pat, escape="\\"),
+            )
+            if not include_archived:
+                title_query = title_query.filter(ZentrimEntry.status != "archived")
+            for entry in title_query.order_by(ZentrimEntry.created_at.desc()).limit(limit).all():
+                if entry.id not in results:
+                    results[entry.id] = [entry, 0.2, []]
+        except Exception as e:
+            logger.debug(f"[ZentrimService] LIKE search skipped: {e}")
+
+        # Format: [(entry, score, match_blocks), ...]
+        return [
+            (v[0], v[1], v[2])
+            for v in results.values()
+            if v[0] is not None
+        ]
+
+    def _rerank_candidates(
+        self, query: str, candidates: List[dict], top_n: int
+    ) -> List[dict]:
+        """用 Qwen3-Rerank 对候选条目精排。"""
+        from services.rerank_service import RerankService
+
+        reranker = RerankService()
+        docs = []
+        for c in candidates:
+            entry = c["entry"]
+            # 拼接标题 + 匹配 block 文本作为 rerank 输入
+            texts = [entry.title or ""]
+            for bm in c["match_blocks"][:3]:
+                if bm.get("text"):
+                    texts.append(bm["text"][:600])
+            doc_text = " | ".join(texts)[:3000]
+            docs.append({
+                "text": doc_text,
+                "idx": candidates.index(c),
+            })
+
+        import asyncio as _asyncio
+        rerank_coro = reranker.rerank(query, docs, top_n=top_n)
+
+        try:
+            loop = _asyncio.get_event_loop()
+            if loop.is_running():
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                    reranked = pool.submit(_asyncio.run, rerank_coro).result(timeout=15)
+            else:
+                reranked = loop.run_until_complete(rerank_coro)
+        except RuntimeError:
+            reranked = _asyncio.run(rerank_coro)
+
+        # Map rerank results back to candidates
+        if not reranked:
+            return sorted(candidates, key=lambda c: c["max_score"], reverse=True)[:top_n]
+
+        idx_map = {d.get("idx", i): d.get("rerank_score", 0) for i, d in enumerate(reranked)}
+        for i, c in enumerate(candidates):
+            c["max_score"] = idx_map.get(i, c["max_score"])
+
+        candidates.sort(key=lambda c: c["max_score"], reverse=True)
+        return candidates[:top_n]
 
     def _vector_search(
         self, user_id: int, query: str, top_k: int
@@ -716,9 +1089,10 @@ class ZentrimService:
         """
         尝试向量搜索；如不可用返回空列表。
 
-        返回 [(ZentrimEntry, score), ...]。
+        Returns:
+            [(ZentrimEntry, score, block_info_or_None), ...]
+            block_info: {block_id, type, text, score, source: "vector"}
         """
-        # fix(P2-4): VectorSearchService 单例缓存（避免每次搜索重新实例化）
         global _VS_SINGLETON
         try:
             _VS_SINGLETON
@@ -731,18 +1105,13 @@ class ZentrimService:
             if _VS_SINGLETON is None:
                 _VS_SINGLETON = VectorSearchService(agent_hash=None)
             vs = _VS_SINGLETON
-            # idx-zentrim-{uid} 索引命名约定
             index_name = f"idx-zentrim-{user_id}"
-            # fix(P0-1): 必须传 index=index_name，否则 vs.search 默认走 idx-public-kb，
-            # 写入到 idx-zentrim-{uid} 的向量永远不会被自己搜到（搜索功能彻底失效）。
-            # vs.search 是 async def — 在 sync 函数中用 asyncio 桥接（与 delete_entry 同模式）。
             import asyncio as _asyncio
             search_coro = vs.search(query, index=index_name, top_k=top_k * 2)
             raw: list = []
             try:
                 loop = _asyncio.get_event_loop()
                 if loop.is_running():
-                    # 已有运行 loop：用线程池在独立 loop 中同步等待，避免嵌套
                     import concurrent.futures
                     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
                         raw = pool.submit(_asyncio.run, search_coro).result(timeout=15)
@@ -762,23 +1131,40 @@ class ZentrimService:
                     or hit.get("id")
                     or hit.get("key")
                 )
+                block_id = meta.get("block_id")
                 if not entry_id:
                     continue
                 entry = self.get_entry(entry_id, user_id=user_id)
                 if not entry or entry.status == "archived":
                     continue
-                entries_with_score.append((entry, hit.get("score", 0)))
 
-            # 按 score 倒序
+                hit_score = hit.get("score", 0)
+                block_info = None
+                if block_id:
+                    try:
+                        blk = self.db.query(ZentrimBlock).filter(
+                            ZentrimBlock.id == block_id
+                        ).first()
+                        if blk and blk.text:
+                            block_info = {
+                                "block_id": block_id,
+                                "type": blk.type,
+                                "text": (blk.text or "")[:400],
+                                "score": hit_score,
+                                "source": "vector",
+                            }
+                    except Exception:
+                        pass
+
+                entries_with_score.append((entry, hit_score, block_info))
+
             entries_with_score.sort(key=lambda x: x[1], reverse=True)
             return entries_with_score[:top_k]
         except ImportError as e:
-            # fix(P1-2): 首次加载失败静默 — VectorSearchService 模块缺失是常见降级场景
-            _VS_SINGLETON = True  # 用 True 标记 "已尝试但不可用"，避免反复 import
+            _VS_SINGLETON = True
             logger.warning(f"[ZentrimService] vector search degraded (ImportError): {e}")
             return []
         except Exception as e:
-            # fix(P1-2): 运行时错误 — 打 warning 而非 debug，便于监控告警
             logger.warning(f"[ZentrimService] vector search degraded: {e}")
             return []
 
