@@ -69,19 +69,19 @@
                             <div class="card-body">
                                 <form class="form" id="password-form">
                                     <div class="input-group">
-                                        <label>当前密码</label>
-                                        <input type="password" id="current-password" class="glass-input" placeholder="输入当前密码">
+                                        <label for="current-password">当前密码</label>
+                                        <input type="password" id="current-password" class="glass-input" placeholder="输入当前密码" autocomplete="current-password">
                                     </div>
                                     <div class="input-group">
-                                        <label>新密码</label>
-                                        <input type="password" id="new-password" class="glass-input" placeholder="输入新密码">
+                                        <label for="new-password">新密码</label>
+                                        <input type="password" id="new-password" class="glass-input" placeholder="输入新密码" autocomplete="new-password">
                                     </div>
                                     <div class="input-group">
-                                        <label>确认新密码</label>
-                                        <input type="password" id="confirm-password" class="glass-input" placeholder="再次输入新密码">
+                                        <label for="confirm-password">确认新密码</label>
+                                        <input type="password" id="confirm-password" class="glass-input" placeholder="再次输入新密码" autocomplete="new-password">
                                     </div>
                                     <button type="submit" class="glass-button glass-button-primary">修改密码</button>
-                                    <p id="password-msg" class="text-secondary mt-sm" style="display:none;"></p>
+                                    <p id="password-msg" class="text-secondary mt-sm" role="status" style="display:none;"></p>
                                 </form>
                             </div>
                         </div>

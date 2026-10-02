@@ -44,7 +44,8 @@
             font-size: 16px; cursor: pointer; transition: all 0.2s;
         }
         .btn-primary {
-            background: linear-gradient(135deg, #667eea, #764ba2); color: #fff;
+            /* FIX-D 对比度：白字压 #667eea 3.66:1 → #4338ca 7.90:1 */
+            background: linear-gradient(135deg, #4338ca, #5b21b6); color: #fff;
         }
         .btn-primary:hover { opacity: 0.9; transform: translateY(-1px); }
         .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
@@ -55,6 +56,8 @@
         .back { display: block; text-align: center; color: #888; text-decoration: none; font-size: 14px; margin-top: 16px; }
         .back:hover { color: #aaa; }
         .error-msg { color: #f87171; font-size: 13px; text-align: center; margin-top: 10px; min-height: 20px; }
+        /* FIX-D：键盘导航可见焦点环 */
+        :focus-visible { outline: 2px solid #667eea !important; outline-offset: 2px !important; }
         .divider { display: flex; align-items: center; margin: 20px 0; }
         .divider::before, .divider::after { content: ''; flex: 1; height: 1px; background: rgba(255,255,255,0.1); }
         .divider-text { padding: 0 16px; color: #666; font-size: 12px; }
@@ -69,11 +72,11 @@
 
         <div id="totpSection">
             <div class="input-group">
-                <label>Agent Hash</label>
+                <label for="agentHashInput">Agent Hash</label>
                 <input type="text" id="agentHashInput" placeholder="abcd" maxlength="4" readonly>
             </div>
             <div class="input-group">
-                <label>6 位验证码</label>
+                <label for="totpInput">6 位验证码</label>
                 <input type="text" id="totpInput" placeholder="000000" maxlength="6" autocomplete="off">
             </div>
             <button class="btn btn-primary" onclick="verifyTOTP()" id="loginBtn">验证并登录</button>
@@ -86,7 +89,7 @@
             使用 {{ oauth_provider_name }} 登录
         </button>
 
-        <div class="error-msg" id="errorMsg"></div>
+        <div class="error-msg" id="errorMsg" role="alert"></div>
         <div id="ownershipWarning" style="display:none;text-align:center;margin-top:12px;">
             <p style="color:#f87171;font-size:14px;margin-bottom:8px;">❌ 此 Agent 不属于您</p>
             <p style="color:#888;font-size:13px;margin-bottom:16px;">您当前已登录 Platform，但此 Agent 并非您的账号下的资源。<br>请在主域名中退出当前账号，再使用 TOTP 验证码登录。</p>
@@ -299,17 +302,17 @@
 
             <form id="localLoginForm" onsubmit="return doLocalLogin(event)" style="margin-top:24px;">
                 <div class="input-group">
-                    <label>用户名</label>
+                    <label for="usernameInput">用户名</label>
                     <input type="text" id="usernameInput" placeholder="用户名" autocomplete="username" required>
                 </div>
                 <div class="input-group">
-                    <label>密码</label>
+                    <label for="passwordInput">密码</label>
                     <input type="password" id="passwordInput" placeholder="" autocomplete="current-password" required>
                 </div>
                 <button type="submit" class="glass-button glass-button-primary glass-button-full" id="localLoginBtn">
                     登录
                 </button>
-                <div class="login-error" id="localLoginError"></div>
+                <div class="login-error" id="localLoginError" role="alert"></div>
             </form>
 
             <div id="oauthFallbackDivider" class="divider" style="display:none;">
@@ -318,6 +321,16 @@
             <a href="{{ oauth_login_url }}" class="glass-button glass-button-secondary glass-button-full" id="oauthFallbackBtn" style="display:none;">
                 使用 {{ oauth_provider_name }} 登录
             </a>
+
+            <!-- FIX-D：登录页不给死胡同 —— 明确下一步，且文案与真实流程一致 -->
+            <p style="margin-top:20px;font-size:var(--text-sm);color:var(--text-muted);line-height:1.8;">
+                {% if oauth_enabled %}
+                没有账号？<a href="{{ oauth_register_url }}" style="color:var(--accent-blue);">在 {{ oauth_provider_name }} 注册</a>
+                {% else %}
+                没有账号？账号由管理员开通，如需账号请联系 <a href="mailto:lizidaren@firstentrance.net" style="color:var(--accent-blue);">lizidaren@firstentrance.net</a>
+                {% endif %}
+                <br>忘记密码？暂不支持自助找回，请联系管理员协助重置。
+            </p>
         </div>
 
     </div>

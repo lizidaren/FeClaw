@@ -21,44 +21,61 @@ GGB_TEMPLATE_2D = """<!DOCTYPE html>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>GeoGebra 2D</title>
-    <script src="https://www.geogebra.org/apps/deployggb.js"></script>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         html, body { width: 100vw; height: 100vh; overflow: hidden; background: #f0f0f0; }
         #ggb-element { width: 100vw; height: 100vh; }
-    #c img{{max-width:100%;height:auto;}}
-.markdown-body pre{{overflow-x:auto;}}
-.katex-display{{overflow-x:auto;overflow-y:hidden;max-width:100%;}}
-@keyframes fadeIn{{from{{opacity:0;}}to{{opacity:1;}}}}
-.feclaw-ref-markdown strong{{color:#f0c040;}}
-.feclaw-ref-markdown code{{background:#333;color:#7ecfff;padding:1px 5px;border-radius:3px;font-size:13px;}}
-.feclaw-ref-markdown a{{color:#5b7cfa;}}
-</style>
+        #ggb-fallback { display: none; padding: 40px; font-family: sans-serif; color: #333; text-align: center; }
+    </style>
 </head>
 <body>
 <div id="ggb-element"></div>
+<div id="ggb-fallback">
+    <h2>⚠️ 图形加载失败</h2>
+    <p>GeoGebra 组件未能加载（可能因当前网络无法访问 geogebra.org）。<br>请稍后重试，或切换网络环境。</p>
+</div>
 <script>
     (function() {
-        var params = {
-            "appName": "classic",
-            "width": window.innerWidth,
-            "height": window.innerHeight,
-            "showToolBar": true,
-            "showAlgebraInput": true,
-            "showMenuBar": true,
-            "enableRightClick": true,
-            "appletOnLoad": function(api) {
-                var cmds = COMMANDS;
-                for (var i = 0; i < cmds.length; i++) {
-                    try { api.evalCommand(cmds[i]); } catch(e) { console.warn(cmds[i], e); }
-                }
-            }
-        };
-        var el = document.getElementById("ggb-element");
-        el.style.width = window.innerWidth + "px";
-        el.style.height = window.innerHeight + "px";
-        var app = new GGBApplet(params, true);
-        app.inject("ggb-element");
+        var shown = false;
+        function showFallback() {
+            if (shown) return;
+            shown = true;
+            document.getElementById('ggb-element').style.display = 'none';
+            document.getElementById('ggb-fallback').style.display = 'block';
+        }
+        function boot() {
+            // FIX-D：deployggb.js 按需加载 + 失败降级（国内不可达时不白屏，给出提示）
+            if (typeof GGBApplet === 'undefined') { showFallback(); return; }
+            if (shown) return;
+            try {
+                var params = {
+                    "appName": "classic",
+                    "width": window.innerWidth,
+                    "height": window.innerHeight,
+                    "showToolBar": true,
+                    "showAlgebraInput": true,
+                    "showMenuBar": true,
+                    "enableRightClick": true,
+                    "appletOnLoad": function(api) {
+                        var cmds = COMMANDS;
+                        for (var i = 0; i < cmds.length; i++) {
+                            try { api.evalCommand(cmds[i]); } catch(e) { console.warn(cmds[i], e); }
+                        }
+                    }
+                };
+                var el = document.getElementById("ggb-element");
+                el.style.width = window.innerWidth + "px";
+                el.style.height = window.innerHeight + "px";
+                var app = new GGBApplet(params, true);
+                app.inject("ggb-element");
+            } catch (e) { showFallback(); }
+        }
+        var s = document.createElement('script');
+        s.src = 'https://www.geogebra.org/apps/deployggb.js';
+        s.onload = boot;
+        s.onerror = showFallback;
+        setTimeout(function() { if (typeof GGBApplet === 'undefined') showFallback(); }, 15000);
+        document.head.appendChild(s);
     })();
 </script>
 </body>
@@ -70,7 +87,7 @@ JSXGRAPH_TEMPLATE = """<!DOCTYPE html>
 <html lang="zh">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>JSXGraph - 交互式几何</title>
     <link rel="stylesheet" href="/static/jsxgraph.css" />
     <script src="/static/jsxgraphcore.js"></script>

@@ -46,6 +46,8 @@
             font-size: 16px;
         }
         input:focus { outline: none; border-color: #667eea; }
+        /* FIX-D：键盘导航可见焦点环 */
+        :focus-visible { outline: 2px solid #667eea !important; outline-offset: 2px !important; }
         button {
             width: 100%;
             padding: 14px;
@@ -67,8 +69,8 @@
             <h1>🔐 验证身份</h1>
             <p>请输入 Agent 发送给您的登录码</p>
             <div class="input-group">
-                <label>6 位验证码</label>
-                <input type="text" id="totpInput" placeholder="000000" maxlength="6" autocomplete="off">
+                <label for="totpInput">6 位验证码</label>
+                <input type="text" id="totpInput" placeholder="000000" maxlength="6" autocomplete="one-time-code">
             </div>
             <button onclick="verify()">验证并登录</button>
             <a href="/" class="back">← 返回主页</a>

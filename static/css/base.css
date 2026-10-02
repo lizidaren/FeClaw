@@ -19,7 +19,8 @@
     --text-primary: #ffffff;
     --text-secondary: rgba(255, 255, 255, 0.8);
     --text-muted: rgba(255, 255, 255, 0.6);
-    --text-hint: rgba(255, 255, 255, 0.4);
+    /* FIX-D：占位/提示文字 0.4→0.55，对比度 3.78:1 → 5.96:1（≥4.5） */
+    --text-hint: rgba(255, 255, 255, 0.55);
 
     /* 强调色 */
     --accent-blue: #00d9ff;
@@ -178,7 +179,13 @@ img {
 button, input, textarea, select {
     font-family: inherit;
     font-size: inherit;
-    outline: none;
+}
+
+/* FIX-D：恢复可见键盘焦点环（全局 outline:none 会让键盘/读屏用户完全看不到焦点）。
+ * :focus-visible 只在键盘导航时显示，鼠标点击不打扰。 */
+:focus-visible {
+    outline: 2px solid #667eea !important;
+    outline-offset: 2px !important;
 }
 
 button {

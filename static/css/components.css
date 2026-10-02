@@ -18,9 +18,10 @@
 }
 
 .btn-primary {
-    background: linear-gradient(135deg, var(--accent-blue), rgba(0, 217, 255, 0.7));
+    /* FIX-D 对比度：白字压亮青 1.70:1 → 深青 #0369a1 5.93:1 */
+    background: linear-gradient(135deg, #0369a1, #075985);
     color: var(--text-primary);
-    border: 1px solid var(--accent-blue);
+    border: 1px solid #0369a1;
 }
 
 .btn-primary:hover {
@@ -50,9 +51,10 @@
 }
 
 .btn-danger {
-    background: linear-gradient(135deg, var(--accent-red), rgba(255, 107, 107, 0.7));
+    /* FIX-D 对比度：白字压亮红 2.78:1 → 深红 #b91c1c 6.47:1 */
+    background: linear-gradient(135deg, #b91c1c, #991b1b);
     color: var(--text-primary);
-    border: 1px solid var(--accent-red);
+    border: 1px solid #b91c1c;
 }
 
 .btn-danger:hover {
@@ -60,9 +62,10 @@
 }
 
 .btn-success {
-    background: linear-gradient(135deg, var(--accent-green), rgba(74, 222, 128, 0.7));
+    /* FIX-D 对比度：白字压亮绿 1.74:1 → 深绿 #15803d 5.02:1 */
+    background: linear-gradient(135deg, #15803d, #166534);
     color: var(--text-primary);
-    border: 1px solid var(--accent-green);
+    border: 1px solid #15803d;
 }
 
 .btn-success:hover {

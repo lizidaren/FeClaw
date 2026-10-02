@@ -112,6 +112,8 @@
         if (!container) return;
         const el = document.createElement('div');
         el.className = 'toast ' + kind;
+        // FIX-D：结果反馈给读屏用户（错误用 alert 立即播报）
+        el.setAttribute('role', kind === 'error' ? 'alert' : 'status');
         el.textContent = msg;
         container.appendChild(el);
         setTimeout(() => {
@@ -396,7 +398,8 @@
                                placeholder="${placeholder}"
                                value="${escapeHtml(value)}"
                                autocomplete="off"
-                               spellcheck="false">
+                               spellcheck="false"
+                               aria-label="${escapeHtml(p.name)} API Key">
                         <button type="button" class="key-toggle" data-toggle>显示</button>
                     </div>
                 </div>
@@ -534,7 +537,7 @@
             <div class="summary-row">
                 <span class="label">${escapeHtml(label)}</span>
                 <span class="value">
-                    <select class="setup-select" data-cap="${escapeHtml(capabilityKey)}">
+                    <select class="setup-select" data-cap="${escapeHtml(capabilityKey)}" aria-label="${escapeHtml(label)}">
                         ${optgroups}
                     </select>
                 </span>
@@ -609,7 +612,7 @@
             <div class="summary-row">
                 <span class="label">联网搜索后端</span>
                 <span class="value">
-                    <select class="setup-select" data-cap="searchEngine" ${availableEngines.length === 0 ? 'disabled' : ''}>
+                    <select class="setup-select" data-cap="searchEngine" ${availableEngines.length === 0 ? 'disabled' : ''} aria-label="联网搜索后端">
                         ${searchEngineOptions}
                     </select>
                 </span>
@@ -702,15 +705,15 @@
                 <div class="storage-cos-fields" id="storage-cos-fields" ${(cosDisabled && s.vectorStorageBackend !== 'cos') ? 'hidden' : ''}>
                     <div class="form-group">
                         <label>SecretId</label>
-                        <input type="text" class="cos-input" data-cos-field="secret_id" placeholder="AKIDxxxxxxxxxxxxxxxxxxxx" value="${escapeHtml(s.tencentCosSecretId)}" autocomplete="off" spellcheck="false">
+                        <input type="text" class="cos-input" data-cos-field="secret_id" placeholder="AKIDxxxxxxxxxxxxxxxxxxxx" value="${escapeHtml(s.tencentCosSecretId)}" autocomplete="off" spellcheck="false" aria-label="COS SecretId">
                     </div>
                     <div class="form-group">
                         <label>SecretKey</label>
-                        <input type="password" class="cos-input" data-cos-field="secret_key" placeholder="••••••••" value="${escapeHtml(s.tencentCosSecretKey)}" autocomplete="off" spellcheck="false">
+                        <input type="password" class="cos-input" data-cos-field="secret_key" placeholder="••••••••" value="${escapeHtml(s.tencentCosSecretKey)}" autocomplete="off" spellcheck="false" aria-label="COS SecretKey">
                     </div>
                     <div class="form-group">
                         <label>Bucket <span class="optional-hint">（可选，不填则不使用 COS）</span></label>
-                        <input type="text" class="cos-input" data-cos-field="bucket" placeholder="${escapeHtml(cosPlaceholder)}" value="${escapeHtml(s.tencentCosBucket)}" autocomplete="off" spellcheck="false">
+                        <input type="text" class="cos-input" data-cos-field="bucket" placeholder="${escapeHtml(cosPlaceholder)}" value="${escapeHtml(s.tencentCosBucket)}" autocomplete="off" spellcheck="false" aria-label="COS Bucket">
                     </div>
                 </div>
             </div>

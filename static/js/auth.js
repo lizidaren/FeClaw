@@ -131,6 +131,7 @@ const Auth = {
           font-family: 'Monaco', 'Consolas', monospace;
         }
         .totp-input-group input:focus { outline: none; border-color: #667eea; }
+        :focus-visible { outline: 2px solid #667eea !important; outline-offset: 2px !important; }
         .totp-error { color: #f87171; font-size: 13px; text-align: center; margin-top: 8px; min-height: 20px; }
         .btn { width: 100%; padding: 12px; border: none; border-radius: 8px; cursor: pointer; font-size: 15px; transition: opacity 0.2s; }
         .btn:hover { opacity: 0.9; }
@@ -157,10 +158,10 @@ const Auth = {
         <div class="login-divider">或者使用 TOTP 验证码</div>
 
         <div class="totp-input-group">
-          <label>6 位验证码</label>
-          <input type="text" id="login-totp-input" placeholder="000000" maxlength="6" autocomplete="off" inputmode="numeric" pattern="[0-9]*">
+          <label for="login-totp-input">6 位验证码</label>
+          <input type="text" id="login-totp-input" placeholder="000000" maxlength="6" autocomplete="off" inputmode="numeric" pattern="[0-9]*" aria-label="6 位验证码">
         </div>
-        <div class="totp-error" id="login-totp-error"></div>
+        <div class="totp-error" id="login-totp-error" role="alert"></div>
         <button class="btn btn-primary" id="login-totp-btn" onclick="Auth._verifyLoginTotp('${path}')">验证并登录</button>
 
         <div class="login-sub">

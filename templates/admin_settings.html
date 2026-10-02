@@ -29,34 +29,36 @@
 
             --text-primary: #1a1a2e;
             --text-secondary: #555555;
-            --text-tertiary: #888888;
+            --text-tertiary: #5f5f6b; /* FIX-D 对比度：浅色页 #888 3.54:1 → #5f5f6b 6.30:1 */
             --text-on-dark: #ffffff;
 
             --input-bg: #ffffff;
             --input-border: #d0d0d8;
             --input-border-focus: #667eea;
             --input-text: #1a1a2e;
-            --input-placeholder: #999999;
+            --input-placeholder: #757575; /* FIX-D 对比度：浅色 placeholder #999 2.85:1 → #757575 ≥4.5:1 */
 
             --divider: #e8e8ee;
 
-            --accent: #667eea;
-            --accent-hover: #5566d6;
+            --accent: #4338ca; /* FIX-D 对比度：浅色页 #667eea 文字 3.36:1 → #4338ca 7.26:1（按钮填充白字 7.90:1） */
+            --accent-hover: #3730a3;
             --accent-soft: #eef0fc;
-            --accent-2: #764ba2;
-            --accent-gradient: linear-gradient(135deg, #667eea, #764ba2);
+            --accent-2: #5b21b6;
+            --accent-gradient: linear-gradient(135deg, #4338ca, #5b21b6); /* FIX-D 对比度：白字压 #667eea 3.66:1 → #4338ca 7.90:1 */
 
-            --success: #22c55e;
+            --success: #15803d; /* FIX-D 对比度：浅底 #22c55e 2.07:1 → #15803d 4.56:1 */
             --success-soft: #e8f8ee;
-            --error: #ef4444;
+            --error: #b91c1c; /* FIX-D 对比度：浅底 #ef4444 3.20:1 → #b91c1c 5.51:1 */
             --error-soft: #fde8e8;
-            --warning: #f59e0b;
+            --warning: #b45309; /* FIX-D 对比度：浅底 #f59e0b 1.95:1 → #b45309 4.56:1 */
             --warning-soft: #fdf3e0;
-            --info: #3b82f6;
+            --info: #1d4ed8; /* FIX-D 对比度：浅底 #3b82f6 3.18:1 → #1d4ed8 5.79:1 */
             --info-soft: #e6efff;
         }
 
         * { box-sizing: border-box; }
+        /* FIX-D：键盘导航可见焦点环（浅色页用深靛 #4338ca） */
+        :focus-visible { outline: 2px solid #4338ca !important; outline-offset: 2px !important; }
 
         html, body {
             background: var(--bg);
@@ -305,8 +307,12 @@
             color: #ffffff;
         }
         .btn-primary:disabled {
-            opacity: 0.5;
+            /* FIX-D 对比度：禁用态原先 opacity:0.5 把白字压在浅底 → 2.03:1，改用显式灰底深字 */
+            background: #c8cbe0;
+            border-color: #c8cbe0;
+            color: #4a4f63;
             cursor: not-allowed;
+            opacity: 1;
         }
         .btn-test {
             background: var(--info-soft);
@@ -731,7 +737,7 @@
                 <h3>部署模式</h3>
                 <p class="section-desc">单站点（path 路由）或子域名（*.domain）模式。修改后建议重启服务。</p>
                 <div class="form-row">
-                    <label>部署模式</label>
+                    <label for="deploy-mode">部署模式</label>
                     <div class="checkbox-row">
                         <select id="deploy-mode">
                             <option value="single">单站点 (Path 路由)</option>
@@ -740,14 +746,14 @@
                     </div>
                 </div>
                 <div class="form-row">
-                    <label>
+                    <label for="deploy-domain">
                         主域名
                         <span class="hint">子域名模式必填，如 feclaw.example.com</span>
                     </label>
                     <input type="text" id="deploy-domain" placeholder="feclaw.example.com">
                 </div>
                 <div class="form-row">
-                    <label>Cookie Secure</label>
+                    <label for="deploy-cookie-secure">Cookie Secure</label>
                     <div class="checkbox-row">
                         <input type="checkbox" id="deploy-cookie-secure">
                         <span>启用（HTTPS 环境建议开启）</span>
@@ -777,32 +783,32 @@
                 <h3>OAuth / SSO</h3>
                 <p class="section-desc">配置 OIDC Provider 后可启用第三方登录（默认使用本地注册/登录）。修改后建议重启服务。</p>
                 <div class="form-row">
-                    <label>
+                    <label for="oauth-provider-name">
                         Provider 显示名
                         <span class="hint">登录页面展示的按钮文字</span>
                     </label>
                     <input type="text" id="oauth-provider-name" placeholder="OAuth/OIDC 认证服务">
                 </div>
                 <div class="form-row">
-                    <label>
+                    <label for="oauth-provider-url">
                         Provider URL
                         <span class="hint">OIDC Issuer，如 https://sso.example.com</span>
                     </label>
                     <input type="text" id="oauth-provider-url" placeholder="https://sso.example.com">
                 </div>
                 <div class="form-row">
-                    <label>Client ID</label>
+                    <label for="oauth-client-id">Client ID</label>
                     <input type="text" id="oauth-client-id" placeholder="feclaw">
                 </div>
                 <div class="form-row">
-                    <label>
+                    <label for="oauth-client-secret">
                         Client Secret
                         <span class="hint">空值表示保持现状；已设置仅显示是否已设</span>
                     </label>
                     <input type="password" id="oauth-client-secret" placeholder="保留现状请留空">
                 </div>
                 <div class="form-row">
-                    <label>
+                    <label for="oauth-redirect-uri">
                         Redirect URI
                         <span class="hint">形如 https://feclaw.example.com/api/oauth/callback</span>
                     </label>
@@ -823,19 +829,19 @@
                 <h3>模型选择</h3>
                 <p class="section-desc">下拉选项由上方启用的 provider 提供的能力决定。</p>
                 <div class="form-row">
-                    <label>主文本模型</label>
+                    <label for="model-main-text">主文本模型</label>
                     <select id="model-main-text"></select>
                 </div>
                 <div class="form-row">
-                    <label>主视觉模型</label>
+                    <label for="model-main-vision">主视觉模型</label>
                     <select id="model-main-vision"></select>
                 </div>
                 <div class="form-row">
-                    <label>主嵌入模型</label>
+                    <label for="model-main-embedding">主嵌入模型</label>
                     <select id="model-main-embedding"></select>
                 </div>
                 <div class="form-row">
-                    <label>搜索后端</label>
+                    <label for="search-engine">搜索后端</label>
                     <select id="search-engine">
                         <option value="qwen">Qwen 联网搜索</option>
                         <option value="kimi">Kimi 搜索</option>
@@ -852,7 +858,7 @@
                 <h3>存储与向量</h3>
                 <p class="section-desc">文件存储后端 + 向量搜索后端 + COS 凭证。</p>
                 <div class="form-row">
-                    <label>文件存储模式</label>
+                    <label for="storage-mode">文件存储模式</label>
                     <select id="storage-mode">
                         <option value="auto">Auto (自动选择)</option>
                         <option value="local">Local (本地)</option>
@@ -860,21 +866,21 @@
                     </select>
                 </div>
                 <div class="form-row">
-                    <label>
+                    <label for="storage-local-root">
                         本地存储根目录
                         <span class="hint">仅 storage_mode=local 生效</span>
                     </label>
                     <input type="text" id="storage-local-root" placeholder="./feclaw-storage">
                 </div>
                 <div class="form-row">
-                    <label>
+                    <label for="storage-prefix">
                         存储前缀 (STORAGE_PREFIX)
                         <span class="hint">隔离多实例数据，路径示例：<code id="prefix-example" style="color:#667eea">feclaw/agents/xxx/file.md</code></span>
                     </label>
                     <input type="text" id="storage-prefix" placeholder="feclaw/">
                 </div>
                 <div class="form-row">
-                    <label>向量后端</label>
+                    <label for="vector-backend">向量后端</label>
                     <select id="vector-backend">
                         <option value="cos">COS Vectors (推荐)</option>
                         <option value="numpy">Numpy (本地)</option>
@@ -882,18 +888,18 @@
                 </div>
                 <div class="cos-only" id="cos-fields">
                     <div class="form-row">
-                        <label>COS Bucket</label>
+                        <label for="cos-bucket">COS Bucket</label>
                         <input type="text" id="cos-bucket" placeholder="example-1250000000">
                     </div>
                     <div class="form-row">
-                        <label>
+                        <label for="cos-secret-id">
                             COS Secret ID
                             <span class="hint">空值表示保持现状</span>
                         </label>
                         <input type="text" id="cos-secret-id" placeholder="保留现状请留空">
                     </div>
                     <div class="form-row">
-                        <label>COS Secret Key</label>
+                        <label for="cos-secret-key">COS Secret Key</label>
                         <input type="password" id="cos-secret-key" placeholder="保留现状请留空">
                     </div>
                 </div>
@@ -908,7 +914,7 @@
                 <h3>Redis 缓存</h3>
                 <p class="section-desc">可选。配置后用于缓存与会话持久化。修改后建议重启服务。</p>
                 <div class="form-row">
-                    <label>
+                    <label for="redis-password">
                         Password
                         <span class="hint">空值表示保持现状；已设置仅显示是否已设</span>
                     </label>
@@ -929,7 +935,7 @@
                 <h3>数据库</h3>
                 <p class="section-desc">数据库连接串（只读）。修改后需重启后端服务才能生效。</p>
                 <div class="form-row full">
-                    <label>连接串</label>
+                    <label for="db-url">连接串</label>
                     <input type="text" id="db-url" readonly>
                 </div>
             </div>
@@ -1001,6 +1007,8 @@
 
         function showMsg(elId, ok, text) {
             const el = document.getElementById(elId);
+            // FIX-D：成功/失败反馈给读屏用户（status=礼貌播报 / alert=立即播报）
+            el.setAttribute('role', ok ? 'status' : 'alert');
             el.className = 'status-msg show ' + (ok ? 'ok' : 'err');
             el.textContent = text;
             setTimeout(() => { el.className = 'status-msg'; }, 5000);
@@ -1178,7 +1186,7 @@
                     </div>
                     <div>
                         <span class="key-display ${p.has_key ? 'set' : 'empty'}">${p.has_key ? escapeHtml(p.key_display || '••••') : '未设置'}</span>
-                        <input type="password" data-provider="${p.id}" placeholder="${p.has_key ? '替换现有 key (留空保留)' : '粘贴 API key'}">
+                        <input type="password" data-provider="${p.id}" placeholder="${p.has_key ? '替换现有 key (留空保留)' : '粘贴 API key'}" aria-label="${escapeHtml(p.name)} API Key">
                     </div>
                     <div>
                         <button class="btn btn-test" data-test="${p.id}">测试</button>

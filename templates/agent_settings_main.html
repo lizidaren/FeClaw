@@ -7,6 +7,7 @@
     <script>window.ROOT_DOMAIN = "{{ feclaw_domain }}";</script>
     <script src="/static/js/token-sync.js"></script>
     <script src="/static/js/auth.js"></script>
+    <script src="/static/js/qrcode.min.js"></script>
     <script>
         (async function() {
             const loggedIn = await Auth.checkAuthBeforeRender();
@@ -17,6 +18,8 @@
     </script>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
+        /* FIX-D：键盘导航可见焦点环 */
+        :focus-visible { outline: 2px solid #667eea !important; outline-offset: 2px !important; }
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
             background: #0f0f23;
@@ -85,8 +88,8 @@
         }
         .btn:hover { opacity: 0.9; }
         .btn:disabled { opacity: 0.5; cursor: not-allowed; }
-        .btn-primary { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; }
-        .btn-danger { background: #e74c3c; color: white; }
+        .btn-primary { background: linear-gradient(135deg, #4338ca 0%, #5b21b6 100%); color: white; } /* FIX-D 对比度：#667eea 3.66:1 → #4338ca 7.90:1 */
+        .btn-danger { background: #b91c1c; color: white; } /* FIX-D 对比度：#e74c3c 3.82:1 → #b91c1c 6.47:1 */
         .btn-sm { padding: 6px 14px; font-size: 13px; }
         .btn-outline { background: transparent; border: 1px solid #2a2a4a; color: #e0e0e0; }
 
@@ -97,8 +100,8 @@
             transition: all 0.3s; font-size: 14px;
         }
         .toast.show { opacity: 1; transform: translateY(0); }
-        .toast.success { background: #27ae60; color: white; }
-        .toast.error { background: #e74c3c; color: white; }
+        .toast.success { background: #15803d; color: white; } /* FIX-D 对比度：#27ae60 2.87:1 → #15803d 5.02:1 */
+        .toast.error { background: #b91c1c; color: white; } /* FIX-D 对比度：#e74c3c 3.82:1 → #b91c1c 6.47:1 */
 
         .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; margin-bottom: 20px; }
         .stat-card {
@@ -194,7 +197,7 @@
 
     <!-- Mobile nav -->
     <div class="mobile-nav">
-        <select onchange="switchSection(this.value)" id="mobileSelect">
+        <select onchange="switchSection(this.value)" id="mobileSelect" aria-label="设置分区导航">
             <option value="profile">Agent 信息</option>
             <option value="config">配置管理</option>
             <option value="wechat">微信绑定</option>
@@ -227,7 +230,7 @@
                 <div class="card">
                     <h3>📝 基本信息</h3>
                     <div class="form-group">
-                        <label>Agent 名称</label>
+                        <label for="agentName">Agent 名称</label>
                         <input type="text" id="agentName" placeholder="给你的 Agent 起个名字">
                     </div>
 
@@ -241,18 +244,18 @@
                 <div class="card">
                     <h3>🌍 全局配置</h3>
                     <div class="form-group" style="display:flex;justify-content:space-between;align-items:center;">
-                        <label style="margin:0;">心跳间隔 (秒)</label>
+                        <label for="heartbeat_interval" style="margin:0;">心跳间隔 (秒)</label>
                         <input type="number" id="heartbeat_interval" value="900" min="60" max="3600" style="width:120px;">
                     </div>
                     <div class="form-group" style="display:flex;justify-content:space-between;align-items:center;">
                         <label style="margin:0;">自动加载会话</label>
                         <label class="toggle-switch">
-                            <input type="checkbox" id="session_auto_load" checked>
+                            <input type="checkbox" id="session_auto_load" checked aria-label="自动加载会话">
                             <span class="toggle-slider"></span>
                         </label>
                     </div>
                     <div class="form-group" style="display:flex;justify-content:space-between;align-items:center;">
-                        <label style="margin:0;">摘要触发消息数</label>
+                        <label for="session_summary_trigger_count" style="margin:0;">摘要触发消息数</label>
                         <input type="number" id="session_summary_trigger_count" value="50" min="10" max="500" style="width:120px;">
                     </div>
                 </div>
@@ -261,21 +264,21 @@
                     <div class="form-group" style="display:flex;justify-content:space-between;align-items:center;">
                         <label style="margin:0;">流式输出</label>
                         <label class="toggle-switch">
-                            <input type="checkbox" id="web_streaming" checked>
+                            <input type="checkbox" id="web_streaming" checked aria-label="Web 流式输出">
                             <span class="toggle-slider"></span>
                         </label>
                     </div>
                     <div class="form-group" style="display:flex;justify-content:space-between;align-items:center;">
                         <label style="margin:0;">显示工具调用</label>
                         <label class="toggle-switch">
-                            <input type="checkbox" id="web_show_tool_calls">
+                            <input type="checkbox" id="web_show_tool_calls" aria-label="Web 显示工具调用">
                             <span class="toggle-slider"></span>
                         </label>
                     </div>
                     <div class="form-group" style="display:flex;justify-content:space-between;align-items:center;">
                         <label style="margin:0;">深度思考</label>
                         <label class="toggle-switch">
-                            <input type="checkbox" id="web_deep_thinking">
+                            <input type="checkbox" id="web_deep_thinking" aria-label="Web 深度思考">
                             <span class="toggle-slider"></span>
                         </label>
                     </div>
@@ -285,14 +288,14 @@
                     <div class="form-group" style="display:flex;justify-content:space-between;align-items:center;">
                         <label style="margin:0;">显示工具调用</label>
                         <label class="toggle-switch">
-                            <input type="checkbox" id="wechat_show_tool_calls">
+                            <input type="checkbox" id="wechat_show_tool_calls" aria-label="微信 显示工具调用">
                             <span class="toggle-slider"></span>
                         </label>
                     </div>
                     <div class="form-group" style="display:flex;justify-content:space-between;align-items:center;">
                         <label style="margin:0;">深度思考</label>
                         <label class="toggle-switch">
-                            <input type="checkbox" id="wechat_deep_thinking">
+                            <input type="checkbox" id="wechat_deep_thinking" aria-label="微信 深度思考">
                             <span class="toggle-slider"></span>
                         </label>
                     </div>
@@ -305,7 +308,7 @@
                             <div style="font-size:12px;color:#888;font-weight:normal;margin-top:2px;">提前用小模型分析消息，预取数据、判断思考深度</div>
                         </label>
                         <label class="toggle-switch">
-                            <input type="checkbox" id="sr_enabled">
+                            <input type="checkbox" id="sr_enabled" aria-label="启用智能路由">
                             <span class="toggle-slider"></span>
                         </label>
                     </div>
@@ -350,7 +353,7 @@
                     <button class="btn btn-primary" onclick="generateShareLink()" id="genShareBtn">生成分享链接</button>
                     <div id="shareLinkResult" style="display:none;margin-top:10px;padding:12px;background:#0f0f1a;border-radius:8px;">
                         <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
-                            <input type="text" id="shareLinkInput" readonly style="flex:1;padding:8px 10px;background:#1a1a2e;border:1px solid #2a2a4a;border-radius:6px;color:#667eea;font-size:13px;">
+                            <input type="text" id="shareLinkInput" readonly aria-label="分享链接" style="flex:1;padding:8px 10px;background:#1a1a2e;border:1px solid #2a2a4a;border-radius:6px;color:#667eea;font-size:13px;">
                             <button class="btn btn-sm btn-outline" onclick="navigator.clipboard.writeText(document.getElementById('shareLinkInput').value).then(()=>showToast('已复制'))" style="white-space:nowrap;">复制</button>
                         </div>
                         <p style="color:#888;font-size:12px;">扫码登录 <span id="shareCode" style="color:#e0e0e0;font-weight:600;"></span> · 5 分钟内有效</p>
@@ -378,7 +381,7 @@
                         <p id="totpQRHash" style="color:#888;font-size:13px;margin-top:8px;"></p>
                     </div>
                     <div class="form-group">
-                        <label>验证码测试</label>
+                        <label for="totpTestCode">验证码测试</label>
                         <div style="display:flex;gap:10px;">
                             <input type="text" id="totpTestCode" placeholder="000000" maxlength="6" style="width:120px;">
                             <button class="btn btn-primary btn-sm" onclick="testTotp()">验证</button>
@@ -405,7 +408,7 @@
     </div>
 
     <!-- Logout Dialog -->
-    <div id="logoutDialog" class="wechat-dialog-overlay" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.6);z-index:10000;align-items:center;justify-content:center;">
+    <div id="logoutDialog" class="wechat-dialog-overlay" role="dialog" aria-modal="true" aria-label="退出登录" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.6);z-index:10000;align-items:center;justify-content:center;">
         <div style="background:#1a1a2e;border:1px solid #2a2a4a;border-radius:16px;padding:28px;max-width:380px;width:90%;text-align:center;">
             <h3 style="margin:0 0 8px;color:#fff;font-size:16px;">退出登录</h3>
             <p style="margin:0 0 20px;color:#888;font-size:13px;" id="logoutDialogMsg"></p>
@@ -420,7 +423,7 @@
     </div>
 
     <!-- WeChat Dialog -->
-    <div id="wechat-dialog-overlay">
+    <div id="wechat-dialog-overlay" role="dialog" aria-modal="true" aria-label="绑定微信">
         <div class="wechat-dialog-box">
             <h3>绑定微信</h3>
             <p>使用微信扫描二维码</p>
@@ -611,7 +614,18 @@
                 if (!resp.ok) { qrDiv.innerHTML = '<span style="color:#888;">获取失败</span>'; statusEl.textContent = '获取二维码失败'; refreshBtn.style.display = ''; return; }
                 const data = await resp.json();
                 if (data.qrcode_url) {
-                    qrDiv.innerHTML = '<img src="https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=' + encodeURIComponent(data.qrcode_url) + '" style="width:180px;height:180px;border-radius:8px;" alt="QR">';
+                    // FIX-D：去掉 api.qrserver.com 外链（国内不可达 + 登录 URL 泄露给第三方），
+                    // 改用本地 vendored 的 qrcode.min.js 客户端生成，二维码内容不出本页。
+                    qrDiv.innerHTML = '';
+                    if (typeof QRCode !== 'undefined') {
+                        try {
+                            new QRCode(qrDiv, { text: data.qrcode_url, width: 180, height: 180, correctLevel: QRCode.CorrectLevel.M });
+                        } catch(e) {
+                            qrDiv.innerHTML = '<span style="color:#888;">二维码生成失败</span>';
+                        }
+                    } else {
+                        qrDiv.innerHTML = '<span style="color:#888;">二维码组件加载失败，请刷新重试</span>';
+                    }
                     statusEl.textContent = '等待扫码...';
                     startWechatPoll();
                 } else { qrDiv.innerHTML = '<span style="color:#888;">暂不可用</span>'; }
@@ -689,6 +703,23 @@
         }
 
         document.getElementById('wechat-dialog-overlay').addEventListener('click', function(e) { if (e.target === this) closeWechatDialog(); });
+
+        // FIX-D：Esc 关闭弹窗 + Tab 焦点循环不逃逸
+        document.addEventListener('keydown', function(e) {
+            const wechat = document.getElementById('wechat-dialog-overlay');
+            const logout = document.getElementById('logoutDialog');
+            let openModal = null;
+            if (wechat && wechat.classList.contains('active')) openModal = wechat;
+            if (logout && logout.style.display === 'flex') openModal = logout;
+            if (!openModal) return;
+            if (e.key === 'Escape') { e.preventDefault(); if (openModal === logout) closeLogoutDialog(); else closeWechatDialog(); return; }
+            if (e.key !== 'Tab') return;
+            const focusables = openModal.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])');
+            if (!focusables.length) return;
+            const first = focusables[0], last = focusables[focusables.length - 1];
+            if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+            else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+        });
 
         // ===== TOTP =====
         async function loadTotp() {

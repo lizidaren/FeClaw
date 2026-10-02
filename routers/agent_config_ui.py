@@ -40,10 +40,11 @@ async def _render_console_page(request: Request):
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>FeClaw Console - Agent 管理</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <!-- FIX-D：移除 Google Fonts（国内不可达，阻塞首屏），改用系统字体栈 -->
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
+        /* FIX-D：键盘导航可见焦点环 */
+        :focus-visible { outline: 2px solid #667eea !important; outline-offset: 2px !important; }
 
         :root {
             --primary: #667eea;
@@ -56,14 +57,14 @@ async def _render_console_page(request: Request):
             --text-dim: #888;
             --text-muted: #666;
             --border: rgba(102, 126, 234, 0.2);
-            --gradient: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            --gradient: linear-gradient(135deg, #4338ca 0%, #5b21b6 100%); /* FIX-D 对比度：白字压 #667eea 3.66:1 → #4338ca 7.90:1 */
             --success: #4ade80;
             --warning: #fbbf24;
             --error: #f87171;
         }
 
         body {
-            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
             background: var(--bg-dark);
             color: var(--text-light);
             min-height: 100vh;
@@ -391,10 +392,11 @@ async def _render_new_agent_page(request: Request):
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>FeClaw Console - 创建 Agent</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <!-- FIX-D：移除 Google Fonts（国内不可达，阻塞首屏），改用系统字体栈 -->
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
+        /* FIX-D：键盘导航可见焦点环 */
+        :focus-visible { outline: 2px solid #667eea !important; outline-offset: 2px !important; }
 
         :root {
             --primary: #667eea;
@@ -407,12 +409,12 @@ async def _render_new_agent_page(request: Request):
             --text-dim: #888;
             --text-muted: #666;
             --border: rgba(102, 126, 234, 0.2);
-            --gradient: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            --gradient: linear-gradient(135deg, #4338ca 0%, #5b21b6 100%); /* FIX-D 对比度：白字压 #667eea 3.66:1 → #4338ca 7.90:1 */
             --success: #4ade80;
         }
 
         body {
-            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
             background: var(--bg-dark);
             color: var(--text-light);
             min-height: 100vh;
@@ -838,11 +840,12 @@ async def _render_agent_config_page(request: Request, agent_id: int):
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>FeClaw Console - Agent 配置</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <!-- FIX-D：移除 Google Fonts（国内不可达，阻塞首屏），改用系统字体栈 -->
+    <script src="/static/marked.min.js"></script>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
+        /* FIX-D：键盘导航可见焦点环 */
+        :focus-visible { outline: 2px solid #667eea !important; outline-offset: 2px !important; }
 
         :root {
             --primary: #667eea;
@@ -856,14 +859,14 @@ async def _render_agent_config_page(request: Request, agent_id: int):
             --text-dim: #888;
             --text-muted: #666;
             --border: rgba(102, 126, 234, 0.2);
-            --gradient: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            --gradient: linear-gradient(135deg, #4338ca 0%, #5b21b6 100%); /* FIX-D 对比度：白字压 #667eea 3.66:1 → #4338ca 7.90:1 */
             --success: #4ade80;
             --warning: #fbbf24;
             --error: #f87171;
         }
 
         body {
-            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
             background: var(--bg-dark);
             color: var(--text-light);
             min-height: 100vh;

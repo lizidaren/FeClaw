@@ -112,32 +112,34 @@
 }
 
 /* 按钮变体 */
+/* FIX-D 对比度：白字压亮青(#00d9ff)仅 1.70:1，远低于 4.5:1。
+ * 大面积填充改用深色变体：青→#0369a1(5.93:1) 绿→#15803d(5.02:1) 红→#b91c1c(6.47:1) */
 .glass-button-primary {
-    background: linear-gradient(135deg, var(--accent-blue), rgba(0, 217, 255, 0.6));
-    border-color: var(--accent-blue);
+    background: linear-gradient(135deg, #0369a1, #075985);
+    border-color: #0369a1;
 }
 
 .glass-button-primary:hover {
-    background: linear-gradient(135deg, var(--accent-blue), rgba(0, 217, 255, 0.8));
-    box-shadow: 0 0 30px rgba(0, 217, 255, 0.4);
+    background: linear-gradient(135deg, #075985, #0369a1);
+    box-shadow: 0 0 30px rgba(3, 105, 161, 0.4);
 }
 
 .glass-button-success {
-    background: linear-gradient(135deg, var(--accent-green), rgba(74, 222, 128, 0.6));
-    border-color: var(--accent-green);
+    background: linear-gradient(135deg, #15803d, #166534);
+    border-color: #15803d;
 }
 
 .glass-button-success:hover {
-    box-shadow: 0 0 30px rgba(74, 222, 128, 0.4);
+    box-shadow: 0 0 30px rgba(21, 128, 61, 0.4);
 }
 
 .glass-button-danger {
-    background: linear-gradient(135deg, var(--accent-red), rgba(255, 107, 107, 0.6));
-    border-color: var(--accent-red);
+    background: linear-gradient(135deg, #b91c1c, #991b1b);
+    border-color: #b91c1c;
 }
 
 .glass-button-danger:hover {
-    box-shadow: 0 0 30px rgba(255, 107, 107, 0.4);
+    box-shadow: 0 0 30px rgba(185, 28, 28, 0.4);
 }
 
 .glass-button-full {

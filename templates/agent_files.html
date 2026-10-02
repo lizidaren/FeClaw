@@ -46,6 +46,8 @@
     <script src="/static/cos-js-sdk-v5.min.js"></script>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
+        /* FIX-D：键盘导航可见焦点环（浅色页用深靛 #4338ca） */
+        :focus-visible { outline: 2px solid #4338ca !important; outline-offset: 2px !important; }
         body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f5f5f5; min-height: 100vh; }
         .header {
             background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
@@ -54,7 +56,7 @@
             color: white;
         }
         .header h1 { font-size: 18px; display: flex; align-items: center; gap: 10px; }
-        .header .agent { color: #888; font-size: 14px; }
+        .header .agent { color: #a0a0aa; font-size: 14px; } /* FIX-D 对比度：深色头部 #888 4.48:1 → #a0a0aa ≥4.5:1 */
         .header button {
             padding: 8px 16px;
             background: rgba(255,255,255,0.1);
@@ -89,7 +91,7 @@
         .file-item .icon { font-size: 20px; margin-right: 12px; cursor: default; }
         .file-item .name { flex: 1; cursor: pointer; color: #333; }
         .file-item .name:hover { color: #667eea; }
-        .file-item .size { color: #888; margin-right: 8px; font-size: 14px; }
+        .file-item .size { color: #5f5f6b; margin-right: 8px; font-size: 14px; }
         .file-item-wrap { display: flex; align-items: center; flex: 1; cursor: pointer; }
 
         /* 三点按钮 */
@@ -98,7 +100,7 @@
             border: none; background: none;
             border-radius: 4px;
             cursor: pointer;
-            font-size: 18px; color: #888;
+            font-size: 18px; color: #5f5f6b;
             display: flex; align-items: center; justify-content: center;
             position: relative;
             flex-shrink: 0;
@@ -128,7 +130,7 @@
         }
         .dot-menu-panel .menu-meta {
             padding: 4px 16px 8px;
-            font-size: 12px; color: #888;
+            font-size: 12px; color: #5f5f6b;
             border-bottom: 1px solid #eee;
             margin-bottom: 6px;
             line-height: 1.6;
@@ -145,7 +147,7 @@
         .dot-menu-panel .menu-item.danger { color: #e74c3c; }
         .dot-menu-panel .menu-item.danger:hover { background: #ffebee; }
 
-        .empty-state { text-align: center; padding: 60px 20px; color: #888; }
+        .empty-state { text-align: center; padding: 60px 20px; color: #5f5f6b; }
         .empty-state .icon { font-size: 48px; margin-bottom: 15px; }
         .back-link { display: inline-block; padding: 10px 20px; color: #667eea; text-decoration: none; }
 
@@ -156,7 +158,7 @@
         .modal-header { padding: 12px 20px; border-bottom: 1px solid #333; display: flex; justify-content: space-between; align-items: center; gap: 12px; }
         .modal-header h2 { font-size: 15px; color: #ccc; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         .modal-header .header-actions { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
-        .modal-header button { background: none; border: none; font-size: 22px; cursor: pointer; color: #888; }
+        .modal-header button { background: none; border: none; font-size: 22px; cursor: pointer; color: #5f5f6b; }
         .modal-header button:hover { color: #ccc; }
 
         /* 模式切换按钮 */
@@ -189,7 +191,7 @@
         .editor-pane #configEditor #configTypeWidget { margin-bottom: 10px; }
         .editor-pane #configEditor #configValueEdit { width: 100%; min-height: 80px; padding: 14px; background: #1e1e1e; color: #d4d4d4; border: 1px solid #3c3c3c; border-radius: 6px; font-family: 'Monaco','Consolas','Fira Code',monospace; font-size: 14px; line-height: 1.5; resize: vertical; outline: none; box-sizing: border-box; }
         .editor-pane #configEditor #configValueEdit:focus { border-color: #569cd6; }
-        .editor-pane #configEditor #configMeta { margin-top: 12px; font-size: 12px; color: #888; display: flex; gap: 16px; }
+        .editor-pane #configEditor #configMeta { margin-top: 12px; font-size: 12px; color: #5f5f6b; display: flex; gap: 16px; }
 
         /* 预览面板 (Markdown 渲染 / 媒体预览 / 不支持) */
         .preview-pane {
@@ -276,6 +278,10 @@
         @media (max-width: 768px) {
             .editor-container { flex-direction: column; }
             .preview-pane { padding: 16px 20px; }
+            /* FIX-D 移动端：工具栏按钮换行不重叠；文件列表横向可滚 */
+            .toolbar { flex-wrap: wrap; padding: 12px 14px; }
+            .file-list { margin: 0 12px 12px; overflow-x: auto; }
+            .header { padding: 12px 14px; }
         }
     /* 自定义确认对话框 */
         .unsaved-overlay {
@@ -322,7 +328,7 @@
         <button onclick="loadFiles()">🔄 刷新</button>
         <span id="readonlyBadge" style="display:none;padding:4px 10px;background:#ffebee;color:#c62828;border-radius:4px;font-size:12px;font-weight:600;margin-left:10px">🔒 只读目录</span>
         <span id="configInfoBadge" style="display:none;padding:4px 10px;background:#e3f2fd;color:#1565c0;border-radius:4px;font-size:12px;margin-left:10px">⚙️ 建议通过 <a href="/settings" style="color:#1565c0;font-weight:600" target="_blank">配置管理 →</a> 修改</span>
-        <input type="file" id="fileUploadInput" style="display: none;" onchange="handleFileUpload(event)">
+        <input type="file" id="fileUploadInput" style="display: none;" onchange="handleFileUpload(event)" aria-label="上传文件">
     </div>
     <div class="upload-progress" id="uploadProgress" style="display: none;"></div>
     <div class="file-list" id="fileList">
@@ -342,20 +348,20 @@
     </div>
 
     <!-- 编辑弹窗 -->
-    <div class="modal" id="editModal">
+    <div class="modal" id="editModal" role="dialog" aria-modal="true" aria-label="编辑文件">
         <div class="modal-content">
             <div class="modal-header">
                 <h2 id="editFileName">编辑文件</h2>
                 <div class="header-actions">
                     <button class="mode-toggle-btn" id="modeToggleBtn" style="display:none" onclick="togglePreviewMode()">编辑</button>
-                    <button onclick="closeModal()">&times;</button>
+                    <button onclick="closeModal()" aria-label="关闭">&times;</button>
                 </div>
             </div>
             <div class="editor-container">
                 <div class="editor-pane">
                     <div class="editor-pane-header" id="editorPaneHeader">📝 编辑器（带语法高亮）</div>
                     <div class="editor-body">
-                        <textarea id="editorContainer" placeholder="文件内容..."></textarea>
+                        <textarea id="editorContainer" placeholder="文件内容..." aria-label="文件内容"></textarea>
                         <div class="image-preview" id="imagePreview"><img id="imagePreviewImg" src="" alt="preview"></div>
                         <div class="preview-pane" id="markdownPreview"></div>
                         <div class="media-preview" id="mediaPreview"></div>
@@ -367,7 +373,7 @@
                         <div id="configKeyDisplay"></div>
                         <div id="configDesc" style="display:none"></div>
                         <div id="configTypeWidget" style="margin-bottom:10px"></div>
-                        <textarea id="configValueEdit" placeholder="配置值..."></textarea>
+                        <textarea id="configValueEdit" placeholder="配置值..." aria-label="配置值"></textarea>
                         <div id="configMeta"></div>
                     </div>
                 </div>
@@ -1368,13 +1374,13 @@
                     widgetEl.style.display = 'block';
                     const isOn = lower === 'true';
                     widgetEl.innerHTML = '<label style="display:flex;align-items:center;gap:12px;cursor:pointer;padding:12px 16px;background:#252526;border-radius:8px;font-size:14px;color:#d4d4d4">' +
-                        '<input type="checkbox" ' + (isOn ? 'checked' : '') + ' id="configBoolToggle" style="width:22px;height:22px;accent-color:#4ec9b0;cursor:pointer">' +
+                        '<input type="checkbox" ' + (isOn ? 'checked' : '') + ' id="configBoolToggle" aria-label="开关" style="width:22px;height:22px;accent-color:#4ec9b0;cursor:pointer">' +
                         '<span>' + (isOn ? '✅ 已启用' : '⛔ 已禁用') + '</span>' +
                         '</label>';
                 } else if (type === 'number') {
                     textareaEl.style.display = 'none';
                     widgetEl.style.display = 'block';
-                    widgetEl.innerHTML = '<input type="number" value="' + rawVal.trim() + '" id="configNumberInput" ' +
+                    widgetEl.innerHTML = '<input type="number" value="' + rawVal.trim() + '" id="configNumberInput" aria-label="数值" ' +
                         'style="width:200px;padding:12px;background:#1e1e1e;color:#d4d4d4;border:1px solid #3c3c3c;border-radius:6px;font-size:14px;outline:none">';
                 } else if (type === 'json') {
                     textareaEl.style.display = 'block';
@@ -1466,6 +1472,23 @@
             currentMode = 'edit';
             currentFileType = 'text';
         }
+
+        // FIX-D：Esc 关闭各对话框（编辑/新建/草稿/未保存确认）
+        document.addEventListener('keydown', function(e) {
+            if (e.key !== 'Escape') return;
+            const modals = [
+                document.getElementById('editModal'),
+                document.getElementById('newFileOverlay'),
+                document.getElementById('draftOverlay'),
+                document.getElementById('unsavedOverlay')
+            ];
+            const open = modals.find(m => m && m.classList.contains('active'));
+            if (open) {
+                e.preventDefault();
+                if (open.id === 'editModal') closeModal();
+                else open.classList.remove('active');
+            }
+        });
 
         // --- 保存文件 ---
 
@@ -1641,11 +1664,11 @@
     </script>
     <!-- 未保存确认对话框 -->
     <!-- 新建文件/目录对话框 -->
-    <div class="unsaved-overlay" id="newFileOverlay">
+    <div class="unsaved-overlay" id="newFileOverlay" role="dialog" aria-modal="true" aria-label="新建文件">
         <div class="unsaved-dialog" style="text-align:left;max-width:380px;">
             <h3 style="margin:0 0 12px;color:#1a1a2e;font-size:16px;font-weight:600;" id="newFileDialogTitle">新建文件</h3>
-            <p style="margin:0 0 4px;color:#888;font-size:13px;">文件名</p>
-            <input type="text" id="newFileNameInput" placeholder="example.md" style="width:100%;padding:10px 14px;border:1px solid #ddd;border-radius:8px;font-size:14px;outline:none;box-sizing:border-box;margin-bottom:16px;" autofocus>
+            <p style="margin:0 0 4px;color:#5f5f6b;font-size:13px;">文件名</p>
+            <input type="text" id="newFileNameInput" placeholder="example.md" aria-label="文件名" style="width:100%;padding:10px 14px;border:1px solid #ddd;border-radius:8px;font-size:14px;outline:none;box-sizing:border-box;margin-bottom:16px;" autofocus>
             <div style="display:flex;gap:12px;justify-content:flex-end;">
                 <button class="btn-discard" onclick="document.getElementById('newFileOverlay').classList.remove('active')">取消</button>
                 <button class="btn-save-close" id="btnNewFileConfirm" onclick="newFileConfirm()">创建</button>
@@ -1660,7 +1683,7 @@
         });
     </script>
     <!-- 草稿恢复确认对话框 -->
-    <div class="unsaved-overlay" id="draftOverlay">
+    <div class="unsaved-overlay" id="draftOverlay" role="dialog" aria-modal="true" aria-label="检测到未保存的编辑">
         <div class="unsaved-dialog">
             <div style="text-align:center;margin-bottom:16px;">
                 <div style="width:48px;height:48px;border-radius:50%;background:#e8f5e9;display:inline-flex;align-items:center;justify-content:center;">
@@ -1672,14 +1695,14 @@
                 </div>
             </div>
             <h3 style="margin:0 0 4px;color:#1a1a2e;font-size:16px;font-weight:600;">检测到未保存的编辑</h3>
-            <p style="margin:0 0 20px;color:#888;font-size:13px;" id="draftOverlayMsg">上次编辑的内容尚未保存，是否继续编辑？</p>
+            <p style="margin:0 0 20px;color:#5f5f6b;font-size:13px;" id="draftOverlayMsg">上次编辑的内容尚未保存，是否继续编辑？</p>
             <div class="unsaved-actions">
                 <button class="btn-save-close" onclick="restoreDraft()" style="order:1">继续编辑</button>
                 <button class="btn-discard" onclick="discardDraft()" style="order:2">放弃草稿</button>
             </div>
         </div>
     </div>
-    <div class="unsaved-overlay" id="unsavedOverlay">
+    <div class="unsaved-overlay" id="unsavedOverlay" role="dialog" aria-modal="true" aria-label="要保存对此文件的更改吗">
         <div class="unsaved-dialog">
             <div style="text-align:center;margin-bottom:16px;">
                 <div style="width:48px;height:48px;border-radius:50%;background:#fff3e0;display:inline-flex;align-items:center;justify-content:center;">
@@ -1690,7 +1713,7 @@
                 </div>
             </div>
             <h3 style="margin:0 0 4px;color:#1a1a2e;font-size:16px;font-weight:600;">要保存对此文件的更改吗？</h3>
-            <p style="margin:0 0 20px;color:#888;font-size:13px;">如果关闭而不保存，此文件的更改将丢失。</p>
+            <p style="margin:0 0 20px;color:#5f5f6b;font-size:13px;">如果关闭而不保存，此文件的更改将丢失。</p>
             <div class="unsaved-actions">
                 <button class="btn-save-close" onclick="saveAndClose()" style="order:1">保存</button>
                 <button class="btn-discard" onclick="discardAndClose()" style="order:2">不保存</button>

@@ -355,6 +355,32 @@
             border-color: var(--primary);
         }
 
+        /* FIX-D：键盘导航可见焦点环 */
+        :focus-visible {
+            outline: 2px solid #667eea !important;
+            outline-offset: 2px !important;
+        }
+
+        /* FIX-D：消息操作按钮（复制 / 重新生成） */
+        .msg-actions {
+            display: flex;
+            gap: 6px;
+            margin-top: 8px;
+        }
+        .msg-action-btn {
+            background: var(--bg-message);
+            border: 1px solid var(--border);
+            color: var(--text-dim);
+            padding: 3px 10px;
+            border-radius: 6px;
+            font-size: 12px;
+            cursor: pointer;
+        }
+        .msg-action-btn:hover {
+            color: var(--text-light);
+            border-color: var(--primary);
+        }
+
         .input-field::placeholder {
             color: var(--text-muted);
         }
@@ -782,7 +808,7 @@
             animation: fadeIn 0.2s ease;
         }
         .search-modal {
-            background: var(--bg);
+            background: var(--bg-message); /* FIX-D：原 var(--bg) 未定义 → 弹窗透明不可读，改用已定义的 --bg-message */
             border: 1px solid var(--border);
             border-radius: 12px;
             width: min(600px, 90vw);
@@ -823,7 +849,7 @@
             font-size: 14px;
             line-height: 1.7;
             white-space: pre-wrap;
-            color: var(--text);
+            color: var(--text-light);
         }
         @keyframes fadeIn {
             from { opacity: 0; transform: translateY(-4px); }
@@ -885,7 +911,7 @@
     <div class="sidebar" id="sidebar">
         <div class="sidebar-header">
             <h2>对话历史</h2>
-            <button class="new-chat-btn" onclick="newChat()" title="新建对话">+</button>
+            <button class="new-chat-btn" onclick="newChat()" title="新建对话" aria-label="新建对话">+</button>
         </div>
         <div class="session-list" id="sessionList">
             <!-- 动态加载 -->
@@ -895,7 +921,7 @@
     <!-- 主聊天区域 -->
     <div class="chat-main">
         <div class="chat-header">
-            <button class="mobile-menu-btn" onclick="toggleSidebar()" title="历史会话">☰</button>
+            <button class="mobile-menu-btn" onclick="toggleSidebar()" title="历史会话" aria-label="打开历史会话">☰</button>
             <div style="display: flex; align-items: center;">
                 <h1 id="chatTitle">新对话</h1>
                 <span class="ws-status" id="wsStatus">
@@ -906,7 +932,7 @@
             <a href="/" class="back-link">返回主页</a>
         </div>
 
-        <div class="messages-container" id="messagesContainer">
+        <div class="messages-container" id="messagesContainer" role="log" aria-live="polite" aria-atomic="false">
             <div class="empty-state">
                 <h2>👋 你好！</h2>
                 <p>我是你的 AI 伙伴，有什么可以帮助你的吗？</p>
@@ -915,30 +941,31 @@
 
         <button class="jump-to-bottom" id="jumpToBottomBtn" onclick="jumpToBottom()">↓ 回到底部</button>
 
-        <div class="input-container">
+        <div class="input-container" id="inputContainer" aria-busy="false">
             <!-- 图片预览区域 -->
             <div class="image-preview-area" id="imagePreviewArea" style="display: none;">
                 <div class="image-preview-wrapper">
                     <img id="imagePreview" src="" alt="预览图片">
                     <div id="filePreviewName" style="padding: 10px; font-size: 14px; display: none;"></div>
-                    <button class="remove-image-btn" onclick="clearSelectedImage()">✕</button>
+                    <button class="remove-image-btn" onclick="clearSelectedImage()" aria-label="移除图片">✕</button>
                 </div>
             </div>
-            
+
             <div class="input-wrapper">
-                <textarea 
-                    class="input-field" 
-                    id="inputField" 
-                    placeholder="输入消息..." 
+                <textarea
+                    class="input-field"
+                    id="inputField"
+                    placeholder="输入消息..."
+                    aria-label="输入消息"
                     rows="1"
                     onkeydown="handleKeydown(event)"
                 ></textarea>
-                <button class="image-btn" onclick="document.getElementById('imageInput').click()" title="发送图片">📷</button>
-                <button class="send-btn" id="sendBtn" onclick="handleSendClick()" title="发送">➤</button>
+                <button class="image-btn" onclick="document.getElementById('imageInput').click()" title="发送图片" aria-label="发送图片">📷</button>
+                <button class="send-btn" id="sendBtn" onclick="handleSendClick()" title="发送" aria-label="发送">➤</button>
             </div>
-            
+
             <!-- 隐藏的图片输入 -->
-            <input type="file" id="imageInput" style="display: none;" onchange="handleImageSelect(event)">
+            <input type="file" id="imageInput" aria-label="选择图片" style="display: none;" onchange="handleImageSelect(event)">
         </div>
     </div>
 
@@ -1260,7 +1287,7 @@ let selectedFilePath = null;     // 上传后的 VFS 路径
                         <div class="session-preview">${escapeHtml(preview.slice(0, 50))}</div>
                         <div class="session-time">${formatDate(session.updated_at)}</div>
                     </div>
-                    <button class="delete-btn" onclick="deleteSession(event, '${session.session_id}')">🗑️</button>
+                    <button class="delete-btn" onclick="deleteSession(event, '${session.session_id}')" aria-label="删除会话">🗑️</button>
                 </div>`;
             }).join('');
         }
@@ -1346,7 +1373,11 @@ let selectedFilePath = null;     // 上传后的 VFS 路径
                     }
                 } catch(e) {}
             }
-            
+
+            // FIX-D：历史消息给助手气泡加「复制」，最后一条加「重新生成」
+            const asstMsgs = container.querySelectorAll('.message.assistant');
+            asstMsgs.forEach((el, idx) => finalizeMessage(el, idx === asstMsgs.length - 1));
+
             scrollToBottom();
         }
 
@@ -1473,10 +1504,10 @@ let selectedFilePath = null;     // 上传后的 VFS 路径
                     body.className = 'search-modal-body';
                     body.innerHTML = renderMarkdown(content);
                     overlay.innerHTML = `
-                        <div class="search-modal">
+                        <div class="search-modal" role="dialog" aria-modal="true" aria-label="搜索结果">
                             <div class="search-modal-header">
                                 <span>📄 结果：${escapeHtml(title || '')}</span>
-                                <button class="close-btn">✕</button>
+                                <button class="close-btn" aria-label="关闭">✕</button>
                             </div>
                         </div>
                     `;
@@ -1485,6 +1516,8 @@ let selectedFilePath = null;     // 上传后的 VFS 路径
                     overlay.onclick = function(e) { if (e.target === overlay) removeSearchModal(); };
                     document.body.appendChild(overlay);
                     _activeSearchModal = overlay;
+                    const closeBtn = overlay.querySelector('.close-btn');
+                    if (closeBtn) closeBtn.focus();
                 });
             }
 
@@ -1570,10 +1603,10 @@ let selectedFilePath = null;     // 上传后的 VFS 路径
                 body.className = 'search-modal-body';
                 body.innerHTML = renderMarkdown(content);
                 overlay.innerHTML = `
-                    <div class="search-modal">
+                    <div class="search-modal" role="dialog" aria-modal="true" aria-label="搜索结果">
                         <div class="search-modal-header">
                             <span>🔍 搜索结果：${escapeHtml(query || '')}</span>
-                            <button class="close-btn">✕</button>
+                            <button class="close-btn" aria-label="关闭">✕</button>
                         </div>
                     </div>
                 `;
@@ -1583,6 +1616,8 @@ let selectedFilePath = null;     // 上传后的 VFS 路径
                 document.body.appendChild(overlay);
                 _activeSearchModal = overlay;
                 _searchModalRefs[query] = body;
+                const closeBtn = overlay.querySelector('.close-btn');
+                if (closeBtn) closeBtn.focus();
             }
             function removeSearchModal() {
                 Object.keys(_searchModalRefs).forEach(k => delete _searchModalRefs[k]);
@@ -1591,6 +1626,17 @@ let selectedFilePath = null;     // 上传后的 VFS 路径
                     _activeSearchModal = null;
                 }
             }
+            // FIX-D：Esc 关闭 + 焦点不逃逸（Tab 循环在弹窗内）
+            document.addEventListener('keydown', function(e) {
+                if (!_activeSearchModal) return;
+                if (e.key === 'Escape') { e.preventDefault(); removeSearchModal(); return; }
+                if (e.key !== 'Tab') return;
+                const focusables = _activeSearchModal.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])');
+                if (!focusables.length) return;
+                const first = focusables[0], last = focusables[focusables.length - 1];
+                if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+                else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+            });
 
             // 深度思考推理过程（可折叠）
             let reasoningArea = null;
@@ -1621,6 +1667,7 @@ let selectedFilePath = null;     // 上传后的 VFS 路径
                 }
                 currentSessionId = msg.session_id;
                 removeCursor(aiMessageEl);
+                finalizeMessage(aiMessageEl, true);
                 loadSessions();
                 cleanup();
             };
@@ -1859,7 +1906,8 @@ let selectedFilePath = null;     // 上传后的 VFS 路径
                 
                 // 移除光标
                 removeCursor(aiMessageEl);
-                
+                finalizeMessage(aiMessageEl, true);
+
                 // 刷新会话列表
                 loadSessions();
                 
@@ -1957,10 +2005,70 @@ let selectedFilePath = null;     // 上传后的 VFS 路径
             scrollToBottom();
         }
 
+        // FIX-D：复制回答（navigator.clipboard + execCommand 降级，JS 挂掉不变砖）
+        function copyText(text, btn) {
+            function ok() { btn.textContent = '✅ 已复制'; setTimeout(() => { btn.textContent = '复制'; }, 1500); }
+            function fail() { btn.textContent = '复制失败'; setTimeout(() => { btn.textContent = '复制'; }, 1500); }
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(text).then(ok, fail);
+                return;
+            }
+            try {
+                const ta = document.createElement('textarea');
+                ta.value = text;
+                ta.style.position = 'fixed';
+                ta.style.opacity = '0';
+                document.body.appendChild(ta);
+                ta.select();
+                document.execCommand('copy');
+                document.body.removeChild(ta);
+                ok();
+            } catch (e) { fail(); }
+        }
+
+        // FIX-D：重新生成 —— 重发上一条用户消息
+        function regenerateLast() {
+            const users = document.querySelectorAll('#messagesContainer .message.user');
+            if (!users.length) return;
+            const text = (users[users.length - 1].innerText || '').trim();
+            if (!text) return;
+            document.getElementById('inputField').value = text;
+            sendMessage();
+        }
+
+        // FIX-D：给助手消息追加「复制 / 重新生成」操作条
+        function finalizeMessage(el, canRegenerate) {
+            if (!el || el.classList.contains('has-actions')) return;
+            const text = (el.innerText || '').trim();
+            const bar = document.createElement('div');
+            bar.className = 'msg-actions';
+            const copyBtn = document.createElement('button');
+            copyBtn.type = 'button';
+            copyBtn.className = 'msg-action-btn';
+            copyBtn.textContent = '复制';
+            copyBtn.setAttribute('aria-label', '复制回答');
+            copyBtn.addEventListener('click', () => copyText(text, copyBtn));
+            bar.appendChild(copyBtn);
+            if (canRegenerate) {
+                const reBtn = document.createElement('button');
+                reBtn.type = 'button';
+                reBtn.className = 'msg-action-btn';
+                reBtn.textContent = '重新生成';
+                reBtn.setAttribute('aria-label', '重新生成回答');
+                reBtn.addEventListener('click', regenerateLast);
+                bar.appendChild(reBtn);
+            }
+            el.appendChild(bar);
+            el.classList.add('has-actions');
+        }
+
         // 设置流式状态（流式期间把发送键就地切换为「停止」）
         function setStreaming(streaming) {
             isStreaming = streaming;
             const btn = document.getElementById('sendBtn');
+            // FIX-D：输入区 aria-busy，读屏用户可感知「正在生成」
+            const inputArea = document.getElementById('inputContainer');
+            if (inputArea) inputArea.setAttribute('aria-busy', streaming ? 'true' : 'false');
             if (streaming) {
                 btn.textContent = '■';
                 btn.classList.add('stop');

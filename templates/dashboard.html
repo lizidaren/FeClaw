@@ -296,17 +296,17 @@
     </div>
 
     <!-- 创建 Agent Modal -->
-    <div id="createAgentModal" class="modal-overlay">
+    <div id="createAgentModal" class="modal-overlay" role="dialog" aria-modal="true" aria-label="创建新 Agent">
         <div class="glass-card modal-card">
             <div class="modal-header">
                 <h3>创建新 Agent</h3>
-                <button class="modal-close" onclick="closeCreateModal()">✕</button>
+                <button class="modal-close" onclick="closeCreateModal()" aria-label="关闭">✕</button>
             </div>
             <div class="modal-body">
                 <!-- 创建表单 -->
                 <div id="createStep-form">
                     <div class="form-group">
-                        <label class="form-label">Agent 名称</label>
+                        <label class="form-label" for="agentNameInput">Agent 名称</label>
                         <input type="text" id="agentNameInput" class="glass-input" placeholder="输入 Agent 名称..." maxlength="50">
                     </div>
                     <div class="template-section-label">选择模板 <span style="color:var(--text-muted);font-weight:400;">（必选）</span></div>
@@ -425,6 +425,18 @@
             createModalEl.style.display = 'none';
             loadAgents(); // Refresh agent list
         }
+
+        // FIX-D：Esc 关闭创建弹窗 + Tab 焦点循环不逃逸
+        document.addEventListener('keydown', function(e) {
+            if (!createModalEl || createModalEl.style.display !== 'flex') return;
+            if (e.key === 'Escape') { e.preventDefault(); closeCreateModal(); return; }
+            if (e.key !== 'Tab') return;
+            const focusables = createModalEl.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])');
+            if (!focusables.length) return;
+            const first = focusables[0], last = focusables[focusables.length - 1];
+            if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+            else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+        });
 
         let _createAgentRef = null;  // preserved agent reference for init retry
 

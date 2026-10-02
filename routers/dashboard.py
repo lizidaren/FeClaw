@@ -149,10 +149,11 @@ PAGE_HTML = """<!DOCTYPE html>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>FeClaw Group Chat Dashboard</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <!-- FIX-D：移除 Google Fonts（国内不可达，阻塞首屏），改用系统字体栈 -->
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
+        /* FIX-D：键盘导航可见焦点环 */
+        :focus-visible { outline: 2px solid #667eea !important; outline-offset: 2px !important; }
 
         :root {
             --bg: #0a0a1a;
@@ -168,7 +169,7 @@ PAGE_HTML = """<!DOCTYPE html>
         }
 
         body {
-            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
             background: var(--bg);
             color: var(--text);
             min-height: 100vh;
@@ -399,7 +400,7 @@ PAGE_HTML = """<!DOCTYPE html>
         }
 
         .msg-nav button {
-            background: var(--primary);
+            background: #4338ca; /* FIX-D 对比度：白字压 #667eea 3.66:1 → #4338ca 7.90:1 */
             color: white;
             border: none;
             padding: 8px 20px;
