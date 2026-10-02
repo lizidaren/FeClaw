@@ -5,7 +5,7 @@
 无需修改调用逻辑。
 
 用法:
-    info = resolve("deepseek-v4-flash")
+    info = resolve("deepseek-flash")
     info["provider"]  → "deepseek"
     info["supports_thinking"]  → True
 
@@ -59,10 +59,20 @@ PROVIDER_META = {
 
 MODEL_REGISTRY = {
     # ─── DeepSeek ───
+    # 主模型：DeepSeek V4.1 Flash —— 官方 GET /models 已返回 input_modalities=["text","image"]
+    # ⇒ 真支持图片输入，标记 supports_vision=True（图片直通主模型，不再预识别转文字）。
+    "deepseek-flash": {
+        "provider": "deepseek",
+        "supports_thinking": True,
+        "supports_vision": True,
+    },
+    # back-compat 别名：线上旧名 deepseek-v4-flash 仍可用（API 静默别名到 deepseek-flash）。
+    # 沿用 _alias_of 机制（与 doubao-seed-2.0-lite 一致）：漏改的引用不至于炸。
     "deepseek-v4-flash": {
         "provider": "deepseek",
         "supports_thinking": True,
-        "supports_vision": False,
+        "supports_vision": True,
+        "_alias_of": "deepseek-flash",
     },
 
     # ─── 通义千问 ───
@@ -265,6 +275,32 @@ def resolve(model_name: str) -> dict:
         "api_key_attr": provider_meta.get("api_key_attr"),
         "base_url": provider_meta.get("base_url"),
     }
+
+
+def model_supports_vision(model_name: Optional[str] = None) -> bool:
+    """判断模型是否支持图片输入（多模态）。
+
+    Args:
+        model_name: 模型名；None 时使用 settings.MAIN_TEXT_MODEL（主模型）。
+
+    Returns:
+        模型是否标记 supports_vision。未注册的模型按不支持处理（走预识别兜底），
+        避免把文本模型误判成多模态后发图失败。
+    """
+    if not model_name:
+        try:
+            from config import settings
+            model_name = settings.MAIN_TEXT_MODEL
+        except Exception:
+            model_name = None
+    if not model_name:
+        return False
+    return bool(resolve(model_name).get("supports_vision", False))
+
+
+def main_model_supports_vision() -> bool:
+    """主模型（MAIN_TEXT_MODEL）是否支持图片输入。"""
+    return model_supports_vision(None)
 
 
 def resolve_rerank(rerank_model: str) -> dict:

@@ -133,7 +133,7 @@ async def phase1():
                     t0 = time.time()
                     async with httpx.AsyncClient(timeout=310) as cli:
                         r = await cli.post(DS_API, json={
-                            'model': 'deepseek-v4-flash',
+                            'model': 'deepseek-flash',
                             'thinking': {'type': 'enabled'},
                             'messages': [
                                 {'role': 'system', 'content': STRUCTURE_PROMPT},

@@ -75,7 +75,7 @@ async def main():
 
     qwen_text  = ['qwen3.6-flash', 'qwen3.6-plus', 'qwen3.7-plus', 'qwen3.7-max']
     qwen_vis   = ['qwen3.6-35b-a3b', 'qwen3-vl-flash', 'qwen3-vl-plus']
-    deepseek   = ['deepseek-v4-flash']
+    deepseek   = ['deepseek-flash']
     zhipu      = ['glm-4.7', 'glm-4.7-flash', 'glm-4.5-air', 'glm-5-turbo', 'glm-5']
     zhipu_vis  = ['glm-4.6v']
     kimi       = ['kimi-k2.5', 'kimi-k2.6']

@@ -67,7 +67,7 @@ class SessionToolsMixin(AgentToolsServiceBase):
             async def collect_response():
                 llm = LLMService()
                 full_response = ""
-                async for chunk in llm.chat([{"role": "user", "content": prompt}], provider=_sum_resolve("deepseek-v4-flash")["provider"]):
+                async for chunk in llm.chat([{"role": "user", "content": prompt}], provider=_sum_resolve("deepseek-flash")["provider"]):
                     full_response += chunk
                 return full_response.strip()
 
@@ -387,7 +387,7 @@ JSON："""
                         "Content-Type": "application/json",
                     },
                     json={
-                        "model": "deepseek-v4-flash",
+                        "model": "deepseek-flash",
                         "messages": [{"role": "user", "content": deepseek_prompt}],
                         "thinking": {"type": "disabled"},
                     },
@@ -515,7 +515,7 @@ JSON："""
 
         for round_num in range(max_rounds):
             req_body = {
-                "model": "deepseek-v4-flash",
+                "model": "deepseek-flash",
                 "messages": messages,
                 "thinking": {"type": "disabled"},
                 "temperature": 0.3,
@@ -926,7 +926,7 @@ JSON："""
             def _run_async_in_thread():
                 async def collect():
                     result = ""
-                    async for chunk in llm.chat([{"role": "user", "content": prompt}], provider=_sum_resolve2("deepseek-v4-flash")["provider"]):
+                    async for chunk in llm.chat([{"role": "user", "content": prompt}], provider=_sum_resolve2("deepseek-flash")["provider"]):
                         result += chunk
                     return result.strip()
 

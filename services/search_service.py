@@ -106,7 +106,7 @@ class SearchService:
                         "Content-Type": "application/json",
                     },
                     json={
-                        "model": "deepseek-v4-flash",
+                        "model": "deepseek-flash",
                         "messages": [{"role": "user", "content": ds_prompt}],
                         "thinking": {"type": "disabled"},
                     },

@@ -73,7 +73,7 @@ class TestProvider:
         async for chunk in provider.chat(
             messages=[{"role": "user", "content": "hi"}],
             stream=False,
-            model="deepseek-v4-flash",
+            model="deepseek-flash",
         ):
             results.append(chunk)
 
@@ -95,7 +95,7 @@ class TestProvider:
         async for chunk in provider.chat(
             messages=[{"role": "user", "content": "hi"}],
             stream=True,
-            model="deepseek-v4-flash",
+            model="deepseek-flash",
         ):
             results.append(chunk)
 
@@ -111,7 +111,7 @@ class TestProvider:
             "data: [DONE]",
         ])
 
-        async for _ in provider.chat(messages=[{"role": "user", "content": "hi"}], stream=True, model="deepseek-v4-flash"):
+        async for _ in provider.chat(messages=[{"role": "user", "content": "hi"}], stream=True, model="deepseek-flash"):
             pass
 
         assert provider.last_usage is None
@@ -127,7 +127,7 @@ class TestProvider:
         ])
 
         results = []
-        async for chunk in provider.chat(messages=[{"role": "user", "content": "hi"}], stream=True, model="deepseek-v4-flash"):
+        async for chunk in provider.chat(messages=[{"role": "user", "content": "hi"}], stream=True, model="deepseek-flash"):
             results.append(chunk)
 
         assert "".join(results) == "OK"
@@ -201,7 +201,7 @@ class TestLLMServiceRecordStat:
         """_record_stat 应把 tokens_used 写入数据库"""
         await service._record_stat(
             provider="deepseek",
-            model="deepseek-v4-flash",
+            model="deepseek-flash",
             request_type="chat",
             tokens_used=150,
         )
@@ -245,7 +245,7 @@ class TestLLMServiceRecordStat:
         # 不应抛出异常
         await service._record_stat(
             provider="deepseek",
-            model="deepseek-v4-flash",
+            model="deepseek-flash",
             request_type="chat",
             tokens_used=100,
         )
@@ -284,7 +284,7 @@ class TestLLMServiceChat:
 
         with patch.object(service, "get_provider", return_value=mock_provider):
             with patch.object(settings, "DEFAULT_LLM_PROVIDER", "deepseek"):
-                with patch.object(settings, "DEFAULT_LLM_MODEL", "deepseek-v4-flash"):
+                with patch.object(settings, "DEFAULT_LLM_MODEL", "deepseek-flash"):
                     results = []
                     async for chunk in service.chat(
                         messages=[{"role": "user", "content": "hi"}],
@@ -301,7 +301,7 @@ class TestLLMServiceChat:
             added = mock_db.add.call_args[0][0]
             assert added.tokens_used == 80
             assert added.provider == "deepseek"
-            assert added.model == "deepseek-v4-flash"
+            assert added.model == "deepseek-flash"
             assert added.request_type == "chat"
 
     @pytest.mark.asyncio
@@ -392,7 +392,7 @@ class TestLLMServiceChatWithTools:
         with patch.object(service, "_retry_call", return_value=api_response):
             with patch.object(service, "_ensure_http_client", return_value=AsyncMock()):
                 with patch("services.llm_service._resolve_provider", return_value=("test-key", "https://api.test.com")):
-                    with patch.object(settings, "MAIN_TEXT_MODEL", "deepseek-v4-flash"):
+                    with patch.object(settings, "MAIN_TEXT_MODEL", "deepseek-flash"):
                         result = await service.chat_with_tools(
                             messages=[{"role": "user", "content": "搜索一下"}],
                             tools=[],
@@ -433,7 +433,7 @@ class TestLLMServiceChatWithToolsStream:
         with patch.object(service, "_ensure_http_client", return_value=mock_client):
             with patch.object(service, "_retry_call", return_value=mock_response):
                 with patch("services.llm_service._resolve_provider", return_value=("test-key", "https://api.test.com")):
-                    with patch.object(settings, "MAIN_TEXT_MODEL", "deepseek-v4-flash"):
+                    with patch.object(settings, "MAIN_TEXT_MODEL", "deepseek-flash"):
                         events = []
                         async for event in service.chat_with_tools_stream(
                             messages=[{"role": "user", "content": "test"}],
@@ -509,7 +509,7 @@ class TestLLMServiceIntegration:
 
         with patch.object(service, "get_provider", return_value=mock_provider):
             with patch.object(settings, "DEFAULT_LLM_PROVIDER", "deepseek"):
-                with patch.object(settings, "DEFAULT_LLM_MODEL", "deepseek-v4-flash"):
+                with patch.object(settings, "DEFAULT_LLM_MODEL", "deepseek-flash"):
                     async for _ in service.chat(
                         messages=[{"role": "user", "content": "hi"}],
                     ):
@@ -521,7 +521,7 @@ class TestLLMServiceIntegration:
             added = mock_db.add.call_args[0][0]
             assert added.tokens_used == 80
             assert added.provider == "deepseek"
-            assert added.model == "deepseek-v4-flash"
+            assert added.model == "deepseek-flash"
             assert added.request_type == "chat"
 
 
@@ -592,7 +592,7 @@ class TestP05ConcurrencyFix:
 
         with patch.object(service, "get_provider", return_value=mock_provider):
             with patch.object(settings, "DEFAULT_LLM_PROVIDER", "deepseek"):
-                with patch.object(settings, "DEFAULT_LLM_MODEL", "deepseek-v4-flash"):
+                with patch.object(settings, "DEFAULT_LLM_MODEL", "deepseek-flash"):
                     # 关键：两个并发调用同一个 provider 实例
                     await asyncio.gather(
                         run_call("a"),

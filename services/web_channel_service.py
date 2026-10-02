@@ -199,31 +199,53 @@ class WebChannelService:
         # 如果有图片，保存到 VFS，然后告诉 Agent 图片路径和快速描述
         actual_user_input = user_input
         vfs_path = None
+        _image_data_url = None  # 图片直通：主模型 supports_vision 时携带的 data URL
         if image_url:
             # 下载图片并保存到用户VFS工作区
             vfs_path, image_bytes = await _download_and_save_image_to_vfs(image_url, self.user_id, agent_hash=self.agent_hash)
             if vfs_path:
-                # Pre-LLM: 用 Qwen3 VL Flash 快速描述图片
-                image_desc = None
+                # 图片直通（Q16）：主模型 supports_vision ⇒ 图片作为 image block 直接发主模型，
+                # 不再预识别转文字；仅当模型不支持 vision 时才回退到旧的预描述。
+                _vision_ok = False
                 try:
-                    # 根据 sr_enabled 决定预识别模式
-                    from models.database import AgentProfile
-                    _ap = self.db.query(AgentProfile).filter(
-                        AgentProfile.hash == self.agent_hash
-                    ).first()
-                    _use_4d = _ap and not _ap.sr_enabled
-
-                    if image_bytes:
-                        if _use_4d:
-                            from services.image_describer import describe_image_4d
-                            image_desc = await describe_image_4d(image_bytes, timeout=15.0)
-                        else:
-                            from services.image_describer import describe_image_3d
-                            image_desc = await describe_image_3d(image_bytes, timeout=15.0)
+                    from services.model_registry import main_model_supports_vision
+                    _vision_ok = main_model_supports_vision()
                 except Exception as e:
-                    logger.warning(f"[FeClaw] Pre-LLM image description failed: {e}")
+                    logger.warning(f"[FeClaw] model vision check failed, fallback to pre-description: {e}")
 
-                # 构建带描述的提示词
+                image_desc = None
+                if _vision_ok and image_bytes:
+                    # 直接把图片字节转 data URL，作为 image block 发主模型
+                    try:
+                        from services.image_describer import _detect_image_format
+                        _mime = f"image/{_detect_image_format(image_bytes)}"
+                        _image_data_url = f"data:{_mime};base64,{base64.b64encode(image_bytes).decode('utf-8')}"
+                        logger.info(f"[FeClaw] Image passthrough (vision model): {vfs_path} → image block ({_mime}, {len(image_bytes)} bytes), skipping pre-description")
+                    except Exception as e:
+                        logger.warning(f"[FeClaw] build image data URL failed, fallback to pre-description: {e}")
+                        _image_data_url = None
+
+                if not _image_data_url:
+                    # 回退：主模型不支持 vision（或 data URL 构建失败）⇒ 旧的预描述
+                    try:
+                        # 根据 sr_enabled 决定预识别模式
+                        from models.database import AgentProfile
+                        _ap = self.db.query(AgentProfile).filter(
+                            AgentProfile.hash == self.agent_hash
+                        ).first()
+                        _use_4d = _ap and not _ap.sr_enabled
+
+                        if image_bytes:
+                            if _use_4d:
+                                from services.image_describer import describe_image_4d
+                                image_desc = await describe_image_4d(image_bytes, timeout=15.0)
+                            else:
+                                from services.image_describer import describe_image_3d
+                                image_desc = await describe_image_3d(image_bytes, timeout=15.0)
+                    except Exception as e:
+                        logger.warning(f"[FeClaw] Pre-LLM image description failed: {e}")
+
+                # 构建提示词（直通时不含「图片概述」，模型直接看图）
                 prefix_parts = [
                     "\n【用户上传图片】",
                     f"图片路径: {vfs_path}",
@@ -246,7 +268,7 @@ class WebChannelService:
                     yield f"event: pipeline\ndata: {_pipeline_data}\n\n"
 
                 prefix = "\n".join(prefix_parts)
-                
+
                 if user_input:
                     actual_user_input = prefix + "\n\n" + user_input
                 else:
@@ -533,7 +555,7 @@ class WebChannelService:
         # 构建 ChatInput（新签名，含附件信息）
         chat_attachments = []
         if image_url and vfs_path:
-            chat_attachments.append(Attachment(type="image", url=vfs_path))
+            chat_attachments.append(Attachment(type="image", url=vfs_path, image_data_url=_image_data_url))
 
         async for event in chat_service.chat(input=ChatInput(text=actual_user_input, attachments=chat_attachments)):
             if event.type == ChatEventType.TEXT:

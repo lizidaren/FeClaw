@@ -315,7 +315,26 @@ class WeChatChannelService:
             # 构建用户消息（自动解析引用令牌）
             user_input = await chat_service._resolve_references(user_input)
             if image_url:
-                if image_url.startswith('/'):
+                # 图片直通（Q16）：主模型 supports_vision ⇒ 读图字节转 image block 直接发主模型。
+                _vision_ok = False
+                try:
+                    from services.model_registry import main_model_supports_vision
+                    _vision_ok = main_model_supports_vision()
+                except Exception:
+                    _vision_ok = False
+
+                if _vision_ok:
+                    _img_b64 = await _image_url_to_b64(image_url, agent_hash=self.agent_hash)
+                    if _img_b64:
+                        user_content = [
+                            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{_img_b64}"}},
+                            {"type": "text", "text": user_input},
+                        ]
+                        logger.info(f"[WeChat] Image passthrough (vision model): sending image block directly")
+                    else:
+                        user_content = user_input
+                        logger.warning(f"[WeChat] Image passthrough: failed to read image bytes, fallback to text-only")
+                elif image_url.startswith('/'):
                     vfs_path = image_url
                     if user_input and "已保存到" in user_input:
                         user_content = user_input
@@ -737,6 +756,45 @@ async def _generate_greeting_message(user_id: str, agent_hash: str = None) -> st
     except Exception as e:
         logger.error(f"[WeChat] Greeting generation error: {e}")
         return ""
+
+
+async def _image_url_to_b64(image_url: str, agent_hash: Optional[str] = None) -> Optional[str]:
+    """把图片（data URI / VFS 路径 / HTTP URL）统一转成 base64（不含 data: 前缀）。
+
+    供 WeChat 图片直通（Q16）使用：主模型 supports_vision 时直接把图片字节作为 image block
+    发主模型，不再预识别转文字。失败返回 None（调用方退化为纯文本，走旧逻辑）。
+    """
+    import base64
+    import httpx
+
+    if not image_url:
+        return None
+    try:
+        if image_url.startswith("data:"):
+            _data = image_url.split(",", 1)[1]
+            # 校验并规范化 base64
+            return base64.b64encode(base64.b64decode(_data)).decode("utf-8")
+
+        if image_url.startswith("/"):
+            # VFS 路径 → 从存储读字节
+            from config import settings
+            from services.storage_service import StorageService
+            _rel = image_url.lstrip("/")
+            _prefix = settings.STORAGE_PREFIX.rstrip("/") if settings.STORAGE_PREFIX else "feclaw"
+            _cos_key = f"{_prefix}/agents/{agent_hash}/{_rel}" if agent_hash else f"{_prefix}/{_rel}"
+            _data = StorageService().get_file_content(_cos_key)
+            if _data:
+                return base64.b64encode(_data).decode("utf-8")
+            return None
+
+        # HTTP(S) URL → 下载
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.get(image_url)
+            resp.raise_for_status()
+            return base64.b64encode(resp.content).decode("utf-8")
+    except Exception as e:
+        logger.warning(f"[WeChat] _image_url_to_b64 failed: {e}")
+        return None
 
 
 async def _download_image_base64(image_url: str) -> Optional[str]:

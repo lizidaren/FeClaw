@@ -69,10 +69,11 @@ PROVIDER_LIST: List[Dict[str, Any]] = [
         "description": "中文更自然，有深度思考",
         "badge": None,
         "api_key_name": "DEEPSEEK_API_KEY",
-        "covers": ["text"],
-        "models": ["deepseek-v4-flash"],
+        "covers": ["text", "vision"],
+        "models": ["deepseek-flash"],
         "capability_models": {
-            "text": ["deepseek-v4-flash"],
+            "text": ["deepseek-flash"],
+            "vision": ["deepseek-flash"],
         },
     },
     {

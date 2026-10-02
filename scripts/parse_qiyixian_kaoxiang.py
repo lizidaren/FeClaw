@@ -93,7 +93,7 @@ async def parse_one(sem, fp):
                 async with httpx.AsyncClient(timeout=120) as cli:
                     r = await cli.post(URL,
                         headers={'Authorization': f'Bearer {API_KEY}', 'Content-Type': 'application/json'},
-                        json={'model': 'deepseek-v4-flash',
+                        json={'model': 'deepseek-flash',
                               'messages': [
                                   {'role': 'system', 'content': '你是一个精确的数据提取工具，只输出JSON。'},
                                   {'role': 'user', 'content': PROMPT + table_html[:4000]}

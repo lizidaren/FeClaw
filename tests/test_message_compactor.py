@@ -61,7 +61,7 @@ class TestMessageCompactorBasics:
         assert compactor.max_tokens == 80000
         assert compactor.compression_ratio == 0.3
         assert compactor.summary_provider == "deepseek"
-        assert compactor.summary_model == "deepseek-v4-flash"
+        assert compactor.summary_model == "deepseek-flash"
     
     def test_init_custom_params(self):
         """测试自定义初始化参数"""

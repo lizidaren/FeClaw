@@ -158,7 +158,7 @@ Gen 2 - IM Agent 工作流： `协处理器/IRQ唤醒 → WorkSession创建 → 
 
 | 模型名 | Provider | 特性 | 需配置 |
 |--------|----------|------|--------|
-| deepseek-v4-flash | DeepSeek | 语言很自然友好 | `DEEPSEEK_API_KEY` |
+| deepseek-flash | DeepSeek | 语言很自然友好 | `DEEPSEEK_API_KEY` |
 | qwen3.6-flash | 阿里云百炼 | 速度非常快，质量中等 | `QWEN_API_KEY` |
 | glm-4.7 / glm-4.7-flash | 智谱 GLM | flash是免费的 | `ZHIPU_API_KEY` |
 | kimi-k2.5 | Kimi |  | `KIMI_API_KEY` |
@@ -230,7 +230,7 @@ DeepSeek 的中文措辞和表达风格在同类模型中表现优秀，适合�
 
 ```ini
 DEEPSEEK_API_KEY=sk-xxx
-MAIN_TEXT_MODEL=deepseek-v4-flash       # 主模型切到 DeepSeek
+MAIN_TEXT_MODEL=deepseek-flash       # 主模型切到 DeepSeek
 ```
 
 > 所有三档配置（`MAIN_TEXT_MODEL`、`MAIN_VISION_MODEL`、`MAIN_EMBEDDING_MODEL`）均可独立覆盖或替换，不限制必须来自同一家平台。
@@ -266,7 +266,7 @@ python -m uvicorn main:app --host 0.0.0.0 --port 8080 --reload
 | `OAUTH_PROVIDER_URL` | OAuth Provider 地址（启用 SSO 时） | — |
 | `FECLAW_PUBLIC_URL` | 部署域名 | — |
 | `MIMO_API_KEY` | 小米 MiMo | — |
-| `MAIN_TEXT_MODEL` | 默认文本模型 | `deepseek-v4-flash` |
+| `MAIN_TEXT_MODEL` | 默认文本模型 | `deepseek-flash` |
 | `MAIN_VISION_MODEL` | 默认视觉模型 | `qwen3.6-35b-a3b` |
 | `MAIN_EMBEDDING_MODEL` | 默认嵌入模型 | `text-embedding-v4` |
 

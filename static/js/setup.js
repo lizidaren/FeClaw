@@ -342,7 +342,7 @@
     // 冷启动用：硬编码的 provider 列表（与服务端 services/setup_service.py:PROVIDER_LIST 保持一致）
     const HARDCODED_PROVIDERS = [
         { id: 'qwen', name: '阿里云百炼', description: '推荐，一个 Key 覆盖文本/视觉/嵌入/搜索', badge: '推荐', api_key_name: 'QWEN_API_KEY', covers: ['text', 'vision', 'embedding', 'search'], models: [], capability_models: { text: ['qwen3.6-flash', 'qwen3.6-plus', 'qwen3.7-plus', 'qwen3.7-max'], vision: ['qwen3.6-35b-a3b', 'qwen3-vl-flash', 'qwen3-vl-plus'], embedding: ['text-embedding-v4'] } },
-        { id: 'deepseek', name: 'DeepSeek', description: '中文更自然，有深度思考', badge: null, api_key_name: 'DEEPSEEK_API_KEY', covers: ['text'], models: [], capability_models: { text: ['deepseek-v4-flash'] } },
+        { id: 'deepseek', name: 'DeepSeek', description: '中文更自然，有深度思考', badge: null, api_key_name: 'DEEPSEEK_API_KEY', covers: ['text', 'vision'], models: [], capability_models: { text: ['deepseek-flash'], vision: ['deepseek-flash'] } },
         { id: 'zhipuai', name: '智谱 GLM', description: 'flash 模型免费，GLM-4.6V 支持视觉', badge: null, api_key_name: 'ZHIPU_API_KEY', covers: ['text', 'vision'], models: [], capability_models: { text: ['glm-4.7', 'glm-4.7-flash', 'glm-4.5-air', 'glm-5-turbo', 'glm-5'], vision: ['glm-4.6v'] } },
         { id: 'kimi', name: 'Kimi (月之暗面)', description: '搜索能力强，长上下文', badge: null, api_key_name: 'KIMI_API_KEY', covers: ['search', 'text'], models: [], capability_models: { text: ['kimi-k2.5', 'kimi-k2.6'] } },
         { id: 'mimo', name: '小米 MiMo', description: '速度快', badge: null, api_key_name: 'MIMO_API_KEY', covers: ['text'], models: [], capability_models: { text: ['mimo-v2.5', 'mimo-v2.5-pro', 'mimo-v2.5-pro-ultraspeed'] } },

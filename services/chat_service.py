@@ -223,6 +223,21 @@ class ChatService:
                 meta={}
             )
 
+        # 图片直通（Q16）：从 attachments 提取主模型可直接消费的图片 URL。
+        # 优先 image_data_url（data:image/...;base64,...，主模型 supports_vision 时由调用方注入），
+        # 其次 url 本身是 data:/http(s) 时直接复用；VFS 路径模型取不到，不在此处下发。
+        _model_image_url = image_url  # 兼容旧签名 chat(user_input, image_url, ...)
+        for _att in (actual.attachments or []):
+            if getattr(_att, "type", None) != "image":
+                continue
+            _du = getattr(_att, "image_data_url", None)
+            _u = getattr(_att, "url", None)
+            if _du:
+                _model_image_url = _du
+            elif _u and str(_u).startswith(("data:", "http://", "https://")):
+                _model_image_url = str(_u)
+            break
+
         _req_id = None
         try:
             _chat_t0 = time.time()
@@ -292,7 +307,7 @@ class ChatService:
                 actual.text = _resolved
 
             # ⑦ 构建消息列表
-            messages = self._build_messages(system_prompt, actual.text, image_url)
+            messages = self._build_messages(system_prompt, actual.text, _model_image_url)
 
             # ⑧ 调用 AI 进行对话
             _t_ai = time.time()
@@ -1279,10 +1294,13 @@ class ChatService:
         if meta and "wechat_metadata" in meta:
             _wx_msg_id = meta["wechat_metadata"].get("msg_id")
 
-        # 序列化 attachments
+        # 序列化 attachments（image_data_url 仅进模型、不入库，避免把 base64 大字段写进 ChatHistory）
         _attachments_json = None
         if attachments:
-            _attachments_json = [a.dict() if hasattr(a, 'dict') else a for a in attachments]
+            _attachments_json = [
+                a.dict(exclude={"image_data_url"}) if hasattr(a, 'dict') else a
+                for a in attachments
+            ]
 
         # V2 群聊模式：双写 GroupMessage + ChatHistory
         if self.is_group_mode:

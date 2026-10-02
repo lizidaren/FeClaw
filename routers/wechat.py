@@ -217,7 +217,13 @@ async def bind_wechat(request: BindRequest, user: User = Depends(get_current_use
         )
 
         # 启动消息接收（从 DB 加载凭证，无需传 login_data）
-        await wechat_service.start_polling(user_id=current_user.id)
+        # ⚠️ 键必须精确到 binding（user_id ↔ agent_hash）：同一用户多 Agent 时只传
+        # user_id 会按 id 取最新一条，可能装成别的 Agent 的凭证（§AC）。
+        await wechat_service.start_polling(
+            user_id=current_user.id,
+            agent_hash=request.agent_hash,
+            binding_id=binding.id,
+        )
 
         # ========== 打招呼逻辑已禁用 ==========
         # # 确保工作区文件存在
@@ -717,14 +723,19 @@ async def setup_message_handler():
                                                 pass
                                             if _do_3d_now:
                                                 try:
-                                                    from services.image_describer import describe_image
-                                                    _trace("Pre-LLM 描述开始")
-                                                    image_desc = await describe_image(plaintext, timeout=15.0)
-                                                    if image_desc:
-                                                        _log_perf("pre_llm_desc_done")
-                                                        logger.info(f"[PERF] Pre-LLM desc: OK ({len(image_desc)} chars)")
+                                                    from services.model_registry import main_model_supports_vision
+                                                    if main_model_supports_vision():
+                                                        _trace("Pre-LLM 描述跳过（主模型 supports_vision，图片直通）")
+                                                        image_desc = None
                                                     else:
-                                                        logger.info("[PERF] Pre-LLM desc: empty result")
+                                                        from services.image_describer import describe_image
+                                                        _trace("Pre-LLM 描述开始")
+                                                        image_desc = await describe_image(plaintext, timeout=15.0)
+                                                        if image_desc:
+                                                            _log_perf("pre_llm_desc_done")
+                                                            logger.info(f"[PERF] Pre-LLM desc: OK ({len(image_desc)} chars)")
+                                                        else:
+                                                            logger.info("[PERF] Pre-LLM desc: empty result")
                                                 except Exception as e:
                                                     _trace("Pre-LLM 描述异常", error=str(e)[:60])
                                             else:
@@ -830,7 +841,10 @@ async def setup_message_handler():
                                             _sdb.close()
                                     except Exception:
                                         pass
-                                    if not _sr_on:
+                                    from services.model_registry import main_model_supports_vision
+                                    if main_model_supports_vision():
+                                        logger.info("[WeChat] ctx image: skip pre-description (vision model, passthrough)")
+                                    elif not _sr_on:
                                         from services.image_describer import describe_image_4d
                                         _pre_desc = await asyncio.wait_for(
                                             describe_image_4d(_img_data, timeout=15.0), timeout=15.0
@@ -885,8 +899,10 @@ async def setup_message_handler():
                             try:
                                 _img_bytes = locals().get("plaintext") or None
                                 if _img_bytes:
-                                    from services.image_describer import describe_image
-                                    _pre_task = asyncio.create_task(describe_image(_img_bytes, timeout=15.0))
+                                    from services.model_registry import main_model_supports_vision
+                                    if not main_model_supports_vision():
+                                        from services.image_describer import describe_image
+                                        _pre_task = asyncio.create_task(describe_image(_img_bytes, timeout=15.0))
                             except Exception:
                                 pass
 
@@ -945,10 +961,12 @@ async def setup_message_handler():
                             _img_bytes = locals().get("plaintext") or None
                             _pre_desc = ""
                             if _img_bytes:
-                                from services.image_describer import describe_image_4d
-                                _pre_desc = await asyncio.wait_for(
-                                    describe_image_4d(_img_bytes, timeout=15.0), timeout=15.0
-                                )
+                                from services.model_registry import main_model_supports_vision
+                                if not main_model_supports_vision():
+                                    from services.image_describer import describe_image_4d
+                                    _pre_desc = await asyncio.wait_for(
+                                        describe_image_4d(_img_bytes, timeout=15.0), timeout=15.0
+                                    )
                         except Exception:
                             _pre_desc = ""
 

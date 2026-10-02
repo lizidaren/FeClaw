@@ -295,7 +295,11 @@ class WeChatService:
             session = await self._get_session_short_timeout()
             async with session.get(url, params=params) as resp:
                 data = await self._json_response(resp)
-                logger.info("[WeChat] check_qrcode_status response: {}".format(data))
+                # bot_token 是凭证：日志必须遮罩，绝不整串落日志（§AC 安全纪律）
+                _log_data = dict(data) if isinstance(data, dict) else data
+                if isinstance(_log_data, dict) and _log_data.get("bot_token"):
+                    _log_data["bot_token"] = self._mask_secret(str(_log_data["bot_token"]))
+                logger.info("[WeChat] check_qrcode_status response: {}".format(_log_data))
 
                 raw_status = data.get("status")
                 logger.debug("[WeChat] Raw iLink status: {}".format(raw_status))
@@ -435,30 +439,33 @@ class WeChatService:
     # 问题 1 & 4: Per-user 轮询管理 + 看门狗
     # ============================================================
 
-    def restore_login_state_from_db(self) -> bool:
-        """启动时把最近活跃绑定的凭证读回内存 _login_state（C 节）。
+    def restore_login_state_from_db(self, user_id: int = None, agent_hash: str = None) -> bool:
+        """按 (internal_user_id, agent_hash) 把绑定凭证读回内存 _login_state（C 节）。
 
-        背景（§AC）：bot_token 原来只存在内存 _login_state 里，进程一重启就没了，
-        前端 /login-status 变回未登录 ⇒ 用户必须重新扫码；出站 send_message 也会
-        因为 _login_state 为空而退化到「按 ilink_user_id 猜绑定」的老路径。
+        键必须是 (user, agent)：一个微信号 ↔ (用户, agent) 至多一条，**绝不「按最近活跃
+        取最新一条」**（§AC 存凭证 user 7 与路由 user 6/b13 错位的根因）。
 
-        注意：_login_state 是全局单例，只能代表「一条」会话，这里取最近活跃的那条
-        （与重启前的语义一致）。多 Agent 各自的出站仍以 DB 绑定为准。
+        _login_state 是全局单例，只能代表「一条」会话，因此**必须显式指定**要恢复哪条
+        绑定；不传 key（无法确定哪条）时直接返回 False，不去猜。真正的多绑定恢复由
+        restore_all_polling 逐条 start_polling(binding_id=...) 完成。
 
         token 是敏感数据：本方法只把前后 4 位写进日志。
         """
+        if user_id is None or agent_hash is None:
+            logger.info("[WeChat] restore_login_state_from_db: no (user_id, agent_hash) key, skip "
+                        "(singleton can't represent multiple bindings)")
+            return False
+
         db = SessionLocal()
         try:
             binding = db.query(WeChatBinding).filter(
-                WeChatBinding.status == self.BINDING_STATUS_ACTIVE
-            ).order_by(
-                # MySQL 不支持 NULLS LAST：last_msg_at 为 NULL 的排最后
-                WeChatBinding.last_msg_at.is_(None),
-                WeChatBinding.last_msg_at.desc(),
-                WeChatBinding.id.desc(),
-            ).first()
+                WeChatBinding.user_id == user_id,
+                WeChatBinding.agent_hash == agent_hash,
+                WeChatBinding.status == self.BINDING_STATUS_ACTIVE,
+            ).order_by(WeChatBinding.id.desc()).first()
             if not binding:
-                logger.info("[WeChat] restore_login_state_from_db: no active binding")
+                logger.info("[WeChat] restore_login_state_from_db: no active binding for user_id={} agent_hash={}".format(
+                    user_id, agent_hash))
                 return False
 
             base_info = None
@@ -514,11 +521,9 @@ class WeChatService:
     async def restore_all_polling(self):
         """启动时恢复所有 active 绑定的轮询（问题1修复）"""
         logger.info("[WeChat] restore_all_polling: STARTING")
-        # C 节：先把凭证恢复进内存，重启后无需重扫码
-        try:
-            self.restore_login_state_from_db()
-        except Exception as e:
-            logger.error("[WeChat] restore_all_polling: restore_login_state_from_db failed: {}".format(e))
+        # C 节：多绑定下不再「取最近一条」猜单例；各绑定的凭证由下面的
+        # start_polling(binding_id=...) 逐条从 DB 加载（键 = user_id ↔ agent_hash）。
+        # 单条恢复可显式调 restore_login_state_from_db(user_id, agent_hash)。
         db = SessionLocal()
         try:
             bindings = db.query(WeChatBinding).filter(
@@ -1096,6 +1101,11 @@ class WeChatService:
                     async def _run_pre_and_typing():
                         async def _do_pre():
                             try:
+                                # 图片直通（Q16）：主模型 supports_vision ⇒ 跳过预识别，图片直接发主模型
+                                from services.model_registry import main_model_supports_vision
+                                if main_model_supports_vision():
+                                    logger.info("[WeChat] image passthrough (vision model): skip pre-description")
+                                    return None
                                 if _use_4d:
                                     from services.image_describer import describe_image_4d
                                     _t = time.time()
@@ -1116,7 +1126,8 @@ class WeChatService:
 
                         async def _do_typing():
                             try:
-                                await self.send_typing(from_user_id, context_token)
+                                # 键化：入站图文的 typing 也要带 agent_hash，避免用错凭证（§AC）
+                                await self.send_typing(from_user_id, context_token, agent_hash=binding.agent_hash)
                             except Exception as e:
                                 logger.debug(f"[WeChat] Typing indicator failed: {e}")
 
@@ -1307,7 +1318,8 @@ class WeChatService:
                 await self.send_message(
                     to_user_id=from_user_id,
                     text="收到视频，暂不支持查看",
-                    context_token=context_token
+                    context_token=context_token,
+                    agent_hash=binding.agent_hash,
                 )
             except Exception as e:
                 logger.error(f"[WeChat] Failed to send video reply: {e}")
@@ -1588,6 +1600,88 @@ class WeChatService:
         return await self._send_single_message(to_user_id, text, context_token, base_info,
                                                agent_hash=agent_hash)
 
+    def _resolve_send_base_info(self, to_user_id: str, agent_hash: str = None) -> Dict[str, Any]:
+        """解析发送凭证（键 = internal_user_id ↔ agent_hash）。
+
+        有 agent 上下文时**必须**从 DB 绑定取，绝不优先用单例 _login_state ——
+        重启后 restore 只会把「某一条」绑定的 token 装进单例，可能是别的 Agent 的
+        （§AC「存凭证 user 7 与路由 user 6/b13 错位」的根因）。
+        无 agent 上下文（遗留单 Agent / 调试端点）才退回 _login_state。
+        """
+        def _from_binding(binding) -> Dict[str, Any]:
+            if binding is None:
+                return {}
+            if binding.ilink_token:
+                try:
+                    cred = json.loads(binding.ilink_token)
+                    if cred.get("token"):
+                        return {
+                            "bot_token": cred.get("token"),
+                            "ilink_bot_id": cred.get("account_id"),
+                            "ilink_user_id": cred.get("user_id"),
+                            "baseurl": cred.get("base_url", ILINK_API_BASE),
+                        }
+                except (json.JSONDecodeError, TypeError) as e:
+                    logger.warning("[WeChat] _resolve_send_base_info: ilink_token parse failed: {}".format(e))
+            if binding.bot_token:
+                return {
+                    "bot_token": binding.bot_token,
+                    "ilink_bot_id": binding.ilink_bot_id,
+                    "ilink_user_id": binding.ilink_user_id,
+                    "baseurl": binding.base_url,
+                }
+            return {}
+
+        if agent_hash:
+            binding = self.get_binding_by_ilink_user_id(to_user_id, agent_hash=agent_hash)
+            base_info = _from_binding(binding)
+            if base_info.get("bot_token"):
+                logger.info("[WeChat] _resolve_send_base_info: resolved via binding (agent_hash={}), bot_token={}".format(
+                    agent_hash, "***"))
+            else:
+                logger.warning("[WeChat] _resolve_send_base_info: no usable credential for agent_hash={}".format(agent_hash))
+            return base_info
+
+        # 遗留无 agent 上下文路径：先 _login_state，再 DB 绑定兜底
+        base_info = {
+            "bot_token": self._login_state.get("bot_token"),
+            "ilink_bot_id": self._login_state.get("ilink_bot_id"),
+            "ilink_user_id": self._login_state.get("ilink_user_id"),
+            "baseurl": self._login_state.get("base_url"),
+        }
+        if base_info.get("bot_token"):
+            logger.info("[WeChat] _resolve_send_base_info: fell back to _login_state, bot_token={}".format("***"))
+            return base_info
+        base_info = _from_binding(self.get_binding_by_ilink_user_id(to_user_id))
+        if base_info.get("bot_token"):
+            logger.info("[WeChat] _resolve_send_base_info: fell back to DB binding (no agent context), bot_token={}".format("***"))
+        return base_info
+
+    def _mark_binding_expired(self, ilink_user_id: str, agent_hash: str = None) -> None:
+        """发消息遇 -14/session timeout 时，把对应绑定标记为 expired（键 = user ↔ agent）。
+
+        不物理删除、只改 status；前端 /binding 会据此显示「未绑定」，引导重新扫码。
+        """
+        db = SessionLocal()
+        try:
+            query = db.query(WeChatBinding).filter(
+                WeChatBinding.ilink_user_id == ilink_user_id,
+                WeChatBinding.status == self.BINDING_STATUS_ACTIVE,
+            )
+            if agent_hash:
+                query = query.filter(WeChatBinding.agent_hash == agent_hash)
+            binding = query.order_by(WeChatBinding.id.desc()).first()
+            if binding:
+                binding.status = "expired"
+                db.commit()
+                logger.warning("[WeChat] _mark_binding_expired: binding id={} user_id={} agent_hash={} marked expired".format(
+                    binding.id, binding.user_id, binding.agent_hash))
+        except Exception as e:
+            logger.error("[WeChat] _mark_binding_expired error: {}".format(e))
+            db.rollback()
+        finally:
+            db.close()
+
     async def _send_single_message(
         self,
         to_user_id: str,
@@ -1609,56 +1703,9 @@ class WeChatService:
                 base_info.get("ilink_user_id"),
                 base_info.get("baseurl")))
 
-        # 如果没有传 base_info，尝试从数据库绑定记录中获取
+        # 如果没有传 base_info，按 (internal_user_id, agent_hash) 从 DB 绑定解析（键化，§AC）
         if base_info is None:
-            # 先尝试从 _login_state 获取（兼容旧逻辑）
-            base_info = {
-                "bot_token": self._login_state.get("bot_token"),
-                "ilink_bot_id": self._login_state.get("ilink_bot_id"),
-                "ilink_user_id": self._login_state.get("ilink_user_id"),
-                "baseurl": self._login_state.get("base_url"),
-            }
-            logger.info("[WeChat] _send_single_message: fell back to _login_state, bot_token={}, ilink_user_id={}".format(
-                "***" if base_info.get("bot_token") else None,
-                base_info.get("ilink_user_id")))
-
-            # 如果 _login_state 没有有效凭证，从数据库绑定记录获取
-            if not base_info.get("bot_token"):
-                logger.info("[WeChat] _send_single_message: _login_state has no bot_token, querying binding by to_user_id={}".format(to_user_id))
-                # to_user_id 是用户的 ilink_user_id，binding.ilink_user_id 存的也是用户的 ilink_user_id
-                # 有 agent 上下文时按 agent_hash 收窄（B 节），避免取到别的 Agent 的 bot_token（§AC）
-                binding = self.get_binding_by_ilink_user_id(to_user_id, agent_hash=agent_hash)
-                logger.info("[WeChat] _send_single_message: get_binding_by_ilink_user_id result: {}".format(
-                    "found binding id={}".format(binding.id) if binding else "None"))
-                if binding:
-                    # 尝试从 ilink_token（SDK 凭证）解析
-                    if binding.ilink_token:
-                        try:
-                            cred_data = json.loads(binding.ilink_token)
-                            base_info = {
-                                "bot_token": cred_data.get("token"),
-                                "ilink_bot_id": cred_data.get("account_id"),
-                                "ilink_user_id": cred_data.get("user_id"),
-                                "baseurl": cred_data.get("base_url", ILINK_API_BASE),
-                            }
-                            logger.info("[WeChat] _send_single_message: parsed ilink_token, got bot_token={}, ilink_user_id={}".format(
-                                "***" if base_info.get("bot_token") else None,
-                                base_info.get("ilink_user_id")))
-                        except (json.JSONDecodeError, TypeError) as e:
-                            logger.warning("[WeChat] _send_single_message: failed to parse ilink_token: {}".format(e))
-                    # 如果 ilink_token 无效，使用绑定记录中的字段
-                    if not base_info.get("bot_token"):
-                        base_info = {
-                            "bot_token": binding.bot_token,
-                            "ilink_bot_id": binding.ilink_bot_id,
-                            "ilink_user_id": binding.ilink_user_id,
-                            "baseurl": binding.base_url,
-                        }
-                        logger.info("[WeChat] _send_single_message: used binding fields, bot_token={}, ilink_user_id={}".format(
-                            "***" if base_info.get("bot_token") else None,
-                            base_info.get("ilink_user_id")))
-                else:
-                    logger.warning("[WeChat] _send_single_message: no binding found for to_user_id={}, tried ilink_bot_id lookup".format(to_user_id))
+            base_info = self._resolve_send_base_info(to_user_id, agent_hash=agent_hash)
 
         if not base_info.get("bot_token"):
             raise ValueError("bot_token is required, please login first")
@@ -1737,6 +1784,20 @@ class WeChatService:
             else:
                 logger.warning("[WeChat] _send_single_message failed: data={}, http_status={}, raw_text={}".format(
                     data, resp.status, api_response_text[:200]))
+                # 失效处理：发消息遇 -14/session timeout ⇒ 降级为「需重新扫码」并明确提示，绝不静默
+                _errcode = data.get("errcode") if isinstance(data, dict) else None
+                _ret = data.get("ret") if isinstance(data, dict) else None
+                _errmsg = str(data.get("errmsg") or "") if isinstance(data, dict) else ""
+                _is_expired = _errcode == -14 or _ret == -14 or ("session" in _errmsg.lower() and "timeout" in _errmsg.lower())
+                if _is_expired:
+                    logger.warning("[WeChat] _send_single_message: session expired (-14), 需重新扫码（to_user_id={}, agent_hash={}）".format(
+                        to_user_id, agent_hash))
+                    self._mark_binding_expired(to_user_id, agent_hash=agent_hash)
+                    if self._on_session_expired:
+                        try:
+                            await self._on_session_expired()
+                        except Exception as e:
+                            logger.debug("[WeChat] _on_session_expired error: {}".format(e))
                 return False
 
     async def send_typing(
@@ -1747,37 +1808,9 @@ class WeChatService:
         agent_hash: str = None
     ) -> bool:
         """发送 typing 状态（agent_hash：B 节，有 agent 上下文时必须传）"""
-        # 如果没有传 base_info，尝试从数据库绑定记录中获取
+        # 如果没有传 base_info，按 (internal_user_id, agent_hash) 从 DB 绑定解析（键化，§AC）
         if base_info is None:
-            base_info = {
-                "bot_token": self._login_state.get("bot_token"),
-                "ilink_bot_id": self._login_state.get("ilink_bot_id"),
-                "ilink_user_id": self._login_state.get("ilink_user_id"),
-                "baseurl": self._login_state.get("base_url"),
-            }
-
-            # 如果 _login_state 没有有效凭证，从数据库绑定记录获取
-            if not base_info.get("bot_token"):
-                binding = self.get_binding_by_ilink_user_id(to_user_id, agent_hash=agent_hash)
-                if binding:
-                    if binding.ilink_token:
-                        try:
-                            cred_data = json.loads(binding.ilink_token)
-                            base_info = {
-                                "bot_token": cred_data.get("token"),
-                                "ilink_bot_id": cred_data.get("account_id"),
-                                "ilink_user_id": cred_data.get("user_id"),
-                                "baseurl": cred_data.get("base_url", ILINK_API_BASE),
-                            }
-                        except (json.JSONDecodeError, TypeError):
-                            pass
-                    if not base_info.get("bot_token"):
-                        base_info = {
-                            "bot_token": binding.bot_token,
-                            "ilink_bot_id": binding.ilink_bot_id,
-                            "ilink_user_id": binding.ilink_user_id,
-                            "baseurl": binding.base_url,
-                        }
+            base_info = self._resolve_send_base_info(to_user_id, agent_hash=agent_hash)
 
         typing_ticket = await self._get_typing_ticket(to_user_id, context_token, base_info)
         if not typing_ticket:

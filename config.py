@@ -55,7 +55,7 @@ class Settings(BaseSettings):
     DEFAULT_FORMATTING_PROVIDER: str = "deepseek"
 
     # ─── 主模型配置（新） ───
-    MAIN_TEXT_MODEL: str = "deepseek-v4-flash"        # 主文本模型
+    MAIN_TEXT_MODEL: str = "deepseek-flash"           # 主文本模型（多模态：支持图片直通）
     MAIN_VISION_MODEL: str = "qwen3.6-35b-a3b"       # 主视觉模型
     MAIN_EMBEDDING_MODEL: str = "text-embedding-v4"   # 主嵌入模型
 
@@ -69,7 +69,7 @@ class Settings(BaseSettings):
     TTS_MODEL: str = "cosyvoice-v1"
 
     # Agent 模型配置（向后兼容，已弃用，请使用 MAIN_TEXT_MODEL）
-    AGENT_LLM_MODEL: str = "deepseek-v4-flash"
+    AGENT_LLM_MODEL: str = "deepseek-flash"
     # AGENT_LLM_PROVIDER 已移除 — provider 现在从 model_registry 根据模型名自动解析
     AGENT_LLM_REASONING_EFFORT: str = "off"  # "off" | "high" | "max"（仅 deepseek 有效）
     FALLBACK_LLM_PROVIDER: str = "zhipuai"  # 主 LLM 失败时 fallback 的提供商，空 = 不启用 fallback
