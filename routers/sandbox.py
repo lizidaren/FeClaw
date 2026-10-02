@@ -282,6 +282,10 @@ async def vfs_file_delete(path: str, request: Request):
         return {"error": err}
     if manager.vfs._is_tool_log_path(cos_key):
         return {"error": "/.logs/ is a read-only system directory"}
+    # FIX-B/N3：DELETE 直达 storage.delete_file_by_key —— 必须补 /public 只读检查，
+    # 否则可删除共享公共文件（此前只有 tool-log 检查，漏了 public）
+    if manager.vfs._is_public_path(cos_key):
+        return {"error": "/public/ is a read-only directory"}
     manager.vfs.storage.delete_file_by_key(cos_key)
     manager.meta_cache.invalidate_dir(
         cos_key.rsplit("/", 1)[0] if "/" in cos_key else ""

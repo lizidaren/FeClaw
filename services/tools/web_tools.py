@@ -848,6 +848,9 @@ class WebToolsMixin(AgentToolsServiceBase):
         失败返回 None；成功返回最终 VFS 路径（含扩展名）
 
         base_vfs_path: 不含扩展名的 VFS 路径，如 'images/fetched/xxx_1'
+
+        FIX-B/N4：SSRF 防护 —— 逐跳 URL 校验 + follow_redirects=False，
+        并把响应 content-type 限定为图片（拒绝把 HTML 错误页/内网回读内容写进 VFS）。
         """
         ext = self._infer_image_ext(url)
         if not ext:
@@ -863,14 +866,41 @@ class WebToolsMixin(AgentToolsServiceBase):
             logger.warning(f"[IMAGE-SEARCH] _resolve 失败: {vfs_path}")
             return None
 
+        from utils.url_validation import validate_public_http_url
+        from urllib.parse import urljoin
+
         try:
             async with httpx.AsyncClient(
                 timeout=IMAGE_DOWNLOAD_TIMEOUT,
-                follow_redirects=True,
+                follow_redirects=False,
                 headers={"User-Agent": self._WEB_FETCH_USER_AGENT},
             ) as client:
-                resp = await client.get(url)
+                current = url
+                resp = None
+                for _hop in range(5):
+                    if not validate_public_http_url(current):
+                        logger.warning(f"[IMAGE-SEARCH] SSRF 阻断（内网/回环/云元数据）: {current}")
+                        return None
+                    resp = await client.get(current)
+                    if resp.status_code in (301, 302, 303, 307, 308):
+                        loc = resp.headers.get("location")
+                        if not loc:
+                            break
+                        current = urljoin(current, loc)
+                        continue
+                    break
+                else:
+                    logger.warning(f"[IMAGE-SEARCH] 重定向次数过多: {url}")
+                    return None
                 resp.raise_for_status()
+
+                # content-type 必须为图片（允许 octet-stream 兜底 CDN 缺省），
+                # 拒绝 text/html / text/plain 等 —— 防止把错误页/内网回读内容落 VFS
+                ct = (resp.headers.get("content-type") or "").split(";")[0].strip().lower()
+                if ct and not ct.startswith("image/") and ct != "application/octet-stream":
+                    logger.warning(f"[IMAGE-SEARCH] 非图片内容类型被拒: {ct} ({url})")
+                    return None
+
                 content = resp.content
 
             # 基本校验：非空 + 至少 100 字节（避免 HTML 错误页 / 1x1 占位图）
@@ -1108,6 +1138,29 @@ class WebToolsMixin(AgentToolsServiceBase):
 
     # ── Playwright 内部函数 ─────────────────────────────────
 
+    async def _block_nonpublic_route(self, route, request) -> None:
+        """FIX-B/N5：Playwright 路由拦截 —— 对**每一个**请求（含浏览器自动跟随的
+        3xx 重定向、`<meta refresh>`/JS 跳转、子资源、fetch/XHR）重新做 SSRF 校验，
+        等价于 httpx 侧的「逐跳重校验」。校验失败即 abort（fail-closed）。
+        """
+        from utils.url_validation import validate_public_http_url
+        url = request.url
+        if validate_public_http_url(url):
+            try:
+                await route.continue_()
+            except Exception as e:
+                logger.warning(f"[web_fetch] Playwright route.continue_ 失败，abort: {e}")
+                try:
+                    await route.abort()
+                except Exception:
+                    pass
+            return
+        logger.warning(f"[web_fetch] SSRF 阻断（Playwright）: {url}")
+        try:
+            await route.abort()
+        except Exception as e:
+            logger.warning(f"[web_fetch] Playwright route.abort 失败: {e}")
+
     async def _playwright_fetch_text(self, url: str) -> str:
         """用 Playwright 反检测抓取渲染后的文本。"""
         from playwright.async_api import async_playwright
@@ -1124,6 +1177,9 @@ class WebToolsMixin(AgentToolsServiceBase):
                     locale="en-US",
                     timezone_id="America/New_York",
                 )
+
+                # FIX-B/N5：拦截所有请求做逐跳 SSRF 校验
+                await context.route("**/*", self._block_nonpublic_route)
 
                 # 反检测 init script：在每个新页面加载前注入
                 await context.add_init_script(
@@ -1194,6 +1250,9 @@ class WebToolsMixin(AgentToolsServiceBase):
                     timezone_id="America/New_York",
                     device_scale_factor=1,
                 )
+
+                # FIX-B/N5：拦截所有请求做逐跳 SSRF 校验
+                await context.route("**/*", self._block_nonpublic_route)
 
                 await context.add_init_script(
                     """

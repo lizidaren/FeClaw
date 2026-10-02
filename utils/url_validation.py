@@ -8,8 +8,9 @@
 - 只允许 http/https；
 - 拒绝云元数据域名（AWS / GCP / 腾讯云 / Aliyun / 本地 metadata 等）；
 - 把 hostname 解析成 IP 后，拒绝 loopback / link-local / RFC1918 / ULA /
-  reserved / multicast / unspecified；
-- 拒绝十进制/八进制/十六进制 IP 记法（`2130706433`、`0x7f000001` 等）。
+  reserved / multicast / unspecified / CGNAT（100.64.0.0/10）等非全局路由网段；
+- 拒绝十进制/八进制/十六进制 IP 记法（`2130706433`、`0x7f000001` 等）；
+- fail-closed：域名无法解析 / 解析异常 ⇒ 拒绝（CWE-636）。
 
 调用方负责在每次出站请求前调用；本函数只做**初始 URL**校验（httpx 默认不跟随
 重定向，follow_redirects=False 即不会把内网地址藏在重定向后）。
@@ -84,10 +85,10 @@ def _resolve_ips(host: str):
         except ValueError:
             return []
 
-    # 4. 域名 → DNS 解析
+    # 4. 域名 → DNS 解析（fail-closed：任何异常都返回 []，由调用方拒绝）
     try:
         infos = socket.getaddrinfo(host, None)
-    except socket.gaierror:
+    except Exception:
         return []
     ips = set()
     for info in infos:
@@ -100,7 +101,13 @@ def _resolve_ips(host: str):
 
 
 def validate_public_http_url(url: str) -> bool:
-    """校验一个 URL 是否可安全出站请求。安全返回 True，否则 False。"""
+    """校验一个 URL 是否可安全出站请求。安全返回 True，否则 False。
+
+    FIX-B/N6：fail-closed —— 域名无法解析 / 解析异常 ⇒ 拒绝（`return False`），
+    不再像旧实现那样「循环体不执行 ⇒ 放行」（CWE-636 的 fail-open）。
+    同时用 `ip.is_global` 判定：除回环/私网/link-local/reserved/multicast/
+    unspecified 外，也拦截 100.64.0.0/10（CGNAT）等非全球可路由网段（N12）。
+    """
     if not url or not isinstance(url, str):
         return False
 
@@ -119,15 +126,17 @@ def validate_public_http_url(url: str) -> bool:
     if _is_blocked_hostname(host):
         return False
 
-    for ip in _resolve_ips(host):
-        if (
-            ip.is_private
-            or ip.is_loopback
-            or ip.is_link_local
-            or ip.is_reserved
-            or ip.is_multicast
-            or ip.is_unspecified
-        ):
+    try:
+        ips = _resolve_ips(host)
+    except Exception:
+        return False
+
+    # fail-closed：解析不出任何 IP ⇒ 拒绝（DNS 失败 / 未知域名）
+    if not ips:
+        return False
+
+    for ip in ips:
+        if not ip.is_global:
             return False
 
     return True

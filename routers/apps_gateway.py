@@ -40,9 +40,13 @@ def _validate_id(id_str: str, field: str = "app_id") -> bool:
 
 
 def _get_agent_hash(request: Request) -> Optional[str]:
-    """从请求 Host 提取 agent_hash"""
-    host = request.headers.get("X-Forwarded-Host", "") or request.headers.get("host", "")
-    return extract_hash_from_host(host)
+    """从请求 Host 提取 agent_hash。
+
+    FIX-B/N19：X-Forwarded-Host 必须过白名单（仅认 FECLAW_PUBLIC_URL 的合法子域），
+    否则回退 Host；两者都不合法则返回 None（fail-closed，调用方据此拒绝）。
+    """
+    from utils.agent_access import get_request_domain
+    return extract_hash_from_host(get_request_domain(request))
 
 
 # ── Agent API 端点 ─────────────────────────────────────
@@ -134,14 +138,15 @@ async def api_list_apps(
 
 @router.get("/apps")
 @router.get("/apps/")
-async def list_apps_page(request: Request):
-    """App 列表页"""
-    agent_hash = _get_agent_hash(request)
-    if not agent_hash:
-        from fastapi.responses import HTMLResponse
-        html = "<html><body><h1>Apps</h1><p>请在 Agent 子域名下访问此页面。</p></body></html>"
-        return HTMLResponse(html)
+async def list_apps_page(
+    request: Request,
+    agent_hash: str = Depends(get_authorized_agent_hash),
+):
+    """App 列表页。
 
+    FIX-B/N19：列表页同样走 get_authorized_agent_hash（归属校验），
+    避免伪造 X-Forwarded-Host 后列举他人 Agent 的 App（租户信息泄露）。
+    """
     apps = list_registered_apps(agent_hash)
 
     # 构建简单的列表 HTML
@@ -186,15 +191,28 @@ h1{{font-size:1.6rem;margin-bottom:8px}}
 
 @router.get("/apps/{app_id}")
 @router.get("/apps/{app_id}/")
-async def get_app_home(app_id: str, request: Request):
-    """App 首页（自动 serve index.html）"""
-    return await _route_request(app_id, "index.html", request, None)
+async def get_app_home(
+    app_id: str,
+    request: Request,
+    agent_hash: str = Depends(get_authorized_agent_hash),
+):
+    """App 首页（自动 serve index.html）。
+
+    FIX-B/N19：服务路径补鉴权 —— agent_hash 由 get_authorized_agent_hash 从
+    （白名单校验后的）域名解析并校验归属，未登录/非 owner 一律 401/403。
+    """
+    return await _route_request(app_id, "index.html", request, None, agent_hash)
 
 
 @router.get("/apps/{app_id}/{path:path}")
-async def get_app_path(app_id: str, path: str, request: Request):
+async def get_app_path(
+    app_id: str,
+    path: str,
+    request: Request,
+    agent_hash: str = Depends(get_authorized_agent_hash),
+):
     """App 路径路由"""
-    return await _route_request(app_id, path, request, None)
+    return await _route_request(app_id, path, request, None, agent_hash)
 
 
 @router.post("/apps/{app_id}/api/{path:path}")
@@ -202,14 +220,18 @@ async def post_app_api(
     app_id: str,
     path: str,
     request: Request,
+    agent_hash: str = Depends(get_authorized_agent_hash),
 ):
     """App API 端点（POST）"""
-    return await _route_request(app_id, f"api/{path}", request, None)
+    return await _route_request(app_id, f"api/{path}", request, None, agent_hash)
 
 
-async def _route_request(app_id: str, path: str, request: Request, body: Optional[Dict]) -> Response:
-    """路由请求到对应的处理函数"""
-    agent_hash = _get_agent_hash(request)
+async def _route_request(app_id: str, path: str, request: Request, body: Optional[Dict], agent_hash: str) -> Response:
+    """路由请求到对应的处理函数。
+
+    FIX-B/N19：agent_hash 由路由依赖 get_authorized_agent_hash 解析并校验归属后传入，
+    **不再**从原始 X-Forwarded-Host / Host 头自行解析租户。
+    """
     if not agent_hash or not _validate_id(agent_hash, "agent_hash"):
         raise HTTPException(status_code=400, detail="Invalid agent hash")
     if not _validate_id(app_id):

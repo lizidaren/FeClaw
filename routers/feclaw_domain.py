@@ -512,6 +512,35 @@ def _vfs_path(agent_hash: str, path: str) -> str:
     return f"feclaw/agents/{agent_hash}/{path}"
 
 
+def _is_public_path(path: str) -> bool:
+    """路径是否指向 /public 共享空间（与 VFS 侧 `_is_public_path` 同一语义，path 级）。"""
+    return path == "public" or path.startswith("public/")
+
+
+def _assert_writable_vfs_path(agent_hash: str, path: str) -> str:
+    """FIX-B/N20：写型路径守卫 —— 所有能产生**写入**（PUT/DELETE/upload/签名 URL）的入口共用。
+
+    拒绝：
+      - 路径穿越（绝对路径 / `..`）→ 400
+      - /public 共享空间（跨租户）→ 403
+      - /config 只读目录（DB 承载，非 COS）→ 403
+    并断言最终 COS key 落在**本人 agent 前缀**内，防任何路径映射逃逸。
+
+    返回：校验通过的 COS key。
+    """
+    import os as _os
+    if _os.path.isabs(path) or ".." in path:
+        raise HTTPException(status_code=400, detail="Invalid path")
+    if _is_public_path(path):
+        raise HTTPException(status_code=403, detail="公共空间为只读，不允许写入")
+    if path == "config" or path.startswith("config/"):
+        raise HTTPException(status_code=403, detail="配置目录为只读，不允许写入")
+    full_path = _vfs_path(agent_hash, path)
+    if not full_path.startswith(f"feclaw/agents/{agent_hash}/"):
+        raise HTTPException(status_code=403, detail="无权访问该路径")
+    return full_path
+
+
 def _list_config_keys(agent_hash: str) -> list:
     """列出 Agent 的配置 key（排除 permission=none）"""
     try:
@@ -759,7 +788,7 @@ async def update_file(path: str, body: FileUpdateRequest, req: Request, agent_ha
     import os as _os
     if _os.path.isabs(path) or ".." in path:
         raise HTTPException(status_code=400, detail="Invalid path")
-    if path == "public" or path.startswith("public/"):
+    if _is_public_path(path):
         raise HTTPException(status_code=403, detail="公共空间为只读，不允许修改")
 
     # 处理 /config/ 虚拟配置目录写入
@@ -825,8 +854,10 @@ async def delete_file(path: str, request: Request, agent_hash: str = Depends(get
     import os as _os
     if _os.path.isabs(path) or ".." in path:
         raise HTTPException(status_code=400, detail="Invalid path")
-    if path == "public" or path.startswith("public/") or path == "config" or path.startswith("config/"):
-        raise HTTPException(status_code=403, detail=f"{'公共空间' if path.startswith('public') else '配置目录'}为只读，不允许删除")
+    if _is_public_path(path):
+        raise HTTPException(status_code=403, detail="公共空间为只读，不允许删除")
+    if path == "config" or path.startswith("config/"):
+        raise HTTPException(status_code=403, detail="配置目录为只读，不允许删除")
     # 构建完整路径
     full_path = _vfs_path(agent_hash, path)
 
@@ -933,13 +964,10 @@ async def get_signed_url(body: SignedUrlRequest, req: Request, agent_hash: str =
     Returns:
         {url, path, expires_at, method}
     """
-    # 安全检查：确保路径在用户工作区内（Q21/L1：先校验再拼 key，顺序修正）
-    if ".." in body.path or body.path.startswith("/"):
-        pass  # HTTPException already imported at module level
-        raise HTTPException(status_code=400, detail="Invalid path")
-
-    # 构建完整路径（agent 工作区路径）
-    full_path = _vfs_path(agent_hash, body.path)
+    # 安全检查：FIX-B/N20 —— 与 PUT/DELETE/upload 同一守卫：拒绝 /public 共享空间、
+    # /config 只读目录，并断言最终 key 落在本人 agent 前缀内（此前只查 `..`，漏了
+    # `public/…` → `feclaw/public/…` 的映射，可向共享空间签发写入型预签名 PUT）。
+    full_path = _assert_writable_vfs_path(agent_hash, body.path)
 
     if body.operation == "upload":
         # 上传签名 URL（PUT）
@@ -1644,8 +1672,10 @@ async def upload_file_vfs(
     import os as _os
     if _os.path.isabs(path) or ".." in path:
         raise HTTPException(status_code=400, detail="Invalid path")
-    if path == "public" or path.startswith("public/") or path == "config" or path.startswith("config/"):
-        raise HTTPException(status_code=403, detail=f"{'公共空间' if path.startswith('public') else '配置目录'}为只读，不允许上传")
+    if _is_public_path(path):
+        raise HTTPException(status_code=403, detail="公共空间为只读，不允许上传")
+    if path == "config" or path.startswith("config/"):
+        raise HTTPException(status_code=403, detail="配置目录为只读，不允许上传")
     # Q21/M6：原实现 `await file.read()` 无尺寸上限 —— 多 GB multipart 可撑爆单
     # worker 内存。改为分块读取 + 上限校验（默认 MAX_UPLOAD_SIZE=50MB）。
     max_size = int(getattr(settings, "MAX_UPLOAD_SIZE", 50 * 1024 * 1024))

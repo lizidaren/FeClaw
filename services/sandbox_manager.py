@@ -1224,6 +1224,10 @@ class SandboxManager:
         # Q20/H20：禁止把内容 rename 进 /public 只读空间
         if getattr(self.vfs, "_is_public_path", lambda _k: False)(dst_key):
             return {"error": "/public/ is a read-only directory"}
+        # FIX-B/N3：src 侧同样校验 —— 否则 src=/public/x 会在 put 后
+        # delete_file_by_key(src_key) 删掉共享公共文件（与 VFS mv() 两侧校验对齐）
+        if getattr(self.vfs, "_is_public_path", lambda _k: False)(src_key):
+            return {"error": "/public/ files cannot be moved"}
 
         content = self.vfs.storage.get_file_content(src_key)
         if content is not None:

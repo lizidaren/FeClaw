@@ -291,9 +291,9 @@ async def get_messages(request: Request, user: User = Depends(get_current_user),
     """
     try:
         # B 节：按 Host 推导 agent_hash，避免同一用户多 Agent 时取到别的绑定的历史
-        from routers.feclaw_domain import extract_hash_from_host
-        host = request.headers.get("X-Forwarded-Host", "") or request.headers.get("host", "")
-        agent_hash = extract_hash_from_host(host) if host else None
+        # FIX-B/N19：X-Forwarded-Host 过白名单（get_request_domain），防头注入
+        from utils.agent_access import extract_hash_from_host, get_request_domain
+        agent_hash = extract_hash_from_host(get_request_domain(request))
         messages = wechat_service.get_messages(user.id, limit, agent_hash=agent_hash)
         return [WeChatMessageResponse(**msg) for msg in messages]
     except HTTPException:
@@ -359,10 +359,9 @@ async def get_binding_info(request: Request, user: User = Depends(get_current_us
     """
     查询当前用户的微信绑定状态（按子域名 Agent 隔离）
     """
-    # 从 Host 头提取 agent_hash
-    from routers.feclaw_domain import extract_hash_from_host
-    host = request.headers.get("X-Forwarded-Host", "") or request.headers.get("host", "")
-    agent_hash = extract_hash_from_host(host) if host else None
+    # 从 Host 头提取 agent_hash（FIX-B/N19：X-Forwarded-Host 过白名单）
+    from utils.agent_access import extract_hash_from_host, get_request_domain
+    agent_hash = extract_hash_from_host(get_request_domain(request))
 
     binding = wechat_service.get_binding_by_user(user.id, agent_hash=agent_hash)
     if binding:
@@ -380,9 +379,8 @@ async def unbind_wechat(request: Request, user: User = Depends(get_current_user)
     解绑微信 - DELETE 方法（按子域名 Agent 隔离）
     """
     try:
-        from routers.feclaw_domain import extract_hash_from_host
-        host = request.headers.get("X-Forwarded-Host", "") or request.headers.get("host", "")
-        agent_hash = extract_hash_from_host(host) if host else None
+        from utils.agent_access import extract_hash_from_host, get_request_domain
+        agent_hash = extract_hash_from_host(get_request_domain(request))
 
         wechat_service.unbind_user(user.id, agent_hash=agent_hash)
         remaining = wechat_service.has_active_binding(user.id)
