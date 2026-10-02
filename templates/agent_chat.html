@@ -7,16 +7,11 @@
     <script>window.ROOT_DOMAIN = "{{ feclaw_domain }}";</script>
     <script src="/static/js/token-sync.js"></script>
     <script src="/static/js/auth.js"></script>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-    <!-- Markdown & Code Highlighting -->
+    <!-- Markdown 渲染（本地托管，避免 CDN 被墙） -->
     <script src="/static/marked.min.js"></script>
-    <!-- KaTeX for math rendering -->
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
-    <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css">
+    <!-- KaTeX 数学公式（本地托管，避免 CDN 被墙） -->
+    <link rel="stylesheet" href="/static/katex.min.css">
+    <script src="/static/katex.min.js"></script>
     <style>
         * {
             margin: 0;
@@ -40,7 +35,7 @@
         }
 
         body {
-            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans SC', sans-serif;
             background: var(--bg-dark);
             color: var(--text-light);
             height: 100vh;
@@ -185,6 +180,7 @@
             display: flex;
             flex-direction: column;
             min-width: 0;
+            position: relative;
         }
 
         .chat-header {
@@ -386,6 +382,47 @@
         .send-btn:disabled {
             opacity: 0.5;
             cursor: not-allowed;
+        }
+
+        .send-btn.stop {
+            background: #e74c3c;
+        }
+
+        /* 回到底部浮动按钮 */
+        .jump-to-bottom {
+            position: absolute;
+            bottom: 90px;
+            right: 24px;
+            padding: 8px 14px;
+            border-radius: 20px;
+            border: 1px solid var(--border);
+            background: var(--bg-message);
+            color: var(--text-light);
+            font-size: 13px;
+            cursor: pointer;
+            box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+            opacity: 0;
+            visibility: hidden;
+            transform: translateY(8px);
+            transition: opacity 0.2s, transform 0.2s, visibility 0.2s;
+            z-index: 10;
+        }
+
+        .jump-to-bottom.show {
+            opacity: 1;
+            visibility: visible;
+            transform: translateY(0);
+        }
+
+        /* 停止生成的提示条 */
+        .stop-note {
+            align-self: center;
+            padding: 8px 16px;
+            border-radius: 12px;
+            background: rgba(231, 76, 60, 0.12);
+            border: 1px solid rgba(231, 76, 60, 0.3);
+            color: #f0b0a8;
+            font-size: 13px;
         }
 
         /* 图片按钮 */
@@ -876,6 +913,8 @@
             </div>
         </div>
 
+        <button class="jump-to-bottom" id="jumpToBottomBtn" onclick="jumpToBottom()">↓ 回到底部</button>
+
         <div class="input-container">
             <!-- 图片预览区域 -->
             <div class="image-preview-area" id="imagePreviewArea" style="display: none;">
@@ -895,7 +934,7 @@
                     onkeydown="handleKeydown(event)"
                 ></textarea>
                 <button class="image-btn" onclick="document.getElementById('imageInput').click()" title="发送图片">📷</button>
-                <button class="send-btn" id="sendBtn" onclick="sendMessage()">➤</button>
+                <button class="send-btn" id="sendBtn" onclick="handleSendClick()" title="发送">➤</button>
             </div>
             
             <!-- 隐藏的图片输入 -->
@@ -1279,7 +1318,8 @@ let selectedFilePath = null;     // 上传后的 VFS 路径
                     ${msg.role === 'assistant' ? renderMarkdown(msg.content || '') : escapeHtml(msg.content || '')}
                 </div>
             `).join('');
-            
+            stickToBottom = true;
+
             // 渲染 LaTeX 公式
             if (typeof katex !== 'undefined') {
                 try {
@@ -1323,6 +1363,7 @@ let selectedFilePath = null;     // 上传后的 VFS 路径
             // 清空输入
             input.value = '';
             input.style.height = 'auto';
+            stickToBottom = true;
 
             // 显示用户消息
             appendMessage('user', msgContent, false, selectedImageBase64, selectedFileName);
@@ -1916,21 +1957,78 @@ let selectedFilePath = null;     // 上传后的 VFS 路径
             scrollToBottom();
         }
 
-        // 设置流式状态
+        // 设置流式状态（流式期间把发送键就地切换为「停止」）
         function setStreaming(streaming) {
             isStreaming = streaming;
-            document.getElementById('sendBtn').disabled = streaming;
+            const btn = document.getElementById('sendBtn');
+            if (streaming) {
+                btn.textContent = '■';
+                btn.classList.add('stop');
+                btn.title = '停止生成';
+                btn.disabled = false;
+            } else {
+                btn.textContent = '➤';
+                btn.classList.remove('stop');
+                btn.title = '发送';
+                btn.disabled = false;
+            }
         }
 
-        // 滚动到底部
+        // 发送/停止二合一入口
+        function handleSendClick() {
+            if (isStreaming) stopStreaming();
+            else sendMessage();
+        }
+
+        // 停止生成：服务端 WebSocket 无单消息中断通道，故做「前端断开 + 明确提示」
+        function stopStreaming() {
+            if (!isStreaming) return;
+            // 1) 清空所有流式回调 → 前端立即停止接收
+            ConnectionManager.onToken = null;
+            ConnectionManager.onThinking = null;
+            ConnectionManager.onTool = null;
+            ConnectionManager.onToolResult = null;
+            ConnectionManager.onDone = null;
+            ConnectionManager.onError = null;
+            ConnectionManager.onPipeline = null;
+            ConnectionManager.onReasoning = null;
+            // 2) 移除未完成的打字光标
+            document.querySelectorAll('.typing-cursor').forEach(c => c.remove());
+            // 3) 断开并重连 WebSocket，令服务端流式发送因客户端断开而终止
+            ConnectionManager.disconnect();
+            ConnectionManager.connect();
+            // 4) 复位 UI 并给出明确提示
+            setStreaming(false);
+            const note = document.createElement('div');
+            note.className = 'stop-note';
+            note.textContent = '⏹ 已停止接收（本次回答不再继续）';
+            document.getElementById('messagesContainer').appendChild(note);
+            scrollToBottom();
+        }
+
+        // 用户是否吸附在底部（上滑后不再自动跟随）
+        let stickToBottom = true;
+
+        // 滚动到底部（仅在用户贴底时自动跟随）
         function scrollToBottom() {
+            if (!stickToBottom) return;
             const container = document.getElementById('messagesContainer');
             container.scrollTop = container.scrollHeight;
+        }
+
+        // 强制回到底部（点击「回到底部」或发送/加载会话时调用）
+        function jumpToBottom() {
+            stickToBottom = true;
+            const container = document.getElementById('messagesContainer');
+            container.scrollTop = container.scrollHeight;
+            const btn = document.getElementById('jumpToBottomBtn');
+            if (btn) btn.classList.remove('show');
         }
 
         // 新建对话
         function newChat() {
             currentSessionId = null;
+            stickToBottom = true;
             document.getElementById('chatTitle').textContent = '新对话';
             document.getElementById('messagesContainer').innerHTML = `
                 <div class="empty-state">
@@ -1993,6 +2091,8 @@ let selectedFilePath = null;     // 上传后的 VFS 路径
 
         // 键盘事件
         function handleKeydown(event) {
+            // 中文输入法选词回车不发送（isComposing + 229 兜底）
+            if (event.isComposing || event.keyCode === 229) return;
             if (event.key === 'Enter' && !event.shiftKey) {
                 event.preventDefault();
                 sendMessage();
@@ -2038,6 +2138,14 @@ let selectedFilePath = null;     // 上传后的 VFS 路径
         inputField.addEventListener('input', function() {
             this.style.height = 'auto';
             this.style.height = Math.min(this.scrollHeight, 150) + 'px';
+        });
+
+        // 监听滚动：用户上滑即关闭自动跟随，并显示「回到底部」
+        document.getElementById('messagesContainer').addEventListener('scroll', function() {
+            const nearBottom = this.scrollHeight - this.scrollTop - this.clientHeight < 80;
+            stickToBottom = nearBottom;
+            const btn = document.getElementById('jumpToBottomBtn');
+            if (btn) btn.classList.toggle('show', !nearBottom);
         });
     </script>
 </body>

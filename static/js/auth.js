@@ -176,8 +176,9 @@ const Auth = {
       if (input) input.focus();
     }, 100);
 
-    // Enter 键触发验证
+    // Enter 键触发验证（中文输入法选词回车不触发）
     document.getElementById('login-totp-input').addEventListener('keypress', (e) => {
+      if (e.isComposing || e.keyCode === 229) return;
       if (e.key === 'Enter') Auth._verifyLoginTotp(path);
     });
   },

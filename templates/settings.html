@@ -43,6 +43,7 @@
                 </a>
                 <div class="navbar-nav">
                     <a href="/dashboard" class="nav-link">控制台</a>
+                    <a href="/dashboard/group" class="nav-link">群聊</a>
                     <a href="/settings" class="nav-link active">设置</a>
                     {% if is_admin %}<a href="/admin/settings" class="nav-link" style="color: var(--accent, #667eea);">⚙️ 管理后台</a>{% endif %}
                 </div>
@@ -169,7 +170,12 @@
                     document.getElementById('new-password').value = '';
                     document.getElementById('confirm-password').value = '';
                 } else {
-                    msgEl.textContent = '❌ ' + (data.message || data.detail || '修改失败');
+                    // 后端错误可能形如 {detail: {message: '...'}}，需解包成可读文案
+                    var errMsg = data.message || data.detail || '修改失败';
+                    if (typeof errMsg === 'object' && errMsg !== null) {
+                        errMsg = errMsg.message || errMsg.error || '修改失败';
+                    }
+                    msgEl.textContent = '❌ ' + (typeof errMsg === 'string' ? errMsg : '修改失败');
                     msgEl.style.color = 'var(--danger, #ef4444)';
                 }
             } catch(e) {

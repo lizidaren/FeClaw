@@ -144,6 +144,82 @@ p{{font-size:15px;line-height:1.6;color:#666;margin:0;}}
     return Response(content=html, status_code=status_code, media_type="text/html")
 
 
+# github-markdown-css 的本地化替代（避免 CDN 被墙导致分享页只剩外壳）
+_MARKDOWN_BASE_CSS = """
+.markdown-body{color:#24292f;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;font-size:16px;line-height:1.7;word-wrap:break-word;}
+.markdown-body h1,.markdown-body h2,.markdown-body h3,.markdown-body h4,.markdown-body h5,.markdown-body h6{margin-top:24px;margin-bottom:16px;font-weight:600;line-height:1.25;}
+.markdown-body h1{font-size:2em;padding-bottom:.3em;border-bottom:1px solid #eaecef;}
+.markdown-body h2{font-size:1.5em;padding-bottom:.3em;border-bottom:1px solid #eaecef;}
+.markdown-body h3{font-size:1.25em;}
+.markdown-body p{margin:0 0 16px;}
+.markdown-body ul,.markdown-body ol{padding-left:2em;margin-bottom:16px;}
+.markdown-body li{margin-bottom:4px;}
+.markdown-body blockquote{margin:0 0 16px;padding:0 1em;color:#6a737d;border-left:.25em solid #dfe2e5;}
+.markdown-body code{padding:.2em .4em;margin:0;font-size:85%;background:rgba(27,31,35,.05);border-radius:3px;font-family:SFMono-Regular,Consolas,"Liberation Mono",Menlo,monospace;}
+.markdown-body pre{padding:16px;overflow:auto;font-size:85%;line-height:1.45;background:#f6f8fa;border-radius:6px;margin-bottom:16px;}
+.markdown-body pre code{display:inline;padding:0;margin:0;background:transparent;}
+.markdown-body table{border-spacing:0;border-collapse:collapse;margin-bottom:16px;display:block;overflow-x:auto;}
+.markdown-body table th,.markdown-body table td{padding:6px 13px;border:1px solid #dfe2e5;}
+.markdown-body table tr{background:#fff;border-top:1px solid #c6cbd1;}
+.markdown-body table tr:nth-child(2n){background:#f6f8fa;}
+.markdown-body a{color:#0969da;text-decoration:none;}
+.markdown-body hr{height:.25em;padding:0;margin:24px 0;background-color:#d0d7de;border:0;}
+.markdown-body img{max-width:100%;height:auto;}
+"""
+
+
+def _markdown_share_page(md_content: str, vfs_path: str, share_hash_value) -> str:
+    """渲染 markdown 分享页：全部资源本地托管，Mermaid 按需加载（无 mermaid 图不加载 3.24MB）。"""
+    safe_md = _js_safe(md_content)
+    has_mermaid = "```mermaid" in md_content
+    mermaid_tag = '<script src="/static/mermaid.min.js"></script>' if has_mermaid else ''
+    has_mermaid_js = "true" if has_mermaid else "false"
+    html_page = f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{escape(os.path.basename(vfs_path))}</title>
+<link rel="stylesheet" href="/static/katex.min.css">
+<script src="/static/marked.min.js"></script>
+<script src="/static/katex.min.js"></script>
+{mermaid_tag}
+<style>
+body{{max-width:800px;margin:40px auto;padding:0 20px;-webkit-touch-callout:none;}}
+@media (max-width:640px){{body{{font-size:16px;line-height:1.8;padding:0 16px;margin:24px auto;}}}}
+@media (max-width:480px){{body{{font-size:17px;line-height:1.9;margin:16px auto;}}}}
+{_MARKDOWN_BASE_CSS}
+#c img{{max-width:100%;height:auto;}}
+.markdown-body pre{{overflow-x:auto;}}
+.katex-display{{overflow-x:auto;overflow-y:hidden;max-width:100%;}}
+@keyframes fadeIn{{from{{opacity:0;}}to{{opacity:1;}}}}
+.feclaw-ref-markdown strong{{color:#f0c040;}}
+.feclaw-ref-markdown code{{background:#333;color:#7ecfff;padding:1px 5px;border-radius:3px;font-size:13px;}}
+.feclaw-ref-markdown a{{color:#5b7cfa;}}
+</style>
+</head><body><article class="markdown-body" id="c"></article>
+<script>
+marked.use({{renderer:{{code:function(code,lang){{if(lang==='mermaid')return'<pre class="mermaid">'+code+'</pre>';if(lang)return'<pre><code class="language-'+lang+'">'+code+'</code></pre>';return'<pre><code>'+code+'</code></pre>';}}}}}});
+var html = marked.parse({safe_md});
+if (typeof katex !== 'undefined') {{
+  html = html.replace(/\\$\\$([\\s\\S]*?)\\$\\$/g, function(_, eq) {{
+    try {{ return katex.renderToString(eq, {{displayMode:true,throwOnError:false}}); }} catch(e) {{ return '$$'+eq+'$$'; }}
+  }});
+  html = html.replace(/\\$([^\\$\\n]+?)\\$/g, function(_, eq) {{
+    try {{ return katex.renderToString(eq, {{displayMode:false,throwOnError:false}}); }} catch(e) {{ return '$'+eq+'$'; }}
+  }});
+}}
+document.getElementById('c').innerHTML = html;
+window._RAW_MD = {safe_md};
+if ({has_mermaid_js} && typeof mermaid !== 'undefined') {{
+  mermaid.initialize({{startOnLoad:false,theme:'default'}});
+  mermaid.run({{nodes:document.querySelectorAll('.mermaid')}});
+}}
+</script>
+<script>var SHARE_HASH = {_js_safe(share_hash_value or "")}; var VFS_PATH = {_js_safe(vfs_path)};</script>
+<script src="/static/js/share-reference.js"></script>
+</body></html>"""
+    return html_page
+
+
 router = APIRouter(tags=["share"])
 
 
@@ -215,49 +291,7 @@ async def resolve_share_by_slug(slug: str, request: Request, db: Session = Depen
                 ext = os.path.splitext(vfs_path)[1].lower()
                 if ext == ".md":
                     md_content = content.decode("utf-8")
-                    safe_md = _js_safe(md_content)
-                    html_page = f"""<!DOCTYPE html>
-<html><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>{escape(os.path.basename(vfs_path))}</title>
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/github-markdown-css@5.5.1/github-markdown.min.css">
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
-<script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/marked@12.0.1/marked.min.js"></script>
-<script src="/static/mermaid.min.js"></script>
-<style>
-body{{max-width:800px;margin:40px auto;padding:0 20px;-webkit-touch-callout:none;}}
-@media (max-width:640px){{body{{font-size:16px;line-height:1.8;padding:0 16px;margin:24px auto;}}}}
-@media (max-width:480px){{body{{font-size:17px;line-height:1.9;margin:16px auto;}}}}
-#c img{{max-width:100%;height:auto;}}
-.markdown-body pre{{overflow-x:auto;}}
-.katex-display{{overflow-x:auto;overflow-y:hidden;max-width:100%;}}
-@keyframes fadeIn{{from{{opacity:0;}}to{{opacity:1;}}}}
-.feclaw-ref-markdown strong{{color:#f0c040;}}
-.feclaw-ref-markdown code{{background:#333;color:#7ecfff;padding:1px 5px;border-radius:3px;font-size:13px;}}
-.feclaw-ref-markdown a{{color:#5b7cfa;}}
-</style>
-</head><body><article class="markdown-body" id="c"></article>
-<script>
-mermaid.initialize({{startOnLoad:false,theme:'default'}});
-
-marked.use({{renderer:{{code:function(code,lang){{if(lang==='mermaid')return'<pre class="mermaid">'+code+'</pre>';if(lang)return'<pre><code class="language-'+lang+'">'+code+'</code></pre>';return'<pre><code>'+code+'</code></pre>';}}}}}});
-
-var html = marked.parse({safe_md});
-html = html.replace(/\\$\\$([\\s\\S]*?)\\$\\$/g, function(_, eq) {{
-    try {{ return katex.renderToString(eq, {{displayMode:true,throwOnError:false}}); }} catch(e) {{ return '$$'+eq+'$$'; }}
-}});
-html = html.replace(/\\$([^\\$\\n]+?)\\$/g, function(_, eq) {{
-    try {{ return katex.renderToString(eq, {{displayMode:false,throwOnError:false}}); }} catch(e) {{ return '$'+eq+'$'; }}
-}});
-document.getElementById('c').innerHTML = html;
-window._RAW_MD = {safe_md};
-mermaid.run({{nodes:document.querySelectorAll('.mermaid')}});
-</script>
-<script>var SHARE_HASH = {_js_safe(mapping.share_hash)}; var VFS_PATH = {_js_safe(vfs_path)};</script>
-<script src="/static/js/share-reference.js"></script>
-</body></html>"""
-                    return Response(content=html_page, media_type="text/html")
+                    return Response(content=_markdown_share_page(md_content, vfs_path, mapping.share_hash), media_type="text/html")
                 elif ext == ".2dggb":
                     return Response(content=_render_ggb_file(content, is_3d=False), media_type="text/html")
                 elif ext == ".3dggb":
@@ -360,47 +394,7 @@ async def resolve_share(token: str, request: Request, db: Session = Depends(get_
                 # Markdown 文件返回渲染后的 HTML 页面
                 if ext == ".md":
                     md_content = content.decode("utf-8")
-                    safe_md = _js_safe(md_content)
-                    html_page = f"""<!DOCTYPE html>
-<html><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>{escape(os.path.basename(vfs_path))}</title>
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/github-markdown-css@5.5.1/github-markdown.min.css">
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
-<script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/marked@12.0.1/marked.min.js"></script>
-<script src="/static/mermaid.min.js"></script>
-<style>
-body{{max-width:800px;margin:40px auto;padding:0 20px;-webkit-touch-callout:none;}}
-@media (max-width:640px){{body{{font-size:16px;line-height:1.8;padding:0 16px;margin:24px auto;}}}}
-@media (max-width:480px){{body{{font-size:17px;line-height:1.9;margin:16px auto;}}}}
-#c img{{max-width:100%;height:auto;}}
-.markdown-body pre{{overflow-x:auto;}}
-.katex-display{{overflow-x:auto;overflow-y:hidden;max-width:100%;}}
-@keyframes fadeIn{{from{{opacity:0;}}to{{opacity:1;}}}}
-.feclaw-ref-markdown strong{{color:#f0c040;}}
-.feclaw-ref-markdown code{{background:#333;color:#7ecfff;padding:1px 5px;border-radius:3px;font-size:13px;}}
-.feclaw-ref-markdown a{{color:#5b7cfa;}}
-</style>
-</head><body><article class="markdown-body" id="c"></article>
-<script>
-mermaid.initialize({{startOnLoad:false,theme:'default'}});
-marked.use({{renderer:{{code:function(code,lang){{if(lang==='mermaid')return'<pre class="mermaid">'+code+'</pre>';if(lang)return'<pre><code class="language-'+lang+'">'+code+'</code></pre>';return'<pre><code>'+code+'</code></pre>';}}}}}});
-var html = marked.parse({safe_md});
-html = html.replace(/\\$\\$([\\s\\S]*?)\\$\\$/g, function(_, eq) {{
-    try {{ return katex.renderToString(eq, {{displayMode:true,throwOnError:false}}); }} catch(e) {{ return '$$'+eq+'$$'; }}
-}});
-html = html.replace(/\\$([^\\$\\n]+?)\\$/g, function(_, eq) {{
-    try {{ return katex.renderToString(eq, {{displayMode:false,throwOnError:false}}); }} catch(e) {{ return '$'+eq+'$'; }}
-}});
-document.getElementById('c').innerHTML = html;
-window._RAW_MD = {safe_md};
-mermaid.run({{nodes:document.querySelectorAll('.mermaid')}});
-</script>
-<script>var SHARE_HASH = {_js_safe(share_hash or '')}; var VFS_PATH = {_js_safe(vfs_path)};</script>
-<script src="/static/js/share-reference.js"></script>
-</body></html>"""
-                    return Response(content=html_page, media_type="text/html")
+                    return Response(content=_markdown_share_page(md_content, vfs_path, share_hash or ""), media_type="text/html")
                 elif ext == ".2dggb":
                     return Response(content=_render_ggb_file(content, is_3d=False), media_type="text/html")
                 elif ext == ".3dggb":

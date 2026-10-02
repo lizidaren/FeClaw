@@ -558,7 +558,7 @@
     <script>window.ROOT_DOMAIN = "{{ feclaw_domain }}";</script>
     <script src="/static/js/token-sync.js"></script>
     <script src="/static/js/auth.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/markdown-it@14/dist/markdown-it.min.js"></script>
+    <script src="/static/markdown-it.min.js"></script>
     <script>
         (async function() {
             const loggedIn = await Auth.checkAuthBeforeRender();
@@ -990,6 +990,8 @@
 
         // ========== Chat input ==========
         function onChatKeydown(e) {
+            // 中文输入法选词回车不发送（isComposing + 229 兜底）
+            if (e.isComposing || e.keyCode === 229) return;
             if (e.key === 'Enter' && e.shiftKey) {
                 e.preventDefault();
                 sendMessage();

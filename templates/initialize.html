@@ -114,6 +114,8 @@
         }
         
         document.getElementById('totpInput').addEventListener('keypress', e => {
+            // 中文输入法选词回车不触发验证（isComposing + 229 兜底）
+            if (e.isComposing || e.keyCode === 229) return;
             if (e.key === 'Enter') verify();
         });
     </script>
