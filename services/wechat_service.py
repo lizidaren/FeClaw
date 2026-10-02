@@ -398,7 +398,7 @@ class WeChatService:
                 "bot_token": self._login_state.get("bot_token"),
                 "ilink_bot_id": self._login_state.get("ilink_bot_id"),
                 "ilink_user_id": self._login_state.get("ilink_user_id"),
-                "baseurl": self._login_state.get("base_url"),
+                "baseurl": (self._login_state.get("base_url") or "").strip() or ILINK_API_BASE,
             }
 
         if not base_info.get("bot_token"):
@@ -1626,7 +1626,7 @@ class WeChatService:
                             "bot_token": cred.get("token"),
                             "ilink_bot_id": cred.get("account_id"),
                             "ilink_user_id": cred.get("user_id"),
-                            "baseurl": cred.get("base_url", ILINK_API_BASE),
+                            "baseurl": (cred.get("base_url") or "").strip() or ILINK_API_BASE,
                         }
                 except (json.JSONDecodeError, TypeError) as e:
                     logger.warning("[WeChat] _resolve_send_base_info: ilink_token parse failed: {}".format(e))
@@ -1654,7 +1654,7 @@ class WeChatService:
             "bot_token": self._login_state.get("bot_token"),
             "ilink_bot_id": self._login_state.get("ilink_bot_id"),
             "ilink_user_id": self._login_state.get("ilink_user_id"),
-            "baseurl": self._login_state.get("base_url"),
+            "baseurl": (self._login_state.get("base_url") or "").strip() or ILINK_API_BASE,
         }
         if base_info.get("bot_token"):
             logger.info("[WeChat] _resolve_send_base_info: fell back to _login_state, bot_token={}".format("***"))
@@ -2088,7 +2088,7 @@ class WeChatService:
                 existing.bot_token = login_data.get("bot_token", "")
                 existing.ilink_bot_id = login_data.get("ilink_bot_id", "")
                 existing.ilink_user_id = login_data.get("ilink_user_id", "")
-                existing.base_url = login_data.get("base_url", "")
+                existing.base_url = (login_data.get("base_url") or "").strip() or ILINK_API_BASE
                 existing.status = self.BINDING_STATUS_ACTIVE
                 existing.agent_hash = login_data.get("agent_hash", existing.agent_hash or "")
                 existing.bound_at = datetime.now()
@@ -2108,7 +2108,7 @@ class WeChatService:
                 bot_token=login_data.get("bot_token", ""),
                 ilink_bot_id=login_data.get("ilink_bot_id", ""),
                 ilink_user_id=login_data.get("ilink_user_id", ""),
-                base_url=login_data.get("base_url", ""),
+                base_url=(login_data.get("base_url") or "").strip() or ILINK_API_BASE,
                 agent_hash=login_data.get("agent_hash", ""),
                 status=self.BINDING_STATUS_ACTIVE,
             )

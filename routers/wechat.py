@@ -21,6 +21,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from models.database import get_db, User
+from services.wechat.models import ILINK_API_BASE
 from services.wechat_service import wechat_service, WeChatService
 from config import settings
 from services.wechat_channel_service import WeChatChannelService
@@ -186,7 +187,10 @@ async def bind_wechat(request: BindRequest, user: User = Depends(get_current_use
         # Q20/H8：base_url 由服务端固定，不接受客户端指定。
         # 此前客户端可提交任意 base_url，服务端带着 bot token 去请求它（盲 SSRF + 凭据外带）。
         # 现在一律用服务端配置（空则 SDK 回退到 ILINK_API_BASE 官方端点）。
-        server_base_url = (settings.WECHAT_ILINK_BASE_URL or "").strip()
+        # 2026-10-02 修：此前只读 settings.WECHAT_ILINK_BASE_URL，而它默认 "" 且 .env 未设置
+        # ⇒ 落库 base_url="" ⇒ iLink 侧会话认不了 ⇒ getupdates 恒回 -14 session timeout
+        # ⇒ 微信端表现为「暂无法连接」。安全属性不变：仍由服务端固定，不接受客户端指定（Q20/H8）。
+        server_base_url = (settings.WECHAT_ILINK_BASE_URL or ILINK_API_BASE).strip()
 
         login_data = {
             "bot_token": request.bot_token or "",
