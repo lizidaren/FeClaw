@@ -4,13 +4,20 @@
 """
 
 from typing import Optional, List
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Header
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Header, Request
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from models.database import get_db, User
-from utils.auth import get_current_user
+from utils.auth import (
+    get_current_user,
+    decode_jwt_token,
+    token_type,
+    is_token_revoked,
+    user_id_from_payload,
+    TOKEN_TYPE_SESSION,
+)
 from services.workspace_service import (
     init_user_workspace,
     get_user_workspace,
@@ -24,6 +31,7 @@ from services.workspace_service import (
     delete_workspace_file,
 )
 from services.totp_service import totp_service
+from services.rate_limiter import totp_verify_limiter
 from services.file_storage import create_file_storage as s
 
 
@@ -239,12 +247,23 @@ async def generate_totp(user: User = Depends(get_current_user)):
 
 
 @router.post("/totp/verify", response_model=TOTPVerifyResponse)
-async def verify_totp(request: TOTPVerifyRequest):
+async def verify_totp(request: TOTPVerifyRequest, req: Request):
     """
     验证 TOTP 并签发 JWT
 
-    静态网站调用此接口验证用户输入的登录码
+    静态网站调用此接口验证用户输入的登录码。
+
+    FIX-A（审计 §6 N1）：这是 `/api/totp/verify` 的孪生端点，此前**匿名 + 零限流**，
+    6 位码爆破可绕过主端点的限流。前端 `static/js/auth.js`（`VERIFY_TOTP_ENDPOINT`）
+    仍指向它 ⇒ 不删除，改为挂上同一限流器（IP + agent_hash，与主端点共享同一桶）。
+    签发的令牌由 `verify_agent_totp` 统一改为 `typ=totp`（Agent 作用域），不再签发
+    全站会话令牌 —— 这是本端点的「鉴权」收敛：登录靠 6 位码 + 限流，令牌本身受限。
     """
+    client_ip = req.client.host if req.client else "unknown"
+    # request.user_id 实为 agent_hash（历史命名），限流 key 与主端点一致：IP:agent_hash
+    if totp_verify_limiter.is_limited(f"{client_ip}:{request.user_id}"):
+        raise HTTPException(status_code=429, detail="尝试次数过多，请稍后再试")
+
     # 验证 TOTP
     result = totp_service.verify_agent_totp(request.user_id, request.code)
     if not result:
@@ -257,18 +276,29 @@ async def verify_totp(request: TOTPVerifyRequest):
 async def get_user_from_jwt(authorization: Optional[str] = Header(None)) -> str:
     """
     从 JWT 获取用户 ID
-    
-    用于静态网站的鉴权
+
+    用于静态网站工作区文件 API 的鉴权。
+
+    FIX-A（Q28 §6.6 + N2 同族）：
+      - 补登出吊销校验（此前不查吊销，登出后旧 token 仍能读工作区文件）；
+      - 只认 session 令牌 —— 这些工作区文件是 user 级资源（非 Agent 作用域），
+        totp 令牌（Agent 作用域）不得读取全用户工作区。
     """
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
-    
+
     token = authorization[7:]  # 去掉 "Bearer "
-    result = totp_service.verify_jwt(token)
-    if not result:
+    payload = decode_jwt_token(token)
+    if payload is None:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
-    
-    return result["user_id"]
+    if token_type(payload) != TOKEN_TYPE_SESSION:
+        raise HTTPException(status_code=401, detail="Invalid token type")
+    if is_token_revoked(payload):
+        raise HTTPException(status_code=401, detail="Invalid or revoked token")
+    user_id = user_id_from_payload(payload)
+    if user_id is None:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    return str(user_id)
 
 
 # ==================== JWT 鉴权的文件 API（静态网站用）====================

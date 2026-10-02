@@ -129,15 +129,18 @@ class TOTPService:
                 "exp": expires_at,
                 "iat": datetime.utcnow()
             }
-            # Q22 令牌分级：TOTP 是**认证方式**而非令牌类型 —— 验证通过后签发标准
-            # 会话令牌（typ=session），get_current_user 才认它；同时携带 agent_hash
-            # 供 feclaw_domain.get_user_from_jwt 做页面级子域校验。
-            # 必须写 jwt_version，否则登出过的用户新签发的 token 会被误判为版本 0 而已失效。
+            # FIX-A（审计 §1.2 / §6 N2）：TOTP 登录签发的令牌是 **Agent 作用域**的
+            # 受限凭证（typ=totp），而非全站会话凭证。此前误签成 typ=session，导致
+            # 「拿到任一 Agent 的码 = 拿到该账号全部权限」（/api/user、/api/console、
+            # 其他 Agent 的文件等），与 README「只分享某一个 Agent」不符。
+            #   - typ=totp ⇒ owner/全局接口（require typ=session）一律 403；
+            #   - 携带 agent_hash ⇒ Agent 作用域路由校验 token.agent_hash == 目标 agent；
+            #   - 必须写 jwt_version，否则登出过的用户新签发的 token 会被误判为版本 0 而已失效。
             from utils.auth import (
                 attach_jwt_version, TYP_CLAIM,
-                TOKEN_TYPE_SESSION,
+                TOKEN_TYPE_TOTP,
             )
-            payload[TYP_CLAIM] = TOKEN_TYPE_SESSION
+            payload[TYP_CLAIM] = TOKEN_TYPE_TOTP
             attach_jwt_version(payload)
             token = jwt.encode(payload, settings.JWT_SECRET, algorithm="HS256")
             

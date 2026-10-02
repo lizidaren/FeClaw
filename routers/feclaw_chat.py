@@ -10,7 +10,7 @@ DELETE /api/chat/sessions/{session_id} - 删除会话
 import json
 import asyncio
 import logging
-from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 from typing import Any, Dict, Optional, List
@@ -26,7 +26,13 @@ from services.web_channel_service import (
     SessionNotFoundError,
     WebChannelService,
 )
-from utils.auth import get_current_user_id, decode_jwt_token
+from utils.auth import decode_jwt_token
+from utils.agent_access import (
+    get_agent_scoped_user_id,
+    require_totp_scope,
+    extract_agent_token,
+    totp_scoped_agent_hash,
+)
 
 
 router = APIRouter(tags=["FeClaw Chat"])
@@ -190,7 +196,8 @@ def serialize_session_detail(session, agent=None) -> SessionDetailResponse:
 @router.post("/api/chat/stream")
 async def chat_stream(
     request: ChatRequest,
-    user_id: int = Depends(get_current_user_id),
+    req: Request,
+    user_id: int = Depends(get_agent_scoped_user_id),
     db: Session = Depends(get_db),
     agent_hash: Optional[str] = Query(None),
 ):
@@ -245,6 +252,9 @@ async def chat_stream(
     except AgentOwnershipError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     target_hash = target_agent.hash
+
+    # FIX-A：totp 令牌（Agent 作用域）只能聊它自己的那个 Agent，不能越界同用户的其他 Agent
+    require_totp_scope(req, target_hash)
 
     # ===== Gen 2 (IM Agent) 分支 =====
     if getattr(target_agent, "agent_mode", "classic") == "im":
@@ -715,7 +725,8 @@ async def chat_websocket(websocket: WebSocket):
 @router.post("/api/chat/sessions", response_model=CreateSessionResponse)
 async def create_chat_session(
     request: CreateSessionRequest,
-    user_id: int = Depends(get_current_user_id),
+    req: Request,
+    user_id: int = Depends(get_agent_scoped_user_id),
     db: Session = Depends(get_db)
 ) -> CreateSessionResponse:
     """
@@ -740,6 +751,9 @@ async def create_chat_session(
         raise HTTPException(status_code=404, detail="Agent not found")
     if agent.user_id != user_id:
         raise HTTPException(status_code=403, detail="Not authorized to access this agent")
+
+    # FIX-A：totp 令牌（Agent 作用域）只能针对它自己的 Agent 建会话
+    require_totp_scope(req, agent_hash)
 
     # 创建新会话（topic 保留渠道前缀，主题内容留空 → 客户端走占位文案）
     new_session_id = f"sess_{_uuid.uuid4().hex[:16]}"
@@ -771,9 +785,10 @@ async def create_chat_session(
 
 @router.get("/api/chat/sessions", response_model=List[SessionResponse])
 async def get_sessions(
+    req: Request,
     agent_hash: Optional[str] = Query(None, description="Agent hash，筛选特定 Agent 的会话"),
     before: Optional[datetime] = Query(None, description="updated_at 游标；返回此时间之前的会话"),
-    user_id: int = Depends(get_current_user_id),
+    user_id: int = Depends(get_agent_scoped_user_id),
     db: Session = Depends(get_db)
 ):
     """
@@ -785,6 +800,13 @@ async def get_sessions(
     """
     from models.database import AgentProfile, ConversationSession
     from sqlalchemy import or_
+
+    # FIX-A：totp 令牌（Agent 作用域）只能列它自己那个 Agent 的会话
+    scope = totp_scoped_agent_hash(extract_agent_token(req))
+    if scope is not None:
+        if agent_hash and agent_hash != scope:
+            raise HTTPException(status_code=403, detail="Token scoped to a different agent")
+        agent_hash = scope
 
     # 一次性查回 [web] 和 [mobile] 渠道的会话（避免两次往返 + 各自 sort）
     q = db.query(ConversationSession).filter(
@@ -820,7 +842,8 @@ async def get_sessions(
 @router.get("/api/chat/sessions/{session_id}", response_model=SessionDetailResponse)
 async def get_session_detail(
     session_id: str,
-    user_id: int = Depends(get_current_user_id),
+    req: Request,
+    user_id: int = Depends(get_agent_scoped_user_id),
     db: Session = Depends(get_db)
 ):
     """
@@ -846,6 +869,9 @@ async def get_session_detail(
     if not s:
         raise HTTPException(status_code=404, detail="Session not found")
 
+    # FIX-A：totp 令牌（Agent 作用域）只能读它自己那个 Agent 的会话
+    require_totp_scope(req, s.agent_hash)
+
     agent = db.query(AgentProfile).filter(
         AgentProfile.hash == s.agent_hash,
         AgentProfile.user_id == user_id,
@@ -869,15 +895,27 @@ async def get_session_detail(
 @router.get("/api/chat/sessions/{session_id}/messages")
 async def get_session_messages(
     session_id: str,
+    req: Request,
     before: Optional[str] = Query(
         None,
         description="ISO 8601 时间戳；仅返此时间之前的消息（缺省 = 最新）",
     ),
     limit: int = Query(30, ge=1, le=200, description="上限 200，默认 30"),
-    user_id: int = Depends(get_current_user_id),
+    user_id: int = Depends(get_agent_scoped_user_id),
+    db: Session = Depends(get_db),
 ):
     """Cursor 分页拉取私聊会话消息。"""
     from services.chat_service import ChatService
+    from models.database import ConversationSession
+
+    # FIX-A：先取会话归属 + totp 作用域校验（totp 令牌只能读它自己那个 Agent 的会话）
+    session = db.query(ConversationSession).filter(
+        ConversationSession.session_id == session_id,
+        ConversationSession.user_id == int(user_id),
+    ).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    require_totp_scope(req, session.agent_hash)
 
     messages = ChatService.get_messages_paginated(
         session_id=session_id,
@@ -891,12 +929,24 @@ async def get_session_messages(
 @router.delete("/api/chat/sessions/{session_id}")
 async def archive_session(
     session_id: str,
-    user_id: int = Depends(get_current_user_id),
+    req: Request,
+    user_id: int = Depends(get_agent_scoped_user_id),
     db: Session = Depends(get_db)
 ) -> dict:
     """
     归档会话
     """
+    from models.database import ConversationSession
+
+    # FIX-A：先取会话归属 + totp 作用域校验（totp 令牌只能归档它自己那个 Agent 的会话）
+    session = db.query(ConversationSession).filter(
+        ConversationSession.session_id == session_id,
+        ConversationSession.user_id == int(user_id),
+    ).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    require_totp_scope(req, session.agent_hash)
+
     service = WebChannelService(db, user_id)
     success = service.archive_session(session_id)
 

@@ -54,15 +54,67 @@ def _user_id_from_payload(payload: dict) -> Optional[int]:
     return user_id_from_payload(payload)
 
 
+def resolve_local_user_id(token: str, db: Optional[Session] = None) -> Optional[int]:
+    """把 token 解析成**真正的 FeClaw 本地 user_id**（Q28/F2+F3 单点判定）。
+
+    - Platform 格式 token（`type=access` 且无 typ/sub，Platform 也种 `feclaw_jwt`
+      cookie）→ 走 UserLink 把 Platform user_id 映射成 FeClaw user_id；解析不到
+      → None（调用方拒绝，**绝不**把 token 里的数字当本地 id —— 两侧 id 命名空间不同）。
+    - FeClaw 本地 token → 校验登出吊销（`jwt_version`，F2）。
+    """
+    payload = decode_jwt_token(token)
+    if payload is None:
+        return None
+
+    from utils.oauth_helpers import is_platform_format_token, resolve_user_from_platform
+    if is_platform_format_token(payload):
+        provider_uid = payload.get("user_id")
+        if provider_uid is None:
+            provider_uid = payload.get("sub")
+        if provider_uid is None:
+            return None
+        own_session = db is None
+        session = db
+        if own_session:
+            from models.database import SessionLocal
+            session = SessionLocal()
+        try:
+            user = resolve_user_from_platform(session, str(provider_uid))
+            return user.id if user else None
+        finally:
+            if own_session:
+                session.close()
+
+    if is_token_revoked(payload, db=db):
+        return None
+    return user_id_from_payload(payload)
+
+
 def _decode_or_none(token: str, db: Optional[Session] = None) -> Optional[dict]:
     """解 JWT + 吊销校验；失败返回 None 而不抛异常（让调用方决定 raise/return None）。
 
     这是全局 HS256 JWT 的**唯一校验入口** —— 登出吊销（`jwt_version`）在这里生效，
     因此所有 `get_current_user*` 依赖自动获得「登出后旧 token 立即失效」。
+
+    Q28/F3：读 `feclaw_jwt` cookie 时若拿到的是 Platform 签发的 token（同源错位），
+    必须先 UserLink 解析成 FeClaw 本地 user_id —— 否则会把 Platform 的 user_id 当成
+    FeClaw 的 user_id（两侧 id 命名空间不同，会串号）。解析不到 ⇒ None ⇒ 401。
     """
     payload = decode_jwt_token(token)
     if payload is None:
         return None
+
+    from utils.oauth_helpers import is_platform_format_token
+    if is_platform_format_token(payload):
+        local_uid = resolve_local_user_id(token, db=db)
+        if local_uid is None:
+            return None
+        # 把 payload 的 user_id/sub 改写为 FeClaw 本地 id，供下游 user_id_from_payload 使用
+        payload = dict(payload)
+        payload["user_id"] = local_uid
+        payload["sub"] = str(local_uid)
+        return payload
+
     # Q22 令牌分级：会话入口只放行 session 类型，拒绝 TOTP/Agent/refresh 令牌。
     # （旧令牌由 assert_token_type 按既有标记回推类型，老会话令牌不掉线。）
     if not assert_token_type(payload, {TOKEN_TYPE_SESSION}):

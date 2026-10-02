@@ -36,6 +36,11 @@ _LOGIN_MAX = 10           # 每窗口最多尝试次数
 _LOGIN_WINDOW = 300       # 窗口 5 分钟
 _LOGIN_CLEAN_THRESHOLD = 10000
 
+# FIX-A（审计 §6 H17）：登录再补一个 **IP 单桶**（防「用户名喷洒」——(IP,username) 桶
+# 拦不住攻击者换用户名重试）。阈值放宽到 100 次/300s，避免误伤 NAT 后的多人。
+# 现有 (IP,username) 桶保留不动。
+from services.rate_limiter import login_ip_limiter as _login_ip_limiter
+
 
 def _login_rate_limited(key: str) -> bool:
     now = time.time()
@@ -730,6 +735,9 @@ async def login_user(
         # Q20/H17：登录限流（IP + username），失败尝试过多返回 429
         client_ip = request.client.host if request.client else "unknown"
         if _login_rate_limited(f"{client_ip}:{username}"):
+            raise HTTPException(status_code=429, detail={"status": "error", "message": "尝试次数过多，请稍后再试"})
+        # FIX-A（H17）：IP 单桶，防「用户名喷洒」；阈值放宽避免误伤 NAT 多人。
+        if _login_ip_limiter.is_limited(f"ip:{client_ip}"):
             raise HTTPException(status_code=429, detail={"status": "error", "message": "尝试次数过多，请稍后再试"})
 
         # 查找用户

@@ -31,7 +31,14 @@ from sqlalchemy.orm import Session
 from config import settings
 from models.agent_profile import AgentProfile
 from models.database import User, get_db
-from utils.auth_dependencies import get_current_user
+from utils.auth import (
+    decode_jwt_token,
+    is_token_revoked,
+    user_id_from_payload,
+    token_type,
+    TOKEN_TYPE_SESSION,
+    TOKEN_TYPE_TOTP,
+)
 
 # hash 合法长度区间（hex 字符数）。
 # 统一口径：老 agent 为 4 位；`services/agent_init_service.create_agent` 新建为 8 位；
@@ -111,6 +118,86 @@ def user_owns_agent(db: Session, agent_hash: str, user_id) -> bool:
     return agent is not None and str(agent.user_id) == str(user_id)
 
 
+# ────────────────────────────────────────────────────────────────────
+# token → user 解析（FIX-A：session 全量 / totp 按 Agent 作用域）
+# ────────────────────────────────────────────────────────────────────
+
+def extract_agent_token(request: Request) -> Optional[str]:
+    """提取 Agent 作用域可用的 token：Bearer header → `feclaw_jwt` cookie →
+    `feclaw_jwt_totp_{agent_hash}` cookie（按请求子域名）。"""
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        return auth_header[7:]
+    token = request.cookies.get("feclaw_jwt")
+    if token:
+        return token
+    agent_hash = extract_hash_from_host(get_request_domain(request))
+    if agent_hash:
+        totp_token = request.cookies.get(f"feclaw_jwt_totp_{agent_hash}")
+        if totp_token:
+            return totp_token
+    return None
+
+
+def resolve_user_id_from_token(token: str, db: Optional[Session] = None) -> Optional[int]:
+    """token → FeClaw 本地 user_id（**含登出吊销**）。
+
+    - Platform 格式 token → UserLink 映射（不把 Platform id 当本地 id）
+    - session（全量） / totp（Agent 作用域）→ 吊销校验后返回 user_id
+    - agent / refresh → 拒绝（None）
+    """
+    raw = decode_jwt_token(token)
+    if raw is None:
+        return None
+
+    from utils.oauth_helpers import is_platform_format_token, resolve_user_from_platform
+    if is_platform_format_token(raw):
+        provider_uid = raw.get("user_id") or raw.get("sub")
+        if provider_uid is None:
+            return None
+        own_session = db is None
+        session = db
+        if own_session:
+            from models.database import SessionLocal
+            session = SessionLocal()
+        try:
+            user = resolve_user_from_platform(session, str(provider_uid))
+            return user.id if user else None
+        finally:
+            if own_session:
+                session.close()
+
+    typ = token_type(raw)
+    if typ not in (TOKEN_TYPE_SESSION, TOKEN_TYPE_TOTP):
+        return None
+    if is_token_revoked(raw, db=db):
+        return None
+    return user_id_from_payload(raw)
+
+
+def totp_scoped_agent_hash(token: Optional[str]) -> Optional[str]:
+    """token 为 totp 类型时返回其 `agent_hash`（作用域）；session/其他 → None。"""
+    if not token:
+        return None
+    raw = decode_jwt_token(token)
+    if raw is None:
+        return None
+    if token_type(raw) == TOKEN_TYPE_TOTP:
+        return raw.get("agent_hash")
+    return None
+
+
+def require_totp_scope(request: Request, agent_hash: str) -> None:
+    """断言：若请求 token 是 totp（Agent 作用域），其 agent_hash 必须等于目标 agent。
+
+    用于 `/api/chat/*` 等「目标 agent 在服务层解析」的接口 —— 防止 totp 令牌
+    越界访问同用户的其他 Agent。
+    """
+    scope = totp_scoped_agent_hash(extract_agent_token(request))
+    if scope is not None and scope != agent_hash:
+        raise HTTPException(status_code=403, detail="Token scoped to a different agent")
+
+
 def require_agent_owner(db: Session, agent_hash: str, user) -> None:
     """Q19：断言 agent 归属；不满足抛 403（与 `get_authorized_agent_hash` 同一口径）。
 
@@ -124,24 +211,64 @@ def require_agent_owner(db: Session, agent_hash: str, user) -> None:
 async def get_authorized_agent_hash(
     request: Request,
     agent_hash: str = Query(""),
-    user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> str:
     """FastAPI 依赖：解析 agent hash 并校验归属，返回**已授权**的 hash。
 
     VFS 文件接口必须 `Depends(this)` 后直接使用返回值，不要再自行解析或校验。
 
+    FIX-A：认证从「只认 session」放宽为「session（全量）或 totp（**仅限该 agent**）」，
+    让「分享一个 Agent」的用户（只有 totp 令牌）仍能读写该 Agent 的文件；
+    但 totp 令牌不能越界碰其他 Agent（`agent_hash` 作用域校验）。
+
     Raises:
         HTTPException(400): 参数与域名都解析不出 hash
-        HTTPException(403): agent 不存在 或 不属于当前用户（两者同一响应，防枚举）
+        HTTPException(401): 无 token / token 无效 / 类型不对
+        HTTPException(403): agent 不存在 或 不属于当前用户（两者同一响应，防枚举），
+                           或 totp 令牌作用域与目标 agent 不一致
     """
+    # 先认证（无 token ⇒ 401），保持「匿名必 401」的既有契约 —— 否则会退化成 400
+    # 的存在性/参数 oracle，破坏 tests/test_q21_route_authz.py 的匿名 401 断言。
+    token = extract_agent_token(request)
+    if not token:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    user_id = resolve_user_id_from_token(token, db=db)
+    if user_id is None:
+        raise HTTPException(status_code=401, detail="Invalid or revoked token")
+
     resolved = resolve_agent_hash(request, agent_hash)
     if not resolved:
         raise HTTPException(status_code=400, detail="Invalid agent hash from domain")
-    if not user_owns_agent(db, resolved, user.id):
+
+    scope = totp_scoped_agent_hash(token)
+    if scope is not None and scope != resolved:
+        raise HTTPException(status_code=403, detail="Token scoped to a different agent")
+
+    if not user_owns_agent(db, resolved, user_id):
         # 故意不区分「不存在」与「不属于你」
         raise HTTPException(status_code=403, detail="无权访问该 Agent")
     return resolved
+
+
+async def get_agent_scoped_user_id(
+    request: Request,
+    db: Session = Depends(get_db),
+) -> int:
+    """FastAPI 依赖：返回已认证的 user_id（session 全量 或 totp 作用域），**不含**归属校验。
+
+    供 `/api/chat/*` 使用 —— 归属校验由 WebChannelService.resolve_agent 内部完成；
+    totp 的 Agent 作用域约束由调用方再用 `require_totp_scope` 断言。
+
+    Raises:
+        HTTPException(401): 无 token / token 无效 / 类型不对
+    """
+    token = extract_agent_token(request)
+    if not token:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    user_id = resolve_user_id_from_token(token, db=db)
+    if user_id is None:
+        raise HTTPException(status_code=401, detail="Invalid or revoked token")
+    return user_id
 
 
 __all__ = [
@@ -153,4 +280,9 @@ __all__ = [
     "user_owns_agent",
     "require_agent_owner",
     "get_authorized_agent_hash",
+    "extract_agent_token",
+    "resolve_user_id_from_token",
+    "totp_scoped_agent_hash",
+    "require_totp_scope",
+    "get_agent_scoped_user_id",
 ]

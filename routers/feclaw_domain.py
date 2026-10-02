@@ -50,6 +50,8 @@ from utils.agent_access import (
     get_request_domain as _get_domain,
     user_owns_agent,
     get_authorized_agent_hash,
+    extract_agent_token,
+    totp_scoped_agent_hash,
 )
 
 router = APIRouter(tags=["FeClaw 域名路由"])
@@ -157,32 +159,12 @@ async def get_user_from_jwt(request: Request) -> str:
 def _resolve_local_user_id(token: str) -> Optional[int]:
     """把请求里的 token 解析成真正的 FeClaw 本地 user_id（Q28/F2+F3 单点判定）。
 
-    - Platform 格式 token（platform_session cookie / Platform 签发的 feclaw_jwt，
-      特征 type=access 且无 typ/sub）→ 走 UserLink 解析出 FeClaw user_id；
-      解析不到 → None（调用方拒绝，**绝不**把 token 里的数字当本地 id）。
-    - FeClaw 本地 token → 校验登出吊销（jwt_version，F2）。
+    FIX-A（Q28 §6.3）：本函数收敛为对 `utils.auth_dependencies.resolve_local_user_id`
+    的薄包装 —— API 路径（auth_dependencies）与页面路径（此处）共用同一份
+    UserLink 解析 + 登出吊销逻辑，杜绝「API 路径不做 UserLink 解析」的同源错位。
     """
-    raw = decode_jwt_token(token)
-    if raw is None:
-        return None
-
-    from utils.oauth_helpers import is_platform_format_token, resolve_user_from_platform
-    if is_platform_format_token(raw):
-        provider_uid = raw.get("user_id")
-        if provider_uid is None:
-            provider_uid = raw.get("sub")
-        if provider_uid is None:
-            return None
-        db = SessionLocal()
-        try:
-            user = resolve_user_from_platform(db, str(provider_uid))
-            return user.id if user else None
-        finally:
-            db.close()
-
-    if is_token_revoked(raw):
-        return None
-    return user_id_from_payload(raw)
+    from utils.auth_dependencies import resolve_local_user_id
+    return resolve_local_user_id(token)
 
 
 async def get_user_for_page(request: Request) -> Optional[str]:
@@ -411,28 +393,18 @@ class TOTPGenerateResponse(BaseModel):
 
 
 # Q19/C2: /api/totp/verify 限流（IP + agent_hash 双维度，防 6 位码在线爆破）
-import time as _time
-from collections import defaultdict as _defaultdict
-_totp_verify_attempts: dict = _defaultdict(list)
-_TOTP_VERIFY_MAX = 10           # 每窗口最多尝试次数
-_TOTP_VERIFY_WINDOW = 300       # 窗口 5 分钟
-_TOTP_VERIFY_CLEAN_THRESHOLD = 10000
+# FIX-A：限流下沉到 services/rate_limiter.py 单点（SlidingWindowLimiter），
+# 孪生端点 /api/workspace/totp/verify 等所有调用方自动继承同一桶。
+# 下列 `_totp_verify_*` 别名仅为向后兼容（tests/test_q19_security.py 直接 import）。
+from services.rate_limiter import totp_verify_limiter as _totp_verify_limiter
+
+_totp_verify_attempts = _totp_verify_limiter._buckets
+_TOTP_VERIFY_MAX = _totp_verify_limiter.max_attempts      # 每窗口最多尝试次数
+_TOTP_VERIFY_WINDOW = _totp_verify_limiter.window_seconds  # 窗口 5 分钟
 
 
 def _totp_verify_rate_limited(key: str) -> bool:
-    now = _time.time()
-    bucket = [t for t in _totp_verify_attempts.get(key, []) if now - t < _TOTP_VERIFY_WINDOW]
-    if len(bucket) >= _TOTP_VERIFY_MAX:
-        _totp_verify_attempts[key] = bucket
-        return True
-    bucket.append(now)
-    _totp_verify_attempts[key] = bucket
-    if len(_totp_verify_attempts) > _TOTP_VERIFY_CLEAN_THRESHOLD:
-        _stale = [k for k, v in list(_totp_verify_attempts.items())
-                  if all(now - t >= _TOTP_VERIFY_WINDOW for t in v)]
-        for k in _stale:
-            _totp_verify_attempts.pop(k, None)
-    return False
+    return _totp_verify_limiter.is_limited(key)
 
 
 @router.post("/api/totp/verify", response_model=TOTPVerifyResponse)
@@ -508,21 +480,24 @@ async def generate_totp(request: TOTPVerifyRequest, user=Depends(get_current_use
 
 
 @router.get("/api/agent/info", response_model=AgentInfoResponse)
-async def get_agent_info_api(agent_hash: str, request: Request, user: User = Depends(get_current_user)):
-    """获取 Agent 信息（JWT 鉴权）"""
-    # 验证用户有权访问该 Agent
+async def get_agent_info_api(request: Request, agent_hash: str = Depends(get_authorized_agent_hash)):
+    """获取 Agent 信息（JWT 鉴权）。
+
+    FIX-A：改用 `get_authorized_agent_hash`（统一 403 单点）——
+      - agent 不存在 与 不属于本人 ⇒ 同一 403，消除 404-vs-403 存在性 oracle；
+      - session（owner）或 totp（仅限该 agent）都能访问自己那个 Agent 的公开信息；
+      - totp 持有人**不**返回 totp_secret / 二维码（防越权续签验证码）。
+    """
     info = get_agent_info(agent_hash)
     if not info:
-        pass  # HTTPException already imported at module level
-        raise HTTPException(status_code=404, detail="Agent not found")
+        # get_authorized_agent_hash 已保证存在，此处防御性兜底（与「不存在」同 403）
+        raise HTTPException(status_code=403, detail="无权访问该 Agent")
 
-    # 确保 user_id 匹配
-    if str(info["user_id"]) != str(user.id):
-        pass  # HTTPException already imported at module level
-        raise HTTPException(status_code=403, detail="Access denied")
-
-    # 生成 TOTP 二维码（不依赖外部 API）
-    if info.get("totp_secret"):
+    # 只有 session（owner 级）才返回 TOTP secret / 二维码；totp 持有人拿不到
+    token = extract_agent_token(request)
+    if totp_scoped_agent_hash(token) is not None:
+        info["totp_secret"] = None
+    elif info.get("totp_secret"):
         from utils.qr import generate_qr_data_url
         totp_uri = f"otpauth://totp/FeClaw:{agent_hash}?secret={info['totp_secret']}&issuer=FeClaw"
         info["totp_qr_data_url"] = generate_qr_data_url(totp_uri)

@@ -330,13 +330,18 @@ class TestTotpFlow:
         token = data["token"]
 
         payload = jwt.decode(token, settings.JWT_SECRET, algorithms=["HS256"])
-        assert payload["typ"] == TOKEN_TYPE_SESSION
+        # FIX-A（2026-10-02）：TOTP 令牌不再是全站会话凭证，改为 agent 作用域的受限凭证。
+        # 旧断言 "typ==session 且能访问 /api/console/user" 正是被测出的缺陷（复审 §1.2 链 A）✗
+        assert payload["typ"] == TOKEN_TYPE_TOTP
         assert payload["auth_method"] == "totp"
         assert payload["agent_hash"] == "abcd"
 
-        # TOTP 登录得到的会话令牌可访问受保护接口
+        # owner/全局接口（要求 typ=session）必须拒绝 TOTP 令牌
         r = client.get("/api/console/user", headers={"Authorization": f"Bearer {token}"})
-        assert r.status_code == 200, r.text
+        assert r.status_code in (401, 403), r.text   # 必须是「被拒」而不是 200
+
+        # 注：正向（totp 令牌可访问其自己 Agent 的资源）由 FIX-A 报告的 §4.1 真服务冒烟覆盖；
+        # 本测试用独立的 SessionLocal，请求侧看不到本用例建的数据，故此处不做正向断言。
 
 
 # ======================================================================
