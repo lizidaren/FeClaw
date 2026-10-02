@@ -59,6 +59,9 @@ class BackgroundTask:
     status: str = "running"
     created_at: float = field(default_factory=time.time)
     sandbox_token: str = ""
+    # N10：幂等释放标记（reaper 与 stop_background 并发时保证槽位「恰好释放一次」）
+    released: bool = False
+    _release_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
 
 # ============================================================================

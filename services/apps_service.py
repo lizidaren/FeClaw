@@ -30,6 +30,20 @@ MAX_APPS_PER_AGENT = 10
 MAX_CODE_TIMEOUT = 30
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
 
+
+def _clamp_timeout(value, default: int = MAX_CODE_TIMEOUT) -> int:
+    """钳制 agent 自撰 routes.json 的 timeout 到 [1, MAX_CODE_TIMEOUT]（FIX-C/N9）。
+
+    agent 自撰的 workspace/apps/{app_id}/routes.json 里可写任意 timeout，此前直接
+    透传给 sandbox.exec_code —— 写入超大值并注册多个 app 即可占满全部 5 个全局
+    沙箱槽，构成平台级 DoS（M14 只钳制了 /api/sandbox/execute）。
+    """
+    try:
+        t = int(value)
+    except (TypeError, ValueError):
+        t = default
+    return min(max(t, 1), MAX_CODE_TIMEOUT)
+
 # ── 路由注册（内存索引，重启后由 route_register 重建）──
 
 _registered_apps: Dict[str, Dict] = {}  # {agent_hash: {app_id: config}}
@@ -199,7 +213,7 @@ async def handle_ai(agent_hash: str, app_id: str, body: Dict, route_config: Dict
     tools = subagent_cfg.get("tools", ["web_search"])
     tool_filter_cfg = subagent_cfg.get("tool_filter", {})
     max_turns = subagent_cfg.get("max_turns", 3)
-    timeout = subagent_cfg.get("timeout", 30)
+    timeout = _clamp_timeout(subagent_cfg.get("timeout", 30))
     model_cfg = subagent_cfg.get("model", {})
 
     # 构建 tool_filter
@@ -306,7 +320,7 @@ async def handle_code(agent_hash: str, app_id: str, body: Dict, route_config: Di
 
     result = sandbox.exec_code(
         code=code_with_env,
-        timeout=route_config.get("timeout", MAX_CODE_TIMEOUT),
+        timeout=_clamp_timeout(route_config.get("timeout", MAX_CODE_TIMEOUT)),
     )
 
     stdout = (result.stdout or "").strip()

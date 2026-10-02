@@ -14,10 +14,8 @@ import shutil
 import base64
 import signal
 import logging
-import ctypes as _ctypes_lib
 import threading
 import subprocess
-import resource
 from typing import Dict, List, Set
 
 from config import settings
@@ -41,6 +39,15 @@ from .network_isolation import NetworkIsolationManager
 
 # Q21/M13：沙箱单流输出上限（结果边界截断；完整流式封顶见报告残余项）
 _MAX_OUTPUT_CHARS = 1_000_000
+# H5 fail-closed：网络隔离不可用时的统一拒绝文案（三条执行路径共用）。
+# 文案必须与实现一致 —— 这里是「拒绝执行」，绝不谎称「已隔离」。
+_NETNS_UNAVAILABLE_MSG = (
+    "Error: 沙箱网络隔离不可用（feclaw-sandbox netns 或 setuid helper 缺失）；"
+    "为安全起见已拒绝执行。请联系管理员初始化沙箱网络命名空间后重试。"
+)
+# H6/N11：bwrap 进程自身（沙箱 PID namespace 的 PID 1）只继承最小环境，
+# 防止 /proc/1/environ 泄露 JWT_SECRET / DATABASE_URL / API Key。
+_BWRAP_MIN_ENV = {"PATH": "/usr/bin:/bin"}
 from .tool_log_service import is_tool_log_cos_key
 
 logger = logging.getLogger(__name__)
@@ -314,6 +321,13 @@ class SandboxManager:
                 from services.vfs_fuse_daemon import touch_sandbox_fuse
                 touch_sandbox_fuse(self._fuse_mount_dir)
 
+            # H5 fail-closed：网络隔离不可用 ⇒ 拒绝执行（与 _execute_with_bwrap 同口径）
+            if NetworkIsolationManager.get_netns_prefix() is None:
+                return ExecResult(
+                    stdout="", stderr=_NETNS_UNAVAILABLE_MSG,
+                    exit_code=1, sandbox_id=sandbox_id
+                )
+
             script_path = f"/tmp/sandbox_bash_{sandbox_id}.sh"
             os.makedirs(os.path.dirname(script_path), exist_ok=True)
             with open(script_path, "w", encoding="utf-8") as f:
@@ -324,6 +338,7 @@ class SandboxManager:
 
             result = subprocess.run(
                 bwrap_cmd, capture_output=True, text=True, timeout=timeout,
+                env=_BWRAP_MIN_ENV,
             )
 
             return self._make_result(
@@ -438,10 +453,9 @@ class SandboxManager:
         entry = ["/usr/bin/env", "-i", *self._build_sandbox_env(),
                  "/seccomp-enforcer", "/bin/bash", script_path]
 
-        if NetworkIsolationManager.check():
-            return NetworkIsolationManager.get_netns_prefix() + opts + entry
-        else:
-            return opts + entry
+        # H5：网络隔离可用时才拼 helper 前缀；否则返回空前缀（调用方在
+        # _exec_bash_via_sandbox 已 fail-closed 拒绝，这里不会被执行）。
+        return (NetworkIsolationManager.get_netns_prefix() or []) + opts + entry
 
     # ========================================================================
     # 友好错误转译
@@ -550,10 +564,13 @@ class SandboxManager:
 
     def _execute_with_bwrap(self, code: str, timeout: int,
                             sandbox_id: str) -> ExecResult:
-        """通过 bubblewrap 安全执行"""
-        if not NetworkIsolationManager.check():
-            logger.warning("Netns not available: sandbox will run with the host network namespace "
-                           "(network isolation is NOT enforced on this host)")
+        """通过 bubblewrap 安全执行（H5 fail-closed：无网络隔离即拒绝）"""
+        # H5：网络隔离（netns + helper）不可用 ⇒ 拒绝执行，绝不退回宿主网络
+        if NetworkIsolationManager.get_netns_prefix() is None:
+            return ExecResult(
+                stdout="", stderr=_NETNS_UNAVAILABLE_MSG,
+                exit_code=1, sandbox_id=sandbox_id
+            )
         try:
             # 写入临时脚本
             script_path = f"/tmp/sandbox_exec_{sandbox_id}.py"
@@ -565,11 +582,13 @@ class SandboxManager:
             bwrap_cmd = self._build_bwrap_command(script_path, timeout)
 
             # 执行（helper 负责 netns + rlimits，seccomp 由 Python bootstrap 安装）
+            # H6/N11：bwrap 自身（PID 1）只继承最小环境，不透传服务端密钥
             result = subprocess.run(
                 bwrap_cmd,
                 capture_output=True,
                 text=True,
                 timeout=timeout,
+                env=_BWRAP_MIN_ENV,
             )
 
             return self._make_result(
@@ -585,52 +604,6 @@ class SandboxManager:
         except FileNotFoundError:
             return ExecResult(
                 stdout="", stderr="Error: bwrap 执行失败",
-                exit_code=1, sandbox_id=sandbox_id
-            )
-
-    def _execute_with_subprocess_safe(self, code: str, timeout: int,
-                                      sandbox_id: str) -> ExecResult:
-        """通过 subprocess.run 执行（带回退资源限制 + chdir + env 清理）"""
-        try:
-            script_path = f"/tmp/sandbox_exec_{sandbox_id}.py"
-            os.makedirs(os.path.dirname(script_path), exist_ok=True)
-            with open(script_path, "w", encoding="utf-8") as f:
-                f.write(code)
-
-            env = os.environ.copy()
-            env["PYTHONDONTWRITEBYTECODE"] = "1"
-            env["PYTHONWARNINGS"] = "ignore"
-            # 清理危险环境变量
-            env.pop("LD_PRELOAD", None)
-            env.pop("LD_LIBRARY_PATH", None)
-
-            # 优先用 venv python3（系统 python3.8 有兼容问题）
-            from config import settings as _sttngs
-            _pip3 = os.path.join(_sttngs.FECLAW_VENV_PATH, "bin", "python3")
-            _python3_cmd = _pip3 if os.path.exists(_pip3) else "python3"
-            result = subprocess.run(
-                [_python3_cmd, script_path],
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                env=env,
-                cwd="/tmp",
-                preexec_fn=self._make_preexec_fn()
-            )
-
-            return self._make_result(
-                stdout=result.stdout, stderr=result.stderr,
-                returncode=result.returncode, sandbox_id=sandbox_id
-            )
-
-        except subprocess.TimeoutExpired:
-            return ExecResult(
-                stdout="", stderr=f"执行超时 ({timeout}s)",
-                exit_code=124, timed_out=True, sandbox_id=sandbox_id
-            )
-        except Exception as e:
-            return ExecResult(
-                stdout="", stderr=f"Error: {e}",
                 exit_code=1, sandbox_id=sandbox_id
             )
 
@@ -784,72 +757,9 @@ class SandboxManager:
         entry = ["/usr/bin/env", "-i", *self._build_sandbox_env(),
                  "/seccomp-enforcer", python_bin, script_path]
 
-        if NetworkIsolationManager.check():
-            return NetworkIsolationManager.get_netns_prefix() + opts + entry
-        else:
-            return opts + entry
-
-    def _make_preexec_fn(self):
-        """创建 preexec_fn：资源限制 + no_new_privs + cap_eff_drop + seccomp"""
-        config = self.config
-        bpf_prog = _SECCOMP_BPF
-
-        def preexec():
-            # 1. 资源限制
-            memory_bytes = config.memory_limit_mb * 1024 * 1024
-            resource.setrlimit(resource.RLIMIT_AS, (memory_bytes, memory_bytes))
-            resource.setrlimit(
-                resource.RLIMIT_CPU,
-                (config.execution_timeout, config.execution_timeout)
-            )
-            resource.setrlimit(
-                resource.RLIMIT_NPROC,
-                (config.max_processes, config.max_processes)
-            )
-            resource.setrlimit(
-                resource.RLIMIT_NOFILE,
-                (config.max_open_files, config.max_open_files)
-            )
-
-            # 2. no_new_privs + cap_eff + seccomp（仅 x86_64）
-            if bpf_prog is None:
-                return
-
-            libc = _ctypes_lib.CDLL("libc.so.6", use_errno=True)
-
-            # PR_SET_NO_NEW_PRIVS — 禁止 execve 提权
-            PR_SET_NO_NEW_PRIVS = 38
-            libc.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)
-
-            # PR_CAPBSET_DROP — 清空 capability bounding set
-            PR_CAPBSET_DROP = 24
-            for cap in range(64):
-                try:
-                    libc.prctl(PR_CAPBSET_DROP, cap, 0, 0, 0)
-                except Exception:
-                    pass
-
-            # PR_SET_SECCOMP — 应用 BPF seccomp 过滤器
-            PR_SET_SECCOMP = 22
-            SECCOMP_MODE_FILTER = 2
-
-            ninsns = len(bpf_prog) // 8
-            FilterArray = _ctypes_lib.c_ubyte * len(bpf_prog)
-            filter_arr = FilterArray.from_buffer_copy(bpf_prog)
-
-            class SockFprog(_ctypes_lib.Structure):
-                _fields_ = [
-                    ("len", _ctypes_lib.c_ushort),
-                    ("filter_ptr", _ctypes_lib.c_void_p),
-                ]
-
-            prog = SockFprog()
-            prog.len = ninsns
-            prog.filter_ptr = _ctypes_lib.cast(filter_arr, _ctypes_lib.c_void_p)
-
-            libc.prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, _ctypes_lib.byref(prog))
-
-        return preexec
+        # H5：网络隔离可用时才拼 helper 前缀；否则返回空前缀（调用方在
+        # _execute_with_bwrap / start_background 已 fail-closed 拒绝）。
+        return (NetworkIsolationManager.get_netns_prefix() or []) + opts + entry
 
     # ========================================================================
     # 后台任务
@@ -878,6 +788,11 @@ class SandboxManager:
             _global_concurrency_limiter.release(task_id)
             return "Error: 沙箱不可用（bwrap 未安装），后台任务拒绝执行"
 
+        # H5 fail-closed：网络隔离（netns + helper）不可用 ⇒ 拒绝执行
+        if NetworkIsolationManager.get_netns_prefix() is None:
+            _global_concurrency_limiter.release(task_id)
+            return _NETNS_UNAVAILABLE_MSG
+
         sandbox_token = None
         try:
             # 与前台 exec_code 同构：确保 FUSE、注册 token、构建注入代码
@@ -901,11 +816,13 @@ class SandboxManager:
 
             # Q20/H4：与前台同构 —— 走 bwrap（含 env -i 白名单 + netns 前缀）
             bwrap_cmd = self._build_bwrap_command(script_path, None)
+            # H6/N11：bwrap 自身（PID 1）只继承最小环境，不透传服务端密钥
             process = subprocess.Popen(
                 bwrap_cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
+                env=_BWRAP_MIN_ENV,
             )
 
             task = BackgroundTask(id=task_id, name=name, process=process, port=port, sandbox_token=sandbox_token)
@@ -929,22 +846,10 @@ class SandboxManager:
 
             # Q21/M14：任务**自然结束**（进程退出）时释放并发槽 + 注销 token。
             # 原实现只在 stop_background 里释放 —— 任务自然结束后槽位永久泄漏，
-            # 5 个槽位被耗尽即平台级 DoS。reaper 只在任务仍被追踪时动手，
-            # 与 stop_background 互斥，避免重复释放。
-            def _reap(task_id, process):
-                try:
-                    process.wait()
-                except Exception:
-                    pass
-                t = self._background_tasks.get(task_id)
-                if t is not None and t.process is process:
-                    t.status = "exited"
-                    _global_concurrency_limiter.release(task_id)
-                    if t.sandbox_token:
-                        unregister_sandbox_token(t.sandbox_token)
-                        t.sandbox_token = ""
-                    logger.info(f"[Sandbox] Background task {task_id} exited, slot released")
-            threading.Thread(target=_reap, args=(task_id, process), daemon=True).start()
+            # 5 个槽位被耗尽即平台级 DoS。reaper 只在任务仍被追踪时动手。
+            threading.Thread(
+                target=self._reap_background, args=(task_id, process), daemon=True
+            ).start()
 
             self._background_tasks[task_id] = task
             logger.info(f"[Sandbox] Started background task {task_id}: {name}")
@@ -956,17 +861,46 @@ class SandboxManager:
             logger.error(f"[Sandbox] Failed to start background task {task_id}: {e}")
             return f"Error: 后台任务启动失败: {e}"
 
+    def _reap_background(self, task_id: str, process) -> None:
+        """后台任务自然退出时的清理（N10：与 stop_background 共用幂等释放）。"""
+        try:
+            process.wait()
+        except Exception:
+            pass
+        t = self._background_tasks.get(task_id)
+        if t is not None and t.process is process:
+            t.status = "exited"
+            self._release_background_slot(task_id, t)
+            logger.info(f"[Sandbox] Background task {task_id} exited, slot released")
+
+    def _release_background_slot(self, task_id: str, task) -> None:
+        """幂等释放后台任务槽位 + 注销 token（N10）。
+
+        reaper 与 stop_background 并发时，两者都可能走到释放路径。旧的
+        `already_exited = poll()` 快照 + 条件释放存在竞态：reaper 在 poll()
+        之后、释放之前释放，会导致同一槽被 DECR 两次（Redis 计数漂移，
+        acquire 可放行超过 SANDBOX_MAX_CONCURRENT）；反之 stop_background
+        见 poll() 已退出而不释放、reaper 又因任务已 del 而跳过，则槽位永久
+        泄漏。这里用 per-task 锁 + released 标志把释放收敛为「恰好一次」。
+        """
+        with task._release_lock:
+            if task.released:
+                return
+            task.released = True
+            token = task.sandbox_token
+            task.sandbox_token = ""
+        _global_concurrency_limiter.release(task_id)
+        if token:
+            unregister_sandbox_token(token)
+
     def stop_background(self, task_id: str) -> bool:
-        """停止后台任务（Q21/M14：对已自然退出的任务幂等，不重复释放槽位）"""
+        """停止后台任务（N10：释放走幂等 _release_background_slot，绝不重复/泄漏）"""
         task = self._background_tasks.get(task_id)
         if not task:
             return False
 
-        # 若 reaper 已判定进程退出并释放过槽位，这里跳过 terminate/release，
-        # 只把任务从 dict 移除（in-memory 释放幂等，Redis 释放不幂等，必须防重复）
-        already_exited = task.process.poll() is not None
         try:
-            if not already_exited:
+            if task.process.poll() is None:
                 task.process.terminate()
                 try:
                     task.process.wait(timeout=5)
@@ -975,10 +909,7 @@ class SandboxManager:
                     task.process.wait()
 
             del self._background_tasks[task_id]
-            if not already_exited:
-                _global_concurrency_limiter.release(task_id)
-                if task.sandbox_token:
-                    unregister_sandbox_token(task.sandbox_token)
+            self._release_background_slot(task_id, task)
             logger.info(f"[Sandbox] Stopped background task {task_id}")
             return True
         except Exception as e:

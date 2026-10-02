@@ -14,6 +14,7 @@ Architecture:
 import os
 import logging
 import subprocess
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -58,8 +59,8 @@ class NetworkIsolationManager:
             return False
 
     @classmethod
-    def get_netns_prefix(cls) -> list:
-        """Return the setuid helper path to enter the sandbox netns.
+    def get_netns_prefix(cls) -> Optional[list]:
+        """Return the setuid helper path to enter the sandbox netns, or None.
 
         Returns ["/usr/local/libexec/feclaw/helper"] — prepend this
         before bwrap in the command line:
@@ -73,13 +74,24 @@ class NetworkIsolationManager:
         4. Drops privileges: setgroups(0) + setgid + setuid (EUID=lch)
         5. Execs bwrap as user lch with seccomp active
 
-        Fallback: returns empty list if helper doesn't exist
-        (sandbox runs without network isolation)
+        H5 fail-closed: returns None when network isolation is NOT fully
+        available — i.e. the feclaw-sandbox netns is missing OR the helper
+        binary is missing. Callers MUST refuse execution on None and never
+        fall back to running with the host network namespace.
         """
+        if not cls.check():
+            logger.warning(
+                "Sandbox netns '%s' unavailable — execution must be refused "
+                "(fail-closed, no network isolation)", NETNS_NAME,
+            )
+            return None
         if os.path.exists(HELPER_PATH) and os.access(HELPER_PATH, os.X_OK):
             return [HELPER_PATH]
-        logger.warning("Netns helper not found at %s, falling back", HELPER_PATH)
-        return []
+        logger.warning(
+            "Netns helper not found at %s — execution must be refused "
+            "(fail-closed, no network isolation)", HELPER_PATH,
+        )
+        return None
 
     @classmethod
     def cleanup(cls) -> None:

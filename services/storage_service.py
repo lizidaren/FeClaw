@@ -501,8 +501,11 @@ class CosStorage(FileStorage):
                         ],
                         "effect": "allow",
                         "resource": ["*"],
+                        # FIX-C/C4：腾讯云 COS 条件键统一为小写 `cos:prefix`。
+                        # 官方条件键均为小写（cos:content-length / cos:content-type /
+                        # cos:prefix），大小写敏感 —— 此前大写 `cos:Prefix` 必然失效。
                         "condition": {
-                            "string_like": {"cos:Prefix": f"{prefix}*"}
+                            "string_like": {"cos:prefix": f"{prefix}*"}
                         }
                     },
                     {
