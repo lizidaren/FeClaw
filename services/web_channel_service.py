@@ -26,6 +26,7 @@ from services.chat_service import ChatService
 from models.chat_input import ChatInput, Attachment
 from services.storage_service import StorageService
 from services.vfs_image_dedup import VFSImageDeduplicationService
+from utils.url_validation import validate_public_http_url
 
 # 渠道定义
 CHANNEL_WECHAT = "wechat"
@@ -71,8 +72,11 @@ async def _download_and_save_image_to_vfs(image_url: str, user_id: int, agent_ha
             header, data = image_url.split(',', 1)
             image_bytes = base64.b64decode(data)
         else:
-            # 下载 URL
-            async with httpx.AsyncClient(timeout=30.0) as client:
+            # 下载 URL（Q19/C8：SSRF 防护 —— 禁私网/回环/云元数据）
+            if not validate_public_http_url(image_url):
+                logger.warning(f"[FeClaw] SSRF blocked: {image_url!r}")
+                return None, None
+            async with httpx.AsyncClient(timeout=30.0, follow_redirects=False) as client:
                 response = await client.get(image_url)
                 response.raise_for_status()
                 image_bytes = response.content

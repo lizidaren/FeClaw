@@ -25,6 +25,7 @@ from services.wechat_service import wechat_service, WeChatService
 from config import settings
 from services.wechat_channel_service import WeChatChannelService
 from utils.auth import get_current_user
+from utils.url_validation import validate_public_http_url
 
 logger = logging.getLogger(__name__)
 
@@ -414,7 +415,10 @@ async def _download_and_save_image_to_vfs(image_url: str, user_id: int, agent_ha
             image_bytes = base64.b64decode(data)
         else:
             import httpx
-            async with httpx.AsyncClient(timeout=30.0) as client:
+            if not validate_public_http_url(image_url):
+                logger.warning(f"[WeChat] SSRF blocked: {image_url!r}")
+                return None
+            async with httpx.AsyncClient(timeout=30.0, follow_redirects=False) as client:
                 response = await client.get(image_url)
                 response.raise_for_status()
                 image_bytes = response.content

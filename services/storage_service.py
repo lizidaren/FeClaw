@@ -508,7 +508,11 @@ class CosStorage(FileStorage):
                     {
                         "action": ["name/cos:GetBucket", "name/cos:ListBucket"],
                         "effect": "allow",
-                        "resource": ["*"]
+                        "resource": ["*"],
+                        # Q19/C4：ListBucket 也加前缀条件 —— 否则可枚举整桶所有租户的对象键名
+                        "condition": {
+                            "string_like": {"cos:prefix": f"{prefix}*"}
+                        }
                     }
                 ]
             }

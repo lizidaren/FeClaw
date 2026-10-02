@@ -28,16 +28,25 @@ const Auth = {
    * @returns {Promise<boolean>} 是否已认证
    */
   async checkAuthBeforeRender() {
-    // 0. 检查 URL 参数中的 token（SSO 同步回调或 OAuth 回调）
+    // 0. 检查 URL 参数 / fragment 中的 token（SSO 同步回调或 OAuth 回调）
     //    先保存 token，防止后续检查因无 token 而跳转
     const urlParams = new URLSearchParams(window.location.search);
-    const urlToken = urlParams.get('token');
+    let urlToken = urlParams.get('token');
+    let cleanedUrl = null;
+    if (urlToken) {
+      urlParams.delete('token');
+      cleanedUrl = window.location.pathname + (urlParams.toString() ? '?' + urlParams.toString() : '');
+    } else if (window.location.hash && window.location.hash.indexOf('#token=') === 0) {
+      // Q19/C7：SSO sync 现在把 token 放 fragment（#token=），不进 query/Referer
+      urlToken = window.location.hash.substring('#token='.length);
+      cleanedUrl = window.location.pathname + window.location.search;
+    }
     if (urlToken) {
       this.setToken(urlToken);
       // 清理 URL 中的 token，避免泄露
-      urlParams.delete('token');
-      const newUrl = window.location.pathname + (urlParams.toString() ? '?' + urlParams.toString() : '');
-      window.history.replaceState({}, '', newUrl);
+      if (cleanedUrl !== null) {
+        window.history.replaceState({}, '', cleanedUrl);
+      }
     }
 
     const token = this.getToken();

@@ -1002,28 +1002,53 @@ async def get_available_tools():
 # 公共配置 API
 # ==========================================
 
-_SENSITIVE_KEYWORDS = ("SECRET", "KEY", "PASSWORD")
+# Q19/C6：显式白名单 —— 原实现是「含 SECRET/KEY/PASSWORD 关键字的黑名单」，
+# 导致 DATABASE_URL（含 MySQL 口令）、SETUP_TOKEN、MYSQL_USER/HOST 等被匿名读走。
+# 现在只回显这些明确安全的特性开关 / 模型名 / 公开域名，永不回显 *_URL / *_TOKEN。
+_PUBLIC_CONFIG_WHITELIST = (
+    "DEBUG",
+    "FECLAW_PUBLIC_URL",
+    "FECLAW_SUBDOMAIN_ENABLED",
+    "FECLAW_CDN_DOMAIN",
+    "FECLAW_API_DOMAIN",
+    "FECLAW_STATIC_DOMAIN",
+    "OAUTH_ENABLED",
+    "OAUTH_PROVIDER_NAME",
+    "DEFAULT_LLM_PROVIDER",
+    "DEFAULT_LLM_MODEL",
+    "DEFAULT_VISION_MODEL",
+    "DEFAULT_EMBEDDING_MODEL",
+    "MAIN_TEXT_MODEL",
+    "MAIN_VISION_MODEL",
+    "MAIN_EMBEDDING_MODEL",
+    "VISION_SPEED_MODEL",
+    "VISION_HEAVY_MODEL",
+    "TTS_MODEL",
+    "AGENT_LLM_MODEL",
+    "DEFAULT_SEARCH_ENGINE",
+    "TOTP_STRICT_OWNERSHIP",
+    "SANDBOX_MAX_CONCURRENT",
+    "MAX_UPLOAD_SIZE",
+    "ALLOWED_EXTENSIONS",
+    "STATIC_SITE_MAX_SIZE",
+    "FUSE_ENABLED",
+    "SESSION_MEMORY_ENABLED",
+)
 
 @router.get("/public-config")
 async def get_public_config():
     """
     返回非敏感配置，方便前端读取
 
-    敏感字段（包含 SECRET、KEY、PASSWORD 的字段）不会暴露。
+    Q19/C6：改为显式白名单，只回显列出的字段；
+    永不回显 DATABASE_URL / SETUP_TOKEN / 任何 *_TOKEN / *_SECRET / *_KEY / *_PASSWORD。
     """
     config_data = {}
-    for field_name in dir(settings):
-        if field_name.startswith("_"):
-            continue
-        if any(kw in field_name.upper() for kw in _SENSITIVE_KEYWORDS):
-            continue
+    for field_name in _PUBLIC_CONFIG_WHITELIST:
         value = getattr(settings, field_name, None)
         if callable(value):
             continue
         try:
-            # 真正做一次序列化探测 —— 赋值本身不会抛错，之前是“假校验”，
-            # 导致 model_fields（含 FieldInfo）/ model_fields_set（set）漏进来 →
-            # JSONResponse 渲染时 TypeError → 整个接口 500。
             json.dumps(value)
         except (TypeError, ValueError):
             continue

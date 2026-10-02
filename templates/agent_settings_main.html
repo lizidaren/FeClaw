@@ -353,7 +353,7 @@
                             <input type="text" id="shareLinkInput" readonly style="flex:1;padding:8px 10px;background:#1a1a2e;border:1px solid #2a2a4a;border-radius:6px;color:#667eea;font-size:13px;">
                             <button class="btn btn-sm btn-outline" onclick="navigator.clipboard.writeText(document.getElementById('shareLinkInput').value).then(()=>showToast('已复制'))" style="white-space:nowrap;">复制</button>
                         </div>
-                        <p style="color:#888;font-size:12px;">验证码 <span id="shareCode" style="color:#e0e0e0;font-weight:600;"></span> · 5 分钟内有效</p>
+                        <p style="color:#888;font-size:12px;">扫码登录 <span id="shareCode" style="color:#e0e0e0;font-weight:600;"></span> · 5 分钟内有效</p>
                     </div>
                 </div>
 
@@ -720,7 +720,12 @@
                 const data = await res.json();
                 if (res.ok) {
                     document.getElementById('shareLinkInput').value = data.login_url;
-                    document.getElementById('shareCode').textContent = data.code;
+                    const codeEl = document.getElementById('shareCode');
+                    if (data.qr_data_url) {
+                        codeEl.innerHTML = '<img src="' + data.qr_data_url + '" style="width:120px;height:120px;border-radius:8px;vertical-align:middle;" alt="TOTP QR">';
+                    } else {
+                        codeEl.textContent = '(扫码登录)';
+                    }
                     document.getElementById('shareLinkResult').style.display = 'block';
                     showToast('分享链接已生成');
                 } else {

@@ -432,21 +432,8 @@ async def lifespan(app: FastAPI):
             logger.info("  ⚠️ 请立即登录并修改密码！")
             logger.info("=" * 60)
 
-        # 创建测试用户
-        test_user = db.query(User).filter(User.username == "test").first()
-        if not test_user:
-            import hashlib
-            default_password = hashlib.sha256("test".encode()).hexdigest()
-            test_user = User(
-                username="test",
-                password_hash=hash_password(default_password),
-                salt=None,
-                password_version=2,
-                is_admin=False
-            )
-            db.add(test_user)
-            db.commit()
-            logger.info("Created test user (password: test, bcrypt)")
+        # Q19/H12：不再自动创建 `test` 账号 —— 口令由源码决定（sha256("test")），
+        # 任何部署都会有一个可推导凭据的账号，构成在野风险。已删除该创建逻辑。
     finally:
         db.close()
 

@@ -28,6 +28,7 @@ from services.sandbox_manager import (
 from services.virtual_filesystem import VirtualFileSystem
 from models.database import SessionLocal, AgentProfile
 from config import settings
+from utils.agent_access import require_agent_owner
 
 logger = logging.getLogger(__name__)
 
@@ -120,17 +121,21 @@ async def sandbox_execute(req: ExecuteRequest, user: User = Depends(get_current_
             stdout="", stderr="Error: Empty code", exit_code=1, sandbox_id=""
         )
 
-    # 获取 SandboxManager
+    if not req.agent_hash:
+        return ExecuteResponse(
+            stdout="", stderr="Error: agent_hash is required",
+            exit_code=1, sandbox_id=""
+        )
+
+    # Q19/H3：归属校验 —— 只能对自己的 agent 执行沙箱（否则 403）
+    db = SessionLocal()
     try:
-        manager = _get_sandbox_manager(req.agent_hash)
-    except HTTPException:
-        # 无 agent_hash 时，尝试默认
-        manager = None
-        if not req.agent_hash:
-            return ExecuteResponse(
-                stdout="", stderr="Error: agent_hash is required",
-                exit_code=1, sandbox_id=""
-            )
+        require_agent_owner(db, req.agent_hash, user)
+    finally:
+        db.close()
+
+    # 获取 SandboxManager
+    manager = _get_sandbox_manager(req.agent_hash)
 
     # 获取 Agent 配置（parallel_sandbox, lock_behavior）
     parallel = req.parallel
@@ -182,9 +187,11 @@ async def sandbox_status(user: User = Depends(get_current_user)):
 
 @router.post("/{sandbox_id}/stop")
 async def sandbox_stop(sandbox_id: str, user: User = Depends(get_current_user)):
-    """停止后台沙箱任务"""
-    # 遍历所有 manager 查找任务
+    """停止后台沙箱任务（Q19/H3：只允许停止自己的任务）"""
+    # 只遍历当前用户自己的 manager —— 防止跨租户停止他人任务
     for manager in _sandbox_managers.values():
+        if str(manager.user_id) != str(user.id):
+            continue
         if manager.stop_background(sandbox_id):
             return {"stopped": True}
     return {"stopped": False, "error": "Task not found"}

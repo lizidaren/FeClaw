@@ -513,15 +513,30 @@ class SandboxManager:
 
     def _execute_with_sandbox(self, code: str, timeout: int,
                               sandbox_id: str) -> ExecResult:
-        """选择 bwrap 或 subprocess 执行（bwrap 失败自动回退）"""
+        """bwrap 沙箱执行（Q19/C1：fail-closed，绝不回退到无隔离 subprocess）。
 
-        if self._bwrap_available:
-            result = self._execute_with_bwrap(code, timeout, sandbox_id)
-            if result.exit_code == 0:
-                return result
-            if "bwrap" in (result.stderr or "").lower():
-                logger.warning(f"[Sandbox] bwrap failed, fallback: {result.stderr[:200]}")
-        return self._execute_with_subprocess_safe(code, timeout, sandbox_id)
+        审计 C1：原实现会在 bwrap 内进程非 0 退出时，把**同一份代码**用
+        `_execute_with_subprocess_safe`（无 namespace / 无 bind-mount 白名单，
+        以服务账号看到整台主机）重跑一遍 —— 任何抛异常或非 0 退出的脚本都会
+        自动触发，构成主机 RCE。修复后：非 0 就是非 0，如实返回；bwrap 不可用
+        时直接拒绝执行。
+        """
+        if not self._bwrap_available:
+            return ExecResult(
+                stdout="",
+                stderr=("Error: sandbox unavailable (bwrap not found on host); "
+                        "execution refused for safety"),
+                exit_code=1,
+                sandbox_id=sandbox_id,
+            )
+
+        result = self._execute_with_bwrap(code, timeout, sandbox_id)
+        if result.exit_code == 0:
+            return result
+        # bwrap 内进程非 0 退出 —— 只记录，**不重跑**（fail-closed）
+        if "bwrap" in (result.stderr or "").lower():
+            logger.warning(f"[Sandbox] bwrap failed (no fallback): {result.stderr[:200]}")
+        return result
 
     def _execute_with_bwrap(self, code: str, timeout: int,
                             sandbox_id: str) -> ExecResult:

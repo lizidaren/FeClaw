@@ -242,6 +242,30 @@ async def auth_options(host: str = Query(None), request: Request = None):
 
 # ==================== SSO 同步端点 ====================
 
+def _safe_sync_hostname(host: str) -> Optional[str]:
+    """Q19/C7：把 query 的 `host` 解析成 hostname 并做后缀白名单校验。
+
+    - 未配置 FECLAW_PUBLIC_URL → 一律返回 None（不信任任何外部 host，只做同源跳转）
+    - 用 `urlparse(...).hostname` 精确比较，堵住原 `host.endswith(".feclaw.chat")`
+      被 `attacker.com/.feclaw.chat` 绕过的整串匹配漏洞。
+
+    返回 None 表示不信任（fallback 到同源路径，绝不放行外部 host）。
+    """
+    from urllib.parse import urlparse
+    feclaw_domain = settings.FECLAW_PUBLIC_URL
+    if not feclaw_domain or not host:
+        return None
+    try:
+        h = urlparse(f"//{host}").hostname
+    except Exception:
+        return None
+    if not h or h == feclaw_domain:
+        return None
+    if h.endswith(f".{feclaw_domain}"):
+        return h
+    return None
+
+
 @router.get("/api/auth/sync")
 async def auth_sync(
     request: Request,
@@ -252,13 +276,18 @@ async def auth_sync(
     SSO 同步端点：子域名调用此端点。
     检查根域名 cookie，如果有效则重定向回子域名并携带 token。
 
+    Q19/C7：修复开放重定向 + JWT 进 URL 两个缺陷：
+      - `host` 只允许白名单子域名（urlparse hostname + 后缀精确匹配）；
+      - `redirect` 只允许以 `/` 开头且不以 `//` 开头；
+      - token 改走 URL fragment（`#token=`），不再进入 query（Referer/日志不外泄）。
+
     Query params:
         redirect: 验证成功后重定向到的路径（如 /agent/5178 或 /dashboard）
         host: 原始请求的完整 hostname
 
     流程：
     1. 检查 request 的 cookie 中是否有 feclaw_jwt
-    2. 如果有 && jwt 有效 → 302 到 {host}{redirect}?token=xxx
+    2. 如果有 && jwt 有效 → 302 到 {host}{redirect}#token=xxx
     3. 如果没有/无效 → 302 到 /login（根域名登录页，登录后会重定向回来）
     """
     token = _get_token_from_request(request)
@@ -280,19 +309,16 @@ async def auth_sync(
                 result = None
 
         if result:
-            # Cookie 有效，重定向回子域名并携带 token
-            feclaw_domain = settings.FECLAW_PUBLIC_URL
-            # 没有配置 FECLAW_PUBLIC_URL 时跳过严格校验，直接使用 host
-            if not feclaw_domain:
-                valid_host = bool(host)
+            safe_hostname = _safe_sync_hostname(host)
+            safe_redirect = redirect if (
+                redirect and redirect.startswith("/") and not redirect.startswith("//")
+            ) else "/dashboard"
+            if safe_hostname:
+                redirect_url = f"https://{safe_hostname}{safe_redirect}"
             else:
-                valid_host = host and host.endswith(f".{feclaw_domain}") and host != feclaw_domain
-            if valid_host:
-                redirect_url = f"https://{host}{redirect}"
-            else:
-                # 没有子域名信息，使用 redirect 路径（根域名内跳转）
-                redirect_url = redirect if redirect.startswith("/") else f"/{redirect}"
-            return RedirectResponse(url=f"{redirect_url}?token={token}", status_code=302)
+                # 没有可信子域名信息 → 同源路径跳转（绝不跳外部 host）
+                redirect_url = safe_redirect
+            return RedirectResponse(url=f"{redirect_url}#token={token}", status_code=302)
 
     # Cookie 无效或不存在，重定向到根域名登录页
     return RedirectResponse(url=f"/login?redirect_to={redirect}", status_code=302)
@@ -338,16 +364,43 @@ class FileListResponse(BaseModel):
 
 
 class TOTPGenerateResponse(BaseModel):
-    code: str
     agent_hash: str
     expires_in: int
     login_url: str
     qr_data_url: str = ""
 
 
+# Q19/C2: /api/totp/verify 限流（IP + agent_hash 双维度，防 6 位码在线爆破）
+import time as _time
+from collections import defaultdict as _defaultdict
+_totp_verify_attempts: dict = _defaultdict(list)
+_TOTP_VERIFY_MAX = 10           # 每窗口最多尝试次数
+_TOTP_VERIFY_WINDOW = 300       # 窗口 5 分钟
+_TOTP_VERIFY_CLEAN_THRESHOLD = 10000
+
+
+def _totp_verify_rate_limited(key: str) -> bool:
+    now = _time.time()
+    bucket = [t for t in _totp_verify_attempts.get(key, []) if now - t < _TOTP_VERIFY_WINDOW]
+    if len(bucket) >= _TOTP_VERIFY_MAX:
+        _totp_verify_attempts[key] = bucket
+        return True
+    bucket.append(now)
+    _totp_verify_attempts[key] = bucket
+    if len(_totp_verify_attempts) > _TOTP_VERIFY_CLEAN_THRESHOLD:
+        _stale = [k for k, v in list(_totp_verify_attempts.items())
+                  if all(now - t >= _TOTP_VERIFY_WINDOW for t in v)]
+        for k in _stale:
+            _totp_verify_attempts.pop(k, None)
+    return False
+
+
 @router.post("/api/totp/verify", response_model=TOTPVerifyResponse)
-async def verify_totp(request: TOTPVerifyRequest):
-    """验证 TOTP 并签发 JWT"""
+async def verify_totp(request: TOTPVerifyRequest, req: Request):
+    """验证 TOTP 并签发 JWT（Q19/C2：加 IP+agent_hash 限流）"""
+    client_ip = req.client.host if req.client else "unknown"
+    if _totp_verify_rate_limited(f"{client_ip}:{request.agent_hash}"):
+        raise HTTPException(status_code=429, detail="尝试次数过多，请稍后再试")
     result = TOTPService.verify_agent_totp(request.agent_hash, request.code)
     if not result:
         pass  # HTTPException already imported at module level
@@ -357,19 +410,34 @@ async def verify_totp(request: TOTPVerifyRequest):
 
 @router.post("/api/totp/generate", response_model=TOTPGenerateResponse)
 async def generate_totp(request: TOTPVerifyRequest, user=Depends(get_current_user)):
-    """生成当前 TOTP 码和登录链接（含二维码 data URL）"""
-    result = TOTPService.generate_for_agent(request.agent_hash)
-    if result is None:
-        pass  # HTTPException already imported at module level as HE
-        raise HE(status_code=404, detail="Agent not found")
-    code, secret = result
+    """生成 Agent 的 TOTP 二维码 + 登录链接（Q19/C2：不再返回验证码）。
+
+    Q19/C2 修复：
+      1. 归属校验 —— 只有 agent owner 才能拿二维码/URI（否则 403）；
+      2. 响应移除 `code` —— 验证码只能由 owner 从 authenticator 读取；
+      3. 登录链接不再把 6 位码拼进 URL（?totp=）。
+    """
+    db = SessionLocal()
+    try:
+        agent = db.query(AgentProfile).filter(AgentProfile.hash == request.agent_hash).first()
+        if not agent:
+            raise HTTPException(status_code=404, detail="Agent not found")
+        if str(agent.user_id) != str(user.id):
+            raise HTTPException(status_code=403, detail="无权访问该 Agent")
+        totp_secret = agent.totp_secret
+    finally:
+        db.close()
+
     from utils.qr import generate_qr_data_url
-    totp_uri = f"otpauth://totp/FeClaw:{request.agent_hash}?secret={secret}&issuer=FeClaw"
+    totp_uri = f"otpauth://totp/FeClaw:{request.agent_hash}?secret={totp_secret}&issuer=FeClaw"
+    login_url = (
+        f"https://{request.agent_hash}.{settings.FECLAW_PUBLIC_URL}/login"
+        if settings.FECLAW_SUBDOMAIN_ENABLED else "/login"
+    )
     return TOTPGenerateResponse(
-        code=code,
         agent_hash=request.agent_hash,
         expires_in=TOTPService.VALID_WINDOWS * TOTPService.INTERVAL,
-        login_url=f"https://{request.agent_hash}.{settings.FECLAW_PUBLIC_URL}/login?totp={code}" if settings.FECLAW_SUBDOMAIN_ENABLED else f"/login?totp={code}",
+        login_url=login_url,
         qr_data_url=generate_qr_data_url(totp_uri),
     )
 
@@ -467,6 +535,12 @@ def _read_config_value(agent_hash: str, vpath: str) -> Optional[str]:
 @router.get("/api/files", response_model=FileListResponse)
 async def list_files(request: Request, path: str = "", agent_hash: str = Depends(get_authorized_agent_hash)):
     """列出 VFS 文件（Q12：归属校验由 get_authorized_agent_hash 统一把关）"""
+    # Q19/H14：拒绝绝对路径与 `..`（此前 list_files 缺这个校验，LocalStorage 下
+    # `path=..` 会折叠出 agent 前缀、遍历其它租户的对象键名）
+    import os as _os
+    if _os.path.isabs(path) or ".." in path:
+        raise HTTPException(status_code=400, detail="Invalid path")
+
     # VFS 路径映射
     cos_prefix_base = f"feclaw/agents/{agent_hash}"
     public_prefix_base = "feclaw/public"

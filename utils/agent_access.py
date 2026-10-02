@@ -111,6 +111,16 @@ def user_owns_agent(db: Session, agent_hash: str, user_id) -> bool:
     return agent is not None and str(agent.user_id) == str(user_id)
 
 
+def require_agent_owner(db: Session, agent_hash: str, user) -> None:
+    """Q19：断言 agent 归属；不满足抛 403（与 `get_authorized_agent_hash` 同一口径）。
+
+    供那些**已经手动解析出 agent_hash**（如请求体 / 非域名来源）却尚未校验归属的
+    接口复用（sandbox.py / vfs_view.py 等），避免各处再手写 `if str(...) != str(...)`。
+    """
+    if not agent_hash or not user_owns_agent(db, agent_hash, user.id):
+        raise HTTPException(status_code=403, detail="无权访问该 Agent")
+
+
 async def get_authorized_agent_hash(
     request: Request,
     agent_hash: str = Query(""),
@@ -141,5 +151,6 @@ __all__ = [
     "get_request_domain",
     "resolve_agent_hash",
     "user_owns_agent",
+    "require_agent_owner",
     "get_authorized_agent_hash",
 ]

@@ -16,6 +16,7 @@ from services.chat_service import ChatService
 from services.llm_service import llm_service
 from services.point_service import PointService
 from config import settings
+from utils.url_validation import validate_public_http_url
 
 logger = logging.getLogger(__name__)
 
@@ -787,8 +788,11 @@ async def _image_url_to_b64(image_url: str, agent_hash: Optional[str] = None) ->
                 return base64.b64encode(_data).decode("utf-8")
             return None
 
-        # HTTP(S) URL → 下载
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        # HTTP(S) URL → 下载（Q19/C8：SSRF 防护）
+        if not validate_public_http_url(image_url):
+            logger.warning(f"[WeChat] SSRF blocked: {image_url!r}")
+            return None
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=False) as client:
             resp = await client.get(image_url)
             resp.raise_for_status()
             return base64.b64encode(resp.content).decode("utf-8")
@@ -806,7 +810,10 @@ async def _download_image_base64(image_url: str) -> Optional[str]:
         return None
 
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        if not validate_public_http_url(image_url):
+            logger.warning(f"[WeChat] SSRF blocked: {image_url!r}")
+            return None
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=False) as client:
             response = await client.get(image_url)
             response.raise_for_status()
             image_bytes = response.content
@@ -839,7 +846,10 @@ async def download_and_save_image_to_vfs(image_url: str, user_id: int, agent_has
             image_bytes = base64.b64decode(data)
         else:
             import httpx
-            async with httpx.AsyncClient(timeout=30.0) as client:
+            if not validate_public_http_url(image_url):
+                logger.warning(f"[WeChat] SSRF blocked: {image_url!r}")
+                return None
+            async with httpx.AsyncClient(timeout=30.0, follow_redirects=False) as client:
                 response = await client.get(image_url)
                 response.raise_for_status()
                 image_bytes = response.content

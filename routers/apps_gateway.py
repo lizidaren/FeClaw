@@ -13,11 +13,12 @@ import json
 import logging
 import re
 from typing import Optional, Dict
-from fastapi import APIRouter, Request, HTTPException
+from fastapi import APIRouter, Request, HTTPException, Depends
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel
 
 from routers.feclaw_domain import extract_hash_from_host, get_user_for_page
+from utils.agent_access import get_authorized_agent_hash
 from services.apps_service import (
     handle_static, handle_ai, handle_code, handle_data,
     get_app_config, list_registered_apps, check_rate_limit,
@@ -75,10 +76,17 @@ class RegisterRequest(BaseModel):
 
 
 @router.post("/api/apps/register")
-async def api_register_app(body: RegisterRequest, request: Request):
-    """注册 App（Route Register Tool 的后端接口）"""
-    agent_hash = _get_agent_hash(request)
-    if not agent_hash or not _validate_id(agent_hash, "agent_hash"):
+async def api_register_app(
+    body: RegisterRequest,
+    request: Request,
+    agent_hash: str = Depends(get_authorized_agent_hash),
+):
+    """注册 App（Route Register Tool 的后端接口）。
+
+    Q19/H1：加鉴权 + 归属校验 —— agent_hash 由 get_authorized_agent_hash 从
+    （白名单校验后的）域名解析并校验归属，未登录/非 owner 一律 401/403。
+    """
+    if not _validate_id(agent_hash, "agent_hash"):
         raise HTTPException(status_code=400, detail="Invalid agent hash")
     if not _validate_id(body.app_id):
         raise HTTPException(status_code=400, detail="Invalid app_id (1-32 chars, letters/digits/hyphens)")
@@ -92,10 +100,13 @@ async def api_register_app(body: RegisterRequest, request: Request):
 
 
 @router.delete("/api/apps/{app_id}")
-async def api_unregister_app(app_id: str, request: Request):
-    """注销 App"""
-    agent_hash = _get_agent_hash(request)
-    if not agent_hash or not _validate_id(agent_hash, "agent_hash"):
+async def api_unregister_app(
+    app_id: str,
+    request: Request,
+    agent_hash: str = Depends(get_authorized_agent_hash),
+):
+    """注销 App（Q19/H1：加鉴权 + 归属校验）"""
+    if not _validate_id(agent_hash, "agent_hash"):
         raise HTTPException(status_code=400, detail="Invalid agent hash")
     if not _validate_id(app_id):
         raise HTTPException(status_code=400, detail="Invalid app_id")
@@ -107,10 +118,12 @@ async def api_unregister_app(app_id: str, request: Request):
 
 
 @router.get("/api/apps")
-async def api_list_apps(request: Request):
-    """列出已注册的 App"""
-    agent_hash = _get_agent_hash(request)
-    if not agent_hash or not _validate_id(agent_hash, "agent_hash"):
+async def api_list_apps(
+    request: Request,
+    agent_hash: str = Depends(get_authorized_agent_hash),
+):
+    """列出已注册的 App（Q19/H1：加鉴权 + 归属校验）"""
+    if not _validate_id(agent_hash, "agent_hash"):
         raise HTTPException(status_code=400, detail="Invalid agent hash")
 
     return {"apps": list_registered_apps(agent_hash)}

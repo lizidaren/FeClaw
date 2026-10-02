@@ -54,13 +54,20 @@ async def _get_setup_auth(
     request: Request,
     token: str = Query("", alias="token"),
 ):
-    """冷启动用 token 鉴权，正常模式用 JWT 管理员鉴权。"""
+    """冷启动用 token 鉴权，正常模式用 JWT 管理员鉴权。
+
+    Q19/C5：原实现在冷启动鉴权失败时 `return HTMLResponse(403)` —— FastAPI 会把
+    依赖的返回值注入参数而**不会**中断请求，导致端点照常执行并提交。现在改为
+    `raise HTTPException(403)`（fail-closed），只有抛出异常才会真正终止请求。
+    """
     if _is_cold_start():
         # 冷启动：验证 setup token
         expected = (settings.SETUP_TOKEN or "").strip()
         if not expected or not token or token.strip() != expected:
-            from fastapi.responses import HTMLResponse
-            return HTMLResponse(INVALID_TOKEN_HTML, status_code=403)
+            raise HTTPException(
+                status_code=403,
+                detail="Invalid or missing setup token",
+            )
         return None  # 无 user 对象
     else:
         # 正常模式：走 JWT 管理员鉴权
@@ -87,10 +94,15 @@ def _is_cold_start() -> bool:
 def verify_setup_token(token: str = Query("", alias="token")) -> bool:
     """冷启动鉴权：URL ?token=<SETUP_TOKEN>。
 
-    非冷启动时（SETUP_COMPLETE=true）此依赖直接放行 —— 由后续 get_admin_user 接管。
+    Q19/C9：原实现非冷启动时 `return True` 直接放行，导致 `/setup/admin`、
+    `/setup/database` 在正常模式下匿名可用。现在非冷启动直接 404（拒绝），
+    冷启动必须校验 token。
     """
     if not _is_cold_start():
-        return True
+        raise HTTPException(
+            status_code=404,
+            detail="Setup token is not valid in normal mode",
+        )
     expected = (settings.SETUP_TOKEN or "").strip()
     if not expected:
         raise HTTPException(
@@ -367,9 +379,12 @@ async def setup_database(
 @router.post("/admin")
 async def setup_admin(
     payload: AdminWithDbPayload,
-    _: bool = Depends(verify_setup_token),
+    _setup_user = Depends(_get_setup_auth),
 ):
     """Step 2：连接 DB + 建表 + 建 admin（一次性完成）。
+
+    Q19/C9：原用 `verify_setup_token`（非冷启动放行）。改为 `_get_setup_auth`：
+    冷启动校验 token，正常模式必须 admin JWT。
 
     前端从 Step 1 缓存 DB 配置 + admin 表单 → 一次性提交。
     """
