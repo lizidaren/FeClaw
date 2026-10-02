@@ -24,7 +24,7 @@ from models.database import get_db, User
 from services.wechat_service import wechat_service, WeChatService
 from config import settings
 from services.wechat_channel_service import WeChatChannelService
-from utils.auth import get_current_user
+from utils.auth import get_current_user, get_admin_user
 from utils.url_validation import validate_public_http_url
 
 logger = logging.getLogger(__name__)
@@ -1180,14 +1180,16 @@ def _check_debug_localhost(request: Request) -> bool:
 
 
 @router.post("/debug/test-message")
-async def debug_test_message(request: Request) -> dict:
+async def debug_test_message(request: Request, _admin: User = Depends(get_admin_user)) -> dict:
     """
     调试接口：模拟微信消息处理流程
     用于测试会话管理功能
-    
-    ⚠️ 仅允许本地访问
+
+    Q21/M3：原实现仅靠 TCP 对端地址（request.client.host ∈ 本机回环）保护，
+    代理与后端同机时形同虚设，且接受任意 user_id 做跨租户读取。现改为
+    要求管理员 JWT（fail-closed），本地回环检查作为第二道纵深防御保留。
     """
-    # 安全检查：仅允许本地请求
+    # 安全检查：仅允许本地请求（纵深防御，主鉴权是 get_admin_user）
     if not _check_debug_localhost(request):
         from fastapi.responses import JSONResponse
         return JSONResponse(

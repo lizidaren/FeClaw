@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 
 from services.vfs_image_dedup import VFSImageDeduplicationService
 from services.storage_service import get_storage_service
+from models.database import User
 from utils.auth import get_current_user
 
 
@@ -71,12 +72,19 @@ class ManifestListResponse(BaseModel):
 # ==================== 服务实例 ====================
 
 def get_image_dedup_service(
-    user_id: int = Depends(get_current_user),
+    user: User = Depends(get_current_user),
     storage = Depends(get_storage_service)
 ) -> VFSImageDeduplicationService:
-    """获取 VFSImageDeduplicationService 实例"""
+    """获取 VFSImageDeduplicationService 实例
+
+    Q21/M9：原实现 `user_id: int = Depends(get_current_user)` 实际拿到的是 `User`
+    实例，`str(User)` 未定义 `__repr__` → 租户键变成 `<User object at 0x...>`：
+    - 每次请求换 key，去重功能彻底失效；
+    - CPython 复用已释放对象地址时，另一用户可能读到/篡改前一用户清单。
+    改为显式 `str(user.id)`。
+    """
     return VFSImageDeduplicationService(
-        user_id=str(user_id),
+        user_id=str(user.id),
         storage_service=storage
     )
 

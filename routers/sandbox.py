@@ -127,6 +127,19 @@ async def sandbox_execute(req: ExecuteRequest, user: User = Depends(get_current_
             exit_code=1, sandbox_id=""
         )
 
+    # Q21/M14：客户端可控的超时未做范围校验（如 {"timeout":1e8}）会长期占用
+    # 5 个全局执行槽之一 → 平台级 DoS。这里钳制到 [1, 3600] 秒。
+    if req.timeout is not None:
+        try:
+            _t = int(req.timeout)
+        except (TypeError, ValueError):
+            _t = -1
+        if _t <= 0 or _t > 3600:
+            return ExecuteResponse(
+                stdout="", stderr="Error: timeout must be between 1 and 3600 seconds",
+                exit_code=1, sandbox_id=""
+            )
+
     # Q19/H3：归属校验 —— 只能对自己的 agent 执行沙箱（否则 403）
     db = SessionLocal()
     try:

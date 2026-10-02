@@ -53,10 +53,10 @@ async def get_backend_health(
 
 
 @router.get("/heartbeat/stats")
-async def get_heartbeat_stats() -> dict:
+async def get_heartbeat_stats(user: User = Depends(get_admin_user)) -> dict:
     """
-    心跳执行统计
-    
+    心跳执行统计（Q21/L11：加管理员鉴权，匿名不再可读心跳任务明细）
+
     返回最近一次心跳任务执行的统计信息，包括：
     - 执行的任务数
     - 成功/失败/超时数

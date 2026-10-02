@@ -909,9 +909,9 @@ async def get_console_user(
 # ==========================================
 
 @router.get("/templates")
-async def get_persona_templates(db: Session = Depends(get_db)):
+async def get_persona_templates(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     """
-    获取 persona 预设模板列表
+    获取 persona 预设模板列表（Q21/L11：加登录鉴权，匿名不再可枚举模板清单）
     """
     from services.template_manager import TemplateManager
     templates = TemplateManager.list_templates(db)
@@ -923,9 +923,9 @@ async def get_persona_templates(db: Session = Depends(get_db)):
 
 
 @router.get("/tools")
-async def get_available_tools():
+async def get_available_tools(user: User = Depends(get_current_user)):
     """
-    获取可用工具列表（带分组）
+    获取可用工具列表（带分组）（Q21/L11：加登录鉴权，匿名不再可枚举工具清单）
     """
     # 定义工具分组
     tool_groups = [

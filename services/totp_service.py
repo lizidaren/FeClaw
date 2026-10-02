@@ -21,7 +21,10 @@ class TOTPService:
     
     # 时间窗口配置
     INTERVAL = 30  # 30 秒一个窗口
-    VALID_WINDOWS = 10  # 允许向前追溯 10 个窗口（5 分钟宽限）
+    # Q21/M17：原 VALID_WINDOWS=10（±300 秒）—— 同一时刻存在 21 个合法码，把
+    # 6 位码爆破成功率从 1/10^6 抬到 21/10^6。降到 1（±30 秒），配合 /api/totp/verify
+    # 的 IP+agent_hash 限流（Q19/C2）进一步收窄在线爆破面。
+    VALID_WINDOWS = 1
     JWT_EXPIRE_DAYS = 14  # JWT 有效期 14 天
     
     @staticmethod

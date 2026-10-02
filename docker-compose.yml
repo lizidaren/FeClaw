@@ -5,8 +5,9 @@ services:
     environment:
       MYSQL_ROOT_PASSWORD: feclaw_dev
       MYSQL_DATABASE: FeClaw
-    ports:
-      - "3306:3306"
+    # Q21/L8：不再把 3306 发布到宿主（仅容器内网可见，避免 DB 对外暴露）
+    expose:
+      - "3306"
     volumes:
       - mysql_data:/var/lib/mysql
     healthcheck:
@@ -41,8 +42,8 @@ services:
       MIMO_API_KEY: ""
       # 搜索
       DEFAULT_SEARCH_ENGINE: qwen
-      # 调试
-      DEBUG: "true"
+      # 调试（Q21/M12：生产默认关闭 —— DEBUG 会 echo 每条 SQL，泄露口令哈希/微信凭证）
+      DEBUG: "false"
       COOKIE_SECURE: "false"
     volumes:
       - feclaw_storage:/app/feclaw-storage

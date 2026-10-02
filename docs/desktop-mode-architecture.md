@@ -3,6 +3,11 @@
 > 版本 1 — 2026-06-19
 > 在 Server + Desktop 兼容性讨论后的总方案
 
+> ⚠️ **本文是设计提案，并非现状描述。** 文中 `AUTH_DISABLE_LOCAL`、
+> `LOCAL_STORAGE_ROOT` 默认 `~/.feclaw/data/` 等字段**未在当前 `config.py`
+> 中实现**（当前仅有 `OAUTH_ENABLED`，`STORAGE_MODE` 默认 `auto`、
+> `LOCAL_STORAGE_ROOT` 默认 `./feclaw-storage`）。
+
 ---
 
 ## 1. 核心原则

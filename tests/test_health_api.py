@@ -1,85 +1,44 @@
 """
 健康检查 API 测试
+
+Q20/H15 + Q21/L11 之后：/api/health/backend 与 /api/heartbeat/stats 均要求
+管理员 JWT。匿名访问必须 401（fail-closed），不再是原来的公开 200。
+本文件原样保留旧的匿名 200 断言会与安全修复冲突，故同步为「匿名 ⇒ 401」。
 """
 
-import pytest
 from fastapi.testclient import TestClient
-from unittest.mock import patch, MagicMock
 
 from main import app
-from services.heartbeat_service import HeartbeatService
 
 
 client = TestClient(app)
 
 
 class TestHealthAPI:
-    """健康检查 API 测试"""
+    """健康检查 API 测试（管理员鉴权后：匿名 ⇒ 401）"""
 
     def test_backend_health_endpoint_exists(self):
-        """测试后端健康检查端点存在"""
+        """后端健康检查端点存在（匿名 ⇒ 401 而非 404）"""
         response = client.get("/api/health/backend")
-        # 不应该返回 404
-        assert response.status_code != 404
+        assert response.status_code == 401
 
-    def test_backend_health_returns_dict(self):
-        """测试后端健康检查返回字典"""
-        response = client.get("/api/health/backend")
-        assert response.status_code == 200
-        data = response.json()
+    def test_backend_health_requires_admin(self):
+        """匿名访问后端健康检查 ⇒ 401（Q20/H15）"""
+        assert client.get("/api/health/backend").status_code == 401
 
-        assert isinstance(data, dict)
-        assert "status" in data
-        assert "backend" in data
-        assert "timestamp" in data
-        assert "duration_ms" in data
+    def test_backend_health_include_details_requires_admin(self):
+        """带 include_details 也需管理员（匿名 ⇒ 401）"""
+        assert client.get("/api/health/backend?include_details=true").status_code == 401
 
-    def test_backend_health_valid_status(self):
-        """测试后端健康状态值有效"""
-        response = client.get("/api/health/backend")
-        data = response.json()
-
-        valid_statuses = ["healthy", "unhealthy", "degraded", "error"]
-        assert data["status"] in valid_statuses
-
-    def test_backend_health_include_details(self):
-        """测试 include_details 参数"""
-        response = client.get("/api/health/backend?include_details=true")
-        data = response.json()
-
-        # 应该包含详细信息
-        assert "database" in data
-        assert "scheduler" in data
-        assert "details" in data
-
-    def test_backend_health_no_details_by_default(self):
-        """测试默认不包含详细信息"""
-        response = client.get("/api/health/backend")
-        data = response.json()
-
-        # 不应该包含详细信息
-        assert "database" not in data
-        assert "scheduler" not in data
-        assert "details" not in data
-
-    def test_backend_health_custom_url(self):
-        """测试自定义 URL 参数"""
-        response = client.get("/api/health/backend?backend_url=https://example.com/health")
-        data = response.json()
-
-        assert data["backend"]["url"] == "https://example.com/health"
+    def test_backend_health_custom_url_requires_admin(self):
+        """带自定义 backend_url 也需管理员（匿名 ⇒ 401）"""
+        assert client.get("/api/health/backend?backend_url=https://example.com/health").status_code == 401
 
     def test_heartbeat_stats_endpoint_exists(self):
-        """测试心跳统计端点存在"""
+        """心跳统计端点存在（匿名 ⇒ 401 而非 404）"""
         response = client.get("/api/heartbeat/stats")
-        # 不应该返回 404
-        assert response.status_code != 404
+        assert response.status_code == 401
 
-    def test_heartbeat_stats_returns_dict(self):
-        """测试心跳统计返回字典"""
-        response = client.get("/api/heartbeat/stats")
-        assert response.status_code == 200
-        data = response.json()
-
-        assert isinstance(data, dict)
-        assert "status" in data
+    def test_heartbeat_stats_requires_admin(self):
+        """匿名访问心跳统计 ⇒ 401（Q21/L11）"""
+        assert client.get("/api/heartbeat/stats").status_code == 401

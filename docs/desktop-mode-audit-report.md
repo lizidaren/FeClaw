@@ -5,6 +5,11 @@
 > 审阅日期: 2026-06-19
 > 范围: 文档方案 vs. FeClaw 现有代码库
 
+> ⚠️ **本文是设计提案/评审，并非现状描述。** 文中的 `~/.feclaw/.jwt_secret`
+> 持久化、Desktop 专属 CORS 锁定 `["http://127.0.0.1:8080"]`、`AUTH_DISABLE_LOCAL`
+> 等均**未在当前代码库实现**（当前 JWT_SECRET 只写入 `.env`，CORS 按
+> `FECLAW_PUBLIC_URL` 动态配置，config.py 无 `AUTH_DISABLE_LOCAL` 字段）。
+
 ---
 
 ## 摘要

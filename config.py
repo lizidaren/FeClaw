@@ -25,8 +25,9 @@ class Settings(BaseSettings):
     SETUP_COMPLETE: bool = False
 
     # 冷启动临时鉴权 token（首次启动时由 main.py 自动生成并写入 .env）
-    # 冷启动期间用户访问 /setup* 必须带 ?token=<SETUP_TOKEN> 才能通过验证。
-    # 正常启动后此 token 被清空，setup 路由降级为 JWT 鉴权。
+    # 冷启动期间 /setup 的**写接口**必须带 ?token=<SETUP_TOKEN> 才能通过验证；
+    # GET /setup 向导页本身不含敏感数据、可匿名打开。
+    # 正常启动后此 token 被清空，setup 写接口降级为 JWT 管理员鉴权。
     SETUP_TOKEN: str = ""
 
     # MySQL 数据库配置
@@ -118,7 +119,10 @@ class Settings(BaseSettings):
     VECTOR_STORAGE_BACKEND: str = "numpy"
 
     # TOTP 安全策略
-    TOTP_STRICT_OWNERSHIP: bool = True  # TOTP 登录时严格检查 Agent 归属，True=仅能访问自己的 Agent；False=可以通过 TOTP 访问任何 Agent
+    # Q21/M17：此开关原意是「False=可通过 TOTP 访问任何 Agent」，但自 Q19/C2 起
+    # TOTP 归属已**无条件强制**（generate 只对 owner 签发、JWT 绑定 agent_hash 子域），
+    # 该字段不再有弱化能力，仅保留给前端模板兼容 —— 不要据此关闭任何归属校验。
+    TOTP_STRICT_OWNERSHIP: bool = True
 
     # FeClaw 域名配置
     FECLAW_PUBLIC_URL: str = ""  # 服务器访问地址（如 feclaw.example.com 或 139.199.68.185:8080）

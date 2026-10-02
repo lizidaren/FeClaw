@@ -8,6 +8,7 @@
 """
 
 import hashlib
+import hmac
 import uuid
 import json
 import calendar
@@ -98,7 +99,10 @@ def verify_password(password: str, password_hash: str, salt: str = "") -> bool:
             _, salt_legacy, stored = password_hash.split("$", 3)[1:]
         except ValueError:
             return False
-        return hashlib.sha256((password + salt_legacy).encode()).hexdigest() == stored
+        # Q21/L2：原 `==` 非常量时间比较，可被计时侧信道猜测口令哈希。改用
+        # hmac.compare_digest 做恒定时间比较。
+        computed = hashlib.sha256((password + salt_legacy).encode()).hexdigest()
+        return hmac.compare_digest(computed, stored)
 
     if password_hash.startswith(("$2b$", "$2a$", "$2y$")):
         try:

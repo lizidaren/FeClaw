@@ -428,8 +428,10 @@ async def lifespan(app: FastAPI):
             logger.info("=" * 60)
             logger.info("  🚀 初始管理员账户已创建")
             logger.info(f"  用户名: admin")
-            logger.info(f"  密  码: {_final_pwd}")
-            logger.info("  ⚠️ 请立即登录并修改密码！")
+            # Q21/L4：口令不再写入应用日志（日志聚合/告警系统会长期留存凭据），
+            # 改走 stdout 打印一次（与 print_admin_banner 同源，仅供终端查看）。
+            print(f"  [FeClaw] 初始管理员密码: {_final_pwd}")
+            logger.info("  ⚠️ 密码仅在终端显示一次，请立即登录并修改！")
             logger.info("=" * 60)
 
         # Q19/H12：不再自动创建 `test` 账号 —— 口令由源码决定（sha256("test")），
@@ -632,7 +634,11 @@ app = FastAPI(
 )
 
 # 配置 CORS — 动态根据 FECLAW_PUBLIC_URL 设置
-cors_origins = ["*"]
+# Q21/M1：原实现未配置 FECLAW_PUBLIC_URL 时 `allow_origins=["*"]` 且
+# `allow_credentials=True` —— Starlette 会在带 Cookie 的请求下把 Origin 原样
+# 回显并附 `Access-Control-Allow-Credentials: true`（CWE-942 通配+凭证）。
+# 修复：无 FECLAW_PUBLIC_URL 时不给任何跨域授权（fail-closed）。
+cors_origins = []
 if settings.FECLAW_PUBLIC_URL:
     cors_origins = [
         f"https://{settings.FECLAW_PUBLIC_URL}",

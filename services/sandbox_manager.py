@@ -38,6 +38,9 @@ from .sandbox.base import (
     _check_fuse_cached,
 )
 from .network_isolation import NetworkIsolationManager
+
+# Q21/M13：沙箱单流输出上限（结果边界截断；完整流式封顶见报告残余项）
+_MAX_OUTPUT_CHARS = 1_000_000
 from .tool_log_service import is_tool_log_cos_key
 
 logger = logging.getLogger(__name__)
@@ -446,7 +449,15 @@ class SandboxManager:
 
     def _make_result(self, stdout: str, stderr: str, returncode: int,
                      sandbox_id: str, timed_out: bool = False) -> ExecResult:
-        """构建 ExecResult，含信号转译为友好中文提示"""
+        """构建 ExecResult，含信号转译为友好中文提示
+
+        Q21/M13：输出无上限会被 JSON 序列化塞进 LLM 上下文并撑爆内存 —— 这里在
+        结果边界截断到 _MAX_OUTPUT_CHARS（单流 1MB）。注意这只封住了「结果进入
+        上下文/序列化」这一层；「子进程向管道持续写入把父进程内存写爆」的完整
+        流式封顶需要把 capture_output 改为临时文件 + 限量读取（见报告残余项）。
+        """
+        stdout = (stdout or "")[:_MAX_OUTPUT_CHARS]
+        stderr = (stderr or "")[:_MAX_OUTPUT_CHARS]
         if returncode == 0:
             return ExecResult(
                 stdout=stdout, stderr=stderr, exit_code=0,
@@ -916,6 +927,25 @@ class SandboxManager:
                 daemon=True
             ).start()
 
+            # Q21/M14：任务**自然结束**（进程退出）时释放并发槽 + 注销 token。
+            # 原实现只在 stop_background 里释放 —— 任务自然结束后槽位永久泄漏，
+            # 5 个槽位被耗尽即平台级 DoS。reaper 只在任务仍被追踪时动手，
+            # 与 stop_background 互斥，避免重复释放。
+            def _reap(task_id, process):
+                try:
+                    process.wait()
+                except Exception:
+                    pass
+                t = self._background_tasks.get(task_id)
+                if t is not None and t.process is process:
+                    t.status = "exited"
+                    _global_concurrency_limiter.release(task_id)
+                    if t.sandbox_token:
+                        unregister_sandbox_token(t.sandbox_token)
+                        t.sandbox_token = ""
+                    logger.info(f"[Sandbox] Background task {task_id} exited, slot released")
+            threading.Thread(target=_reap, args=(task_id, process), daemon=True).start()
+
             self._background_tasks[task_id] = task
             logger.info(f"[Sandbox] Started background task {task_id}: {name}")
             return task_id
@@ -927,23 +957,28 @@ class SandboxManager:
             return f"Error: 后台任务启动失败: {e}"
 
     def stop_background(self, task_id: str) -> bool:
-        """停止后台任务"""
+        """停止后台任务（Q21/M14：对已自然退出的任务幂等，不重复释放槽位）"""
         task = self._background_tasks.get(task_id)
         if not task:
             return False
 
+        # 若 reaper 已判定进程退出并释放过槽位，这里跳过 terminate/release，
+        # 只把任务从 dict 移除（in-memory 释放幂等，Redis 释放不幂等，必须防重复）
+        already_exited = task.process.poll() is not None
         try:
-            task.process.terminate()
-            try:
-                task.process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                task.process.kill()
-                task.process.wait()
+            if not already_exited:
+                task.process.terminate()
+                try:
+                    task.process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    task.process.kill()
+                    task.process.wait()
 
             del self._background_tasks[task_id]
-            _global_concurrency_limiter.release(task_id)
-            if task.sandbox_token:
-                unregister_sandbox_token(task.sandbox_token)
+            if not already_exited:
+                _global_concurrency_limiter.release(task_id)
+                if task.sandbox_token:
+                    unregister_sandbox_token(task.sandbox_token)
             logger.info(f"[Sandbox] Stopped background task {task_id}")
             return True
         except Exception as e:

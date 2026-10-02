@@ -73,6 +73,15 @@ async def get_group_messages(
     if not user_id:
         raise HTTPException(status_code=401, detail="未登录，请先登录")
 
+    # Q21/M8：原实现只校验「已登录」，任意登录用户可读任意群的聊天记录，且
+    # group_id 默认值即一条真实种子群。现改为归属校验（与 routers/group.py 的
+    # _get_group_or_404 同一口径）：仅群主可读（fail-closed）。
+    group = db.query(Group).filter(Group.id == group_id).first()
+    if not group or getattr(group, "deleted_at", None):
+        raise HTTPException(status_code=404, detail="Group not found")
+    if group.owner_user_id != user_id:
+        raise HTTPException(status_code=403, detail="Not authorized to access this group")
+
     try:
         from datetime import datetime
 

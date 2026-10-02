@@ -15,8 +15,8 @@ from services.tools.base import AgentToolsServiceBase
 
 logger = logging.getLogger(__name__)
 
-# 白名单命令
-ALLOWED_BASH_COMMANDS = {"mkdir", "ls", "cat", "grep", "find", "head", "tail", "wc", "echo", "pwd", "cd", "cp", "mv", "rm", "fe", "python3.12"}
+# Q21/L9：删除了从未被引用的 ALLOWED_BASH_COMMANDS —— 它给人的假象是 bash 工具
+# 受白名单约束，实际 `bash` 工具执行任意命令。保留它只会误导审计者。
 
 
 class BashToolsMixin(AgentToolsServiceBase):

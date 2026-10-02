@@ -505,11 +505,15 @@ async def chat_websocket(websocket: WebSocket):
     logger = logging.getLogger(__name__)
     await websocket.accept()
 
-    # 记录客户端信息
+    # 记录客户端信息（Q21/M4：脱敏 —— 原实现把完整 Headers/Query 以 WARNING 级别
+    # 落日志，其中 Authorization Bearer / ?token=<JWT> 会被写进应用日志与代理访问
+    # 日志，等于明文外泄令牌。现改为只打印来源地址 + 脱敏后的键名）。
     try:
+        _hdr_keys = sorted({k.lower() for k in websocket.headers.keys()})
+        _q_keys = sorted({k for k in websocket.query_params.keys() if k.lower() != "token"})
         logger.warning(f"[WS_DEBUG] New WS connection from {websocket.client.host}:{websocket.client.port}")
-        logger.warning(f"[WS_DEBUG] Headers: {dict(websocket.headers)}")
-        logger.warning(f"[WS_DEBUG] Query: {websocket.query_params}")
+        logger.warning(f"[WS_DEBUG] Header keys (redacted): {_hdr_keys}")
+        logger.warning(f"[WS_DEBUG] Query keys (token redacted): {_q_keys}")
     except Exception:
         pass
 

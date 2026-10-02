@@ -37,6 +37,7 @@ from config import settings
 from models.database import get_db, User
 from services.setup_service import (
     build_database_url,
+    clear_env,
     get_current_admin,
     get_partial_config,
     get_provider_list,
@@ -404,8 +405,10 @@ async def setup_admin(
     if not ok:
         return {"status": "error", "message": msg}
     # init_database 已写 DATABASE_URL + JWT_SECRET 到 .env
-    # 同时清掉 SETUP_TOKEN（冷启动结束后 token 失效）
-    update_env({"SETUP_TOKEN": ""})
+    # Q21/M19：同时真正清除 SETUP_TOKEN（冷启动结束后 token 失效）。
+    # 原 `update_env({"SETUP_TOKEN": ""})` 会被 update_env 的「空值跳过」吞掉，
+    # 导致 token 永远留在 .env —— 改用 clear_env 删除该行。
+    clear_env("SETUP_TOKEN")
     return {"status": "ok", "message": msg}
 
 
@@ -573,9 +576,15 @@ async def state(
 @router.get("/api/summary")
 async def api_summary(
     request: Request,
+    _setup_user = Depends(_get_setup_auth),
     db: Session = Depends(get_db),
 ):
-    """只读 setup 配置摘要（无需鉴权，仅展示非敏感信息）。
+    """只读 setup 配置摘要（Q21/M2：需要鉴权）。
+
+    原实现「无需鉴权」—— 会向匿名者返回管理员用户名与真实邮箱、部署模式、
+    FECLAW_PUBLIC_URL、本地存储根目录、COS 桶名等内部信息。现改为与
+    /setup/api/state、/setup/api/providers 一致：冷启动校验 token，正常模式
+    要求 admin JWT（fail-closed）。
 
     用于：
     1. /setup 页面在 setup_done 状态下渲染摘要视图

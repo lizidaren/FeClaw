@@ -119,9 +119,9 @@ class TestTOTPConfig:
         """时间窗口是 30 秒"""
         assert TOTPService.INTERVAL == 30
 
-    def test_valid_windows_is_10(self, totp_service):
-        """有效窗口是 10"""
-        assert TOTPService.VALID_WINDOWS == 10
+    def test_valid_windows_is_1(self, totp_service):
+        """有效窗口是 1（Q21/M17：±30s，收窄在线爆破面）"""
+        assert TOTPService.VALID_WINDOWS == 1
 
     def test_jwt_expire_days_is_14(self, totp_service):
         """JWT 过期天数是 14"""

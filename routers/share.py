@@ -8,6 +8,8 @@ from services.share_service import decode_share_token, verify_share_password
 from models.database import get_db
 from config import settings
 import os, logging
+import json
+from html import escape
 from urllib.parse import quote
 
 logger = logging.getLogger(__name__)
@@ -113,6 +115,17 @@ def _render_jsxgraph_file(content: bytes) -> str:
     return JSXGRAPH_TEMPLATE.replace("JSXGRAPH_CODE", code)
 
 
+def _js_safe(value) -> str:
+    """JSON 序列化并转义 < > &（Q21/M7）。
+
+    `json.dumps` 不转义 `<`/`/`/`&`，含 `</script><script>…` 的 Markdown 会被
+    原样塞进 `<script>` 块，令攻击者逃出脚本上下文。把 `<`/`>`/`&` 换成
+    `<`/`>`/`&` 后，JS 字符串字面量在源码层不再包含可被 HTML
+    解析器识别的 `</script>`，而 JS 运行时仍还原出原字符。
+    """
+    return json.dumps(value).replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
+
+
 def _share_error_page(status_code: int, title: str, message: str) -> Response:
     """分享页友好错误页（替代 FastAPI 默认的裸 500 / JSON 错误）。"""
     html = f"""<!DOCTYPE html>
@@ -202,12 +215,11 @@ async def resolve_share_by_slug(slug: str, request: Request, db: Session = Depen
                 ext = os.path.splitext(vfs_path)[1].lower()
                 if ext == ".md":
                     md_content = content.decode("utf-8")
-                    import json
-                    safe_md = json.dumps(md_content)
+                    safe_md = _js_safe(md_content)
                     html_page = f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>{os.path.basename(vfs_path)}</title>
+<title>{escape(os.path.basename(vfs_path))}</title>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/github-markdown-css@5.5.1/github-markdown.min.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
 <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
@@ -242,7 +254,7 @@ document.getElementById('c').innerHTML = html;
 window._RAW_MD = {safe_md};
 mermaid.run({{nodes:document.querySelectorAll('.mermaid')}});
 </script>
-<script>var SHARE_HASH = {json.dumps(mapping.share_hash)}; var VFS_PATH = {json.dumps(vfs_path)};</script>
+<script>var SHARE_HASH = {_js_safe(mapping.share_hash)}; var VFS_PATH = {_js_safe(vfs_path)};</script>
 <script src="/static/js/share-reference.js"></script>
 </body></html>"""
                     return Response(content=html_page, media_type="text/html")
@@ -348,12 +360,11 @@ async def resolve_share(token: str, request: Request, db: Session = Depends(get_
                 # Markdown 文件返回渲染后的 HTML 页面
                 if ext == ".md":
                     md_content = content.decode("utf-8")
-                    import json
-                    safe_md = json.dumps(md_content)
+                    safe_md = _js_safe(md_content)
                     html_page = f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>{os.path.basename(vfs_path)}</title>
+<title>{escape(os.path.basename(vfs_path))}</title>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/github-markdown-css@5.5.1/github-markdown.min.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
 <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
@@ -386,7 +397,7 @@ document.getElementById('c').innerHTML = html;
 window._RAW_MD = {safe_md};
 mermaid.run({{nodes:document.querySelectorAll('.mermaid')}});
 </script>
-<script>var SHARE_HASH = {json.dumps(share_hash or '')}; var VFS_PATH = {json.dumps(vfs_path)};</script>
+<script>var SHARE_HASH = {_js_safe(share_hash or '')}; var VFS_PATH = {_js_safe(vfs_path)};</script>
 <script src="/static/js/share-reference.js"></script>
 </body></html>"""
                     return Response(content=html_page, media_type="text/html")

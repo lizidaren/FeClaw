@@ -131,9 +131,10 @@ async def list_sites(user_id: int = Depends(get_current_user)):
 
 @router.get("/check-subdomain", response_model=CheckSubdomainResponse, summary="检查子域名可用性")
 async def check_subdomain(
-    subdomain: str = Query(..., min_length=1, max_length=63, description="要检查的子域名")
+    subdomain: str = Query(..., min_length=1, max_length=63, description="要检查的子域名"),
+    user_id: int = Depends(get_current_user),
 ):
-    """检查子域名是否可用"""
+    """检查子域名是否可用（Q21/L11：加登录鉴权，匿名不再可探测子域名占用）"""
     service = get_static_site_service()
     available = service.check_subdomain_available(subdomain)
     return CheckSubdomainResponse(subdomain=subdomain, available=available)

@@ -1071,11 +1071,18 @@ class WeChatService:
                             aes_key_override=_media_info.get("aes_key") if isinstance(_media_info, dict) else None
                         )
                 elif image_url:
-                    import httpx
-                    async with httpx.AsyncClient(timeout=30) as client:
-                        resp = await client.get(image_url)
-                        if resp.status_code == 200:
-                            img_bytes = resp.content
+                    # Q21/M15：来自 getupdates 消息体的图片 URL 此前被服务端无校验
+                    # 抓取（配合可控 base_url 可完全由攻击者指定 → 盲 SSRF，字节落
+                    # 到受害者工作区）。现统一走公网 URL 校验器，拒绝回环/内网/元数据。
+                    from utils.url_validation import validate_public_http_url
+                    if not validate_public_http_url(image_url):
+                        logger.warning(f"[WeChat] SSRF blocked image_url: {image_url!r}")
+                    else:
+                        import httpx
+                        async with httpx.AsyncClient(timeout=30, follow_redirects=False) as client:
+                            resp = await client.get(image_url)
+                            if resp.status_code == 200:
+                                img_bytes = resp.content
 
                 if img_bytes:
                     storage.put_object(cos_key, img_bytes)
@@ -1868,9 +1875,13 @@ class WeChatService:
     # ========== 媒体下载 ==========
 
     async def download_media(self, media_url: str) -> bytes:
-        """下载媒体文件"""
+        """下载媒体文件（Q21/M15：完整 URL 需过公网 URL 校验，防 SSRF）"""
         if media_url.startswith("/"):
             media_url = "{}{}".format(ILINK_CDN_BASE, media_url)
+        else:
+            from utils.url_validation import validate_public_http_url
+            if not validate_public_http_url(media_url):
+                raise Exception("Blocked media URL (SSRF policy): {!r}".format(media_url[:120]))
 
         session = await self._get_session()
         async with session.get(media_url) as resp:

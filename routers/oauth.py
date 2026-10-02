@@ -59,7 +59,11 @@ STATE_COOKIE_MAX_AGE = 600  # 10 分钟
 
 
 def _is_safe_redirect(url: str) -> str:
-    if not url or url.startswith('/'):
+    # Q21/L9：原实现 `url.startswith('/')` 会接受 `//evil.com`（协议相对 URL 外跳），
+    # 属埋雷。改为拒绝 `//` 前缀，其余逻辑不变。
+    if not url:
+        return '/'
+    if url.startswith('/') and not url.startswith('//'):
         return url
     parsed = urlparse(url)
     if not parsed.netloc:
@@ -648,13 +652,20 @@ async def oauth_logout_get(
 
     Platform 退出时会重定向到这个地址，FeClaw 清掉自己的 cookie 后跳回。
     """
-    # 检查 redirect 是否在白名单中
+    # 检查 redirect 是否在白名单中（Q21/M16：原前缀比较可被
+    # `http://feclaw.chat.attacker.com` 绕过 —— 改为解析 hostname 精确匹配）
     safe_redirect = "/login"
     if redirect:
-        app_url = f"http://{settings.FECLAW_PUBLIC_URL}" if settings.FECLAW_PUBLIC_URL else "http://localhost:8080"
-        allowed_prefixes = [app_url]
-        if any(redirect.startswith(p) for p in allowed_prefixes):
-            safe_redirect = redirect
+        expected = (settings.FECLAW_PUBLIC_URL or "").strip()
+        if expected:
+            try:
+                parsed = urlparse(redirect)
+                expected_host = urlparse(f"//{expected}").hostname
+                if (parsed.scheme in ("http", "https")
+                        and parsed.hostname and parsed.hostname == expected_host):
+                    safe_redirect = redirect
+            except Exception:
+                pass
 
     response = RedirectResponse(url=safe_redirect, status_code=302)
     # Q1：统一走 auth_cookies，带上写入时的 domain，否则删不掉

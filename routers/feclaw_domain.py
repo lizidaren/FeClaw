@@ -34,6 +34,7 @@ from models.agent_profile import AgentProfile
 from models.database import WeChatBinding
 from utils.auth import (
     get_current_user,
+    get_admin_user,
     decode_jwt_token,
     bump_user_jwt_version,
     user_id_from_payload,
@@ -862,10 +863,31 @@ async def get_file_raw(
     if content is None:
         raise HTTPException(status_code=404, detail="File not found")
     import mimetypes
+    from urllib.parse import quote as _quote
     mime_type, _ = mimetypes.guess_type(path)
+    _fname = os.path.basename(path)
+
+    # Q21/M5：用户内容若以 text/html / image/svg+xml 在平台源内联渲染，即构成
+    # 存储型 XSS（上传 .html/.svg 后用此接口在源上执行）。这里对主动内容强制
+    # 下载（attachment + 降级 octet-stream），并统一加 nosniff 防 MIME 嗅探。
+    _ACTIVE_MIMES = {"text/html", "image/svg+xml", "application/xhtml+xml",
+                     "text/xml", "application/xml"}
+    if (mime_type or "") in _ACTIVE_MIMES:
+        return FastAPIResponse(
+            content=content,
+            media_type="application/octet-stream",
+            headers={
+                "Content-Disposition": f"attachment; filename*=UTF-8''{_quote(_fname)}",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
     return FastAPIResponse(
         content=content,
         media_type=mime_type or "application/octet-stream",
+        headers={
+            "X-Content-Type-Options": "nosniff",
+            "Content-Disposition": f"inline; filename*=UTF-8''{_quote(_fname)}",
+        },
     )
 
 
@@ -897,13 +919,13 @@ async def get_signed_url(body: SignedUrlRequest, req: Request, agent_hash: str =
     Returns:
         {url, path, expires_at, method}
     """
-    # 构建完整路径（agent 工作区路径）
-    full_path = _vfs_path(agent_hash, body.path)
-
-    # 安全检查：确保路径在用户工作区内
+    # 安全检查：确保路径在用户工作区内（Q21/L1：先校验再拼 key，顺序修正）
     if ".." in body.path or body.path.startswith("/"):
         pass  # HTTPException already imported at module level
         raise HTTPException(status_code=400, detail="Invalid path")
+
+    # 构建完整路径（agent 工作区路径）
+    full_path = _vfs_path(agent_hash, body.path)
 
     if body.operation == "upload":
         # 上传签名 URL（PUT）
@@ -1065,13 +1087,16 @@ async def initialize_page(request: Request):
 async def setup_page(
     request: Request,
     reset: str = Query("", alias="reset"),
+    _admin: User = Depends(get_admin_user),
 ):
-    """配置向导 / 已完成时的只读摘要页面。
+    """配置向导 / 已完成时的只读摘要页面（Q21/M2：正常模式要求管理员）。
 
     冷启动：setup_router 的路由生效（此路由在 cold-start 时不会注册）。
     正常启动：复用 setup_router 的渲染逻辑：
       - 已完成 → 渲染只读 summary
       - 未完成 / ?reset=1 → 渲染向导
+    原实现匿名可看 summary（含管理员邮箱）并可用 ?reset=1 打开完整向导 ——
+    现在统一要求 admin JWT（fail-closed）。
     """
     from sqlalchemy.orm import Session as _Session
     from models.database import get_db as _get_db
@@ -1607,7 +1632,20 @@ async def upload_file_vfs(
         raise HTTPException(status_code=400, detail="Invalid path")
     if path == "public" or path.startswith("public/") or path == "config" or path.startswith("config/"):
         raise HTTPException(status_code=403, detail=f"{'公共空间' if path.startswith('public') else '配置目录'}为只读，不允许上传")
-    content = await file.read()
+    # Q21/M6：原实现 `await file.read()` 无尺寸上限 —— 多 GB multipart 可撑爆单
+    # worker 内存。改为分块读取 + 上限校验（默认 MAX_UPLOAD_SIZE=50MB）。
+    max_size = int(getattr(settings, "MAX_UPLOAD_SIZE", 50 * 1024 * 1024))
+    chunks = []
+    total = 0
+    while True:
+        chunk = await file.read(1024 * 1024)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_size:
+            raise HTTPException(status_code=413, detail=f"文件超过大小限制（{max_size} 字节）")
+        chunks.append(chunk)
+    content = b"".join(chunks)
     full_path = _vfs_path(agent_hash, path)
     s().upload_file(content, full_path)
     return {"status": "success", "path": path, "size": len(content)}

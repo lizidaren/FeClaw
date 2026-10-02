@@ -58,7 +58,7 @@ FeClaw 的 0716 架构审查识别出若干正在恶化的演进伤口：
 | **P0.1** | 创建本 ADR + 修正 `internal_docs.md` 文档漂移 | 0.5d | ✅ 已落地 |
 | **P0.2** | 认证依赖统一：建 `utils/auth_dependencies.py`（仅合并全局 HS256 本地 JWT 重复，TOTP 保留独立） | 1d | ✅ 已落地 |
 | **P0.3** | 三份 `get_db()` 收归一份 | 0.25d | ✅ 已落地 |
-| **P0.4** | SHA-256 → bcrypt 透明懒迁移 | 1.5d | ✅ 已落地 |
+| **P0.4** | SHA-256 → bcrypt 透明懒迁移 | 1.5d | ✅ 已落地（新用户/重哈希走 bcrypt；`utils/auth.py` 的单轮 SHA-256 legacy verify 路径**刻意保留**用于老用户透明校验，属懒迁移设计而非未完成） |
 | **P0.5** | `LLMProvider.last_usage` 并发 bug 修复 | 1d | ✅ 已落地 |
 | **P1.1** | `CONTEXT_LIMIT` 等魔法数字进 `config.Limits` | 0.5d | ✅ 已落地 |
 | **P1.2** | VFSPath 类型层约束（Golden Rule 自动化） | 2d | ✅ 已落地 |

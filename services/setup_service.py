@@ -184,6 +184,48 @@ def _set_env_value(env_text: str, key: str, value: str) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _remove_env_key(env_text: str, key: str) -> str:
+    """删除 .env 中的某个 key（Q21/M19：SETUP_TOKEN 完成后必须真正清除）。"""
+    lines = env_text.splitlines()
+    kept = []
+    for raw in lines:
+        stripped = raw.strip()
+        if stripped and not stripped.startswith("#") and "=" in stripped:
+            k = stripped.split("=", 1)[0].strip()
+            if k == key:
+                continue  # 丢弃该行（真正清除，而非留空值）
+        kept.append(raw)
+    return "\n".join(kept) + ("\n" if kept and kept[-1] != "" else "")
+
+
+def clear_env(keys) -> None:
+    """线程安全地从 .env 中删除指定 key（与 update_env 共用锁 + chmod 600）。
+
+    用途：冷启动结束 / 配置完成后清除 SETUP_TOKEN —— 原实现 `update_env({"SETUP_TOKEN": ""})`
+    会被 update_env 的「空值跳过」逻辑吞掉，导致 token 永远留在 .env（M19）。
+    """
+    if isinstance(keys, str):
+        keys = [keys]
+    if not keys:
+        return
+    with _env_lock:
+        if ENV_FILE.exists():
+            try:
+                text = ENV_FILE.read_text(encoding="utf-8")
+            except Exception as e:
+                logger.error(f"[Setup] 读取 .env 失败: {e}")
+                return
+        else:
+            return
+        for k in keys:
+            text = _remove_env_key(text, k)
+        ENV_FILE.write_text(text, encoding="utf-8")
+        try:
+            os.chmod(ENV_FILE, stat.S_IRUSR | stat.S_IWUSR)
+        except Exception as e:
+            logger.debug(f"[Setup] chmod 600 失败（非致命）: {e}")
+
+
 def update_env(updates: Dict[str, str]) -> None:
     """线程安全地更新 .env 文件。
 

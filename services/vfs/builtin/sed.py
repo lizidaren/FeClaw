@@ -50,6 +50,24 @@ class SedCommand(BuiltinCommand):
         lines = content.split("\n")
         result_lines = []
 
+        # Q21/L6：`old` 正则来自 Agent 的 bash 命令、`content` 是任意文件内容，
+        # 此前无超时无上限 —— 灾难性回溯可阻塞线程池（纯 DoS）。这里做有界缓解：
+        # 限制输入大小 + 限制 pattern 长度 + 捕获 re.error（完整超时封顶见报告）。
+        _MAX_SED_INPUT = 2 * 1024 * 1024
+        _MAX_PATTERN = 512
+        if len(content) > _MAX_SED_INPUT:
+            return CommandResult(stdout="", stderr="Error: sed 输入超过 2MB 上限", exit_code=1)
+
+        def _safe_sub(pattern: str, repl: str, line: str, count: int = 0) -> str:
+            if len(pattern) > _MAX_PATTERN:
+                return line
+            try:
+                if count:
+                    return re.sub(pattern, repl, line, count=count)
+                return re.sub(pattern, repl, line)
+            except re.error:
+                return line
+
         # s/old/new/ - substitution
         if script.startswith("s/"):
             parts = script[2:].rsplit("/", 2)
@@ -59,10 +77,7 @@ class SedCommand(BuiltinCommand):
                 global_replace = len(parts) > 2 and parts[2] == "g"
 
                 for line in lines:
-                    if global_replace:
-                        result_lines.append(re.sub(old, new, line))
-                    else:
-                        result_lines.append(re.sub(old, new, line, count=1))
+                    result_lines.append(_safe_sub(old, new, line, count=0 if global_replace else 1))
                 return CommandResult(stdout="\n".join(result_lines), stderr="", exit_code=0)
 
         # Nd - delete Nth line
@@ -89,10 +104,7 @@ class SedCommand(BuiltinCommand):
             global_replace = 'g' in flags
             for line in lines:
                 if pat in line:
-                    if global_replace:
-                        result_lines.append(re.sub(old, new, line))
-                    else:
-                        result_lines.append(re.sub(old, new, line, count=1))
+                    result_lines.append(_safe_sub(old, new, line, count=0 if global_replace else 1))
                 else:
                     result_lines.append(line)
             return CommandResult(stdout="\n".join(result_lines), stderr="", exit_code=0)

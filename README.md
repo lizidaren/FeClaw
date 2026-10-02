@@ -54,7 +54,7 @@ FeClaw可以是普通的智能体，但是我更希望它不只是智能体，�
 
 FeClaw是一个智能体平台，但不局限于一个智能体平台，而是一个开放的Harness地基。
 
-FeClaw实现了完整的VFS和沙箱运行环境，有向量存算方案支持RAG，有聊天记录自动提取异步生成记忆、用户画像……通过这些基础能力，加上“向导”的完整提示词模板，FeClaw可以支撑一位学习向导智能体的运行。
+FeClaw实现了VFS和沙箱执行环境（bubblewrap 沙箱，**主机未安装 bwrap 时拒绝执行而非降级到无隔离运行**；网络隔离依赖外部 netns helper，缺失时如实提示不保证隔离），有向量存算方案支持RAG，有聊天记录自动提取异步生成记忆、用户画像……通过这些基础能力，加上“向导”的完整提示词模板，FeClaw可以支撑一位学习向导智能体的运行。
 
 但是不止于此。FeClaw 提出的Gen 2 - IM Agent框架针对多智能体协作进行了原生优化——群聊中多个 Agent 可自主响应、交叉引用、协同产出。群内提供 VFS 挂载共享空间，Agent 之间通过 Buffer+Flush 原子化消息机制保证并发安全。
 
@@ -132,7 +132,7 @@ Gen 2 - IM Agent 工作流： `协处理器/IRQ唤醒 → WorkSession创建 → 
 1. FeClaw本地账号密码系统
 2. 对接外部OAuth/OIDC Provider
 
-此外用户可以通过有效期 10 分钟（±30s）的验证码单独分享自己某个 Agent 的权限给别人。
+此外用户可以通过有效期 ±30 秒（30 秒一个窗口）的 TOTP 验证码单独分享自己某个 Agent 的权限给别人。验证码仅对 Agent 所有者签发（严格归属校验），签发的 JWT 绑定该 Agent 子域，有效期为 14 天。
 
 特别地，管理员用户可以查看metrics数据等。
 
@@ -243,7 +243,7 @@ MAIN_TEXT_MODEL=deepseek-flash       # 主模型切到 DeepSeek
 python -m uvicorn main:app --host 0.0.0.0 --port 8080 --reload
 ```
 
-首次启动时系统自动创建 MySQL 数据库表和默认管理员账号（默认密码 `admin`，**强烈建议部署后立即修改**）。
+首次启动时系统自动创建 MySQL 数据库表和管理员账号（密码为**随机生成**并仅打印到启动终端一次；可通过 `python -m uvicorn main:app --reset-admin` 重新生成）。
 
 打开 http://localhost:8080 ，用默认账号登录控制台，创建 Agent 后即可使用。系统会自动创建一个示例 Agent。
 
