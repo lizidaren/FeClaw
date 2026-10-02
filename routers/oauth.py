@@ -214,9 +214,13 @@ async def oauth_callback(
     # Q1 修复：写入统一走 auth_cookies（与登出清除共用同一 domain 推导，保证删得掉）
     response = RedirectResponse(url=redirect_to)
 
+    # 2026-10-02 修：前端架构（token-sync.js + 各页 localStorage.getItem('feclaw_jwt')
+    # + Authorization: Bearer）**要求 JS 能读到这个 token**；若设 HttpOnly，
+    # 前端读不到 ⇒ 页面把自己踢回 /login ⇒ SSO 登录死循环（当天线上实测）。
+    # 安全代价已记录：XSS 可窃取该 token ⇒ 后续应改「服务端注入 token」而非放宽 cookie。
     set_auth_cookie(
         response, AUTH_COOKIE_JWT, local_jwt,
-        httponly=True, secure=True, max_age=settings.JWT_EXPIRE_HOURS * 3600,
+        httponly=False, secure=True, max_age=settings.JWT_EXPIRE_HOURS * 3600,
     )
 
     # P1-4 修复：保存 id_token 到 cookie，供 logout 时传递 id_token_hint
