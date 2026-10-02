@@ -44,6 +44,8 @@ class Settings(BaseSettings):
     DEEPSEEK_API_KEY: str = ""
     DOUBAO_API_KEY: str = ""
     QWEN_API_KEY: str = ""
+    # 阿里云 DashScope（语音识别 ASR 等）
+    ALIYUN_DASHSCOPE_API_KEY: str = ""
     MIMO_API_KEY: str = ""
     MINIMAX_API_KEY: str = ""
     DEFAULT_LLM_PROVIDER: str = "zhipuai"

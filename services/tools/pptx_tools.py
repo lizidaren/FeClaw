@@ -105,8 +105,10 @@ class PptxToolsMixin(AgentToolsServiceBase):
 
             vfs_output_path = f"workspace/presentations/{output_filename}"
             abs_key = f"feclaw/agents/{self.agent_hash}/{vfs_output_path}"
-            from services.storage_service import StorageService
-            StorageService().upload_file(pptx_bytes, abs_key)
+            # 感知 STORAGE_MODE（cos / local / auto）—— local 模式下不再因硬绑 COS 而必然失败
+            from config import settings
+            from services.file_storage import create_file_storage
+            create_file_storage(mode=getattr(settings, "STORAGE_MODE", "auto")).put_object(abs_key, pptx_bytes)
 
             # 6. 生成分享链接
             share_result = None
@@ -135,7 +137,7 @@ class PptxToolsMixin(AgentToolsServiceBase):
                 f"✅ PPTX 已生成（{mode_label}）并保存到 {vfs_output_path}",
                 f"大小: {len(pptx_bytes) / 1024:.0f} KB",
             ]
-            if share_result:
+            if share_result and share_result.get("url"):
                 result_parts.append(f"分享链接: {share_result['url']}")
             return "\n".join(result_parts)
 

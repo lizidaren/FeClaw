@@ -105,21 +105,38 @@ def auth_headers(token: str) -> Dict[str, str]:
 class DatabaseBackedClient(WeChatBot):
     """用数据库存储凭证的 WeChatBot 子类"""
 
-    def __init__(self, user_id: int, on_heartbeat: Optional[Callable[[], None]] = None):
+    def __init__(self, user_id: int, on_heartbeat: Optional[Callable[[], None]] = None,
+                 binding_id: int = None, agent_hash: str = None):
         # 不传递 cred_path，我们用数据库存储
         super().__init__(cred_path=None, on_heartbeat=on_heartbeat)
         self.user_id = user_id
+        # agent 上下文（B 节）：同一用户多 Agent 时，必须按 binding_id / agent_hash 取凭证，
+        # 否则 .first() 会取到另一条绑定，用错 bot_token / 路由到错 Agent（§AH 根因）
+        self.binding_id = binding_id
+        self.agent_hash = agent_hash
         # 直接加载凭证到 _credentials
         self._load_credentials_from_db()
 
+    def _binding_query(self, db):
+        """构造「定位本条绑定」的查询：优先 binding_id，其次 user_id(+agent_hash)，只看 active"""
+        query = db.query(WeChatBinding).filter(
+            WeChatBinding.status == "active"
+        )
+        if self.binding_id is not None:
+            return query.filter(WeChatBinding.id == self.binding_id)
+        query = query.filter(WeChatBinding.user_id == self.user_id)
+        if self.agent_hash:
+            query = query.filter(WeChatBinding.agent_hash == self.agent_hash)
+        # 没有更精确上下文时取最新一条（与 get_binding_by_user 的语义一致）
+        return query.order_by(WeChatBinding.id.desc())
+
     def _load_credentials_from_db(self) -> bool:
         """从 WeChatBinding.ilink_token 加载凭证到 _credentials"""
-        logger.debug("[WeChat] _load_credentials_from_db for user_id={}".format(self.user_id))
+        logger.debug("[WeChat] _load_credentials_from_db for user_id={} binding_id={}".format(
+            self.user_id, self.binding_id))
         db = SessionLocal()
         try:
-            binding = db.query(WeChatBinding).filter(
-                WeChatBinding.user_id == self.user_id
-            ).first()
+            binding = self._binding_query(db).first()
             logger.debug("[WeChat] binding found={}, ilink_token not None={}".format(
                 bool(binding), bool(binding.ilink_token) if binding else False))
             if not binding or not binding.ilink_token:
@@ -134,7 +151,11 @@ class DatabaseBackedClient(WeChatBot):
                 user_id=cred_data.get("user_id")
             )
             self._base_url = self._credentials.base_url
-            logger.info("[WeChat] Loaded credentials from DB: token={}...".format(self._credentials.token[:20]))
+            # token 是敏感数据：只留前后 4 位（原来打的是前 20 位，等于半泄漏）
+            _tok = self._credentials.token or ""
+            _masked = "{}{}{}".format(_tok[:4], "***", _tok[-4:]) if len(_tok) > 8 else "***"
+            logger.info("[WeChat] Loaded credentials from DB: token={}, account_id={}".format(
+                _masked, self._credentials.account_id))
             return True
         except Exception as e:
             logger.error("[WeChat] Error loading credentials: {}".format(e))
@@ -158,9 +179,7 @@ class DatabaseBackedClient(WeChatBot):
         """保存凭证到 WeChatBinding.ilink_token"""
         db = SessionLocal()
         try:
-            binding = db.query(WeChatBinding).filter(
-                WeChatBinding.user_id == self.user_id
-            ).first()
+            binding = self._binding_query(db).first()
             if binding:
                 cred_data = {
                     "token": creds.token,

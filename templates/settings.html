@@ -14,6 +14,7 @@
     <link rel="stylesheet" href="/static/css/themes.css">
     <!-- 认证检查（必须在页面渲染前执行） -->
     <script>window.ROOT_DOMAIN = "{{ feclaw_domain }}";</script>
+    <script src="/static/js/token-sync.js"></script>
     <script src="/static/js/auth.js"></script>
     <script>
         (async function() {
@@ -92,7 +93,7 @@
                             <div class="card-body">
                                 <p class="text-secondary mb-md">
                                     您当前正在使用 Platform 登录。如果您希望彻底退出，请
-                                    <a href="/api/auth/logout-page"
+                                    <a href="https://platform.firstentrance.lizidaren.cn/api/auth/logout-page"
                                        target="_blank" style="color:var(--accent-red,#ff6b6b);text-decoration:none;">
                                         退出 Platform 账号
                                     </a>
@@ -190,15 +191,10 @@
             }
         })();
 
-        // 退出登录
+        // 退出登录（统一走 Auth.clearAuth：服务端吊销 + 带 domain 清 cookie + 清 localStorage）
         document.getElementById('logout-btn').addEventListener('click', function() {
-            fetch('/api/auth/logout', { method: 'POST' }).then(function() {
-                localStorage.removeItem('feclaw_jwt');
-                localStorage.removeItem('feclaw_jwt_expires');
-                localStorage.removeItem('feclaw_jwt_expires_at');
-                localStorage.removeItem('feclaw_agent_hash');
-                window.location.href = '/';
-            });
+            if (typeof Auth === 'undefined') { window.location.href = '/'; return; }
+            Auth.clearAuth().then(function() { window.location.href = '/'; });
         });
     </script>
 </body>

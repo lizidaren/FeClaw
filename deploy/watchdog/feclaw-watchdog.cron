@@ -1,0 +1,3 @@
+# FeClaw 健康看门狗：每 2 分钟跑一次（真健康检查，不再只探 /docs）
+# 脚本: /usr/local/bin/feclaw-watchdog.sh
+*/2 * * * * root /usr/local/bin/feclaw-watchdog.sh

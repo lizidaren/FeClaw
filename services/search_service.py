@@ -129,7 +129,7 @@ class SearchService:
         """
         import os
 
-        qwen_key = settings.QWEN_API_KEY or settings.QWEN_VL_KEY or ""
+        qwen_key = settings.QWEN_API_KEY or getattr(settings, "QWEN_VL_KEY", "") or ""
         if not qwen_key:
             return "Error: QWEN_API_KEY 环境变量未配置"
         _t0 = time.time()

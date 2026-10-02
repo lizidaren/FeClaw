@@ -2,6 +2,7 @@
 <html lang="zh-CN">
 <head>
     <script>window.ROOT_DOMAIN = "{{ feclaw_domain }}";</script>
+    <script src="/static/js/token-sync.js"></script>
     <script src="/static/js/auth.js"></script>
     <script>
         // 阻塞式检查认证，未认证则不渲染页面
@@ -136,8 +137,8 @@
     </div>
     <script>
         const host = window.location.host;
-        const hashMatch = host.match(/^([a-f0-9]{4})\./);
-        const agentHash = hashMatch ? hashMatch[1] : null;
+        // 4–8 位 hex，统一走 Auth.parseAgentHash
+        const agentHash = Auth.parseAgentHash(host);
         
         if (agentHash) {
             document.getElementById('agentHash').textContent = agentHash;

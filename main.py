@@ -67,6 +67,8 @@ from routers.user import router as user_router
 from routers.admin import router as admin_router
 from routers.admin_panel import router as admin_panel_router
 from routers.group import router as group_router
+from routers.approval import router as approval_router  # P4: 审批 API
+from routers.organization import router as organization_router  # P4: 组织 API
 from routers.wechat import ensure_message_handler
 from services.agent_init_service import ensure_default_agent_5178
 from routers.client_ws import router as client_ws_router
@@ -77,6 +79,52 @@ from routers.desktop_api import router as desktop_api_router
 from routers.zentrim import router as zentrim_router
 from routers.metrics_internal import router as metrics_internal_router
 from routers.setup import router as setup_router
+
+
+def migrate_wechat_binding_supersede() -> list:
+    """Q2-A/D 幂等迁移：同一微信号（openid）只保留最近活跃的一条 active，其余置 superseded。
+
+    为什么：iLink「一个微信同时只能跟一个聊天」，用户「取消绑定 → 绑新的」时
+    解绑旧的是**无通知的**，库里因此会积累多条同 openid 的 active 行；
+    查询按 id desc 会命中已死的旧行，把入站/出站路由到错误的 Agent
+    （§AA「没有消息可存档」· §AC「出站 session timeout」· §AH「招呼被 e45a 回了」的根因）。
+
+    幂等：无重复直接跳过；不删行、不动凭证（回退 = 一条 UPDATE 改回 active）。
+    选保留者：(last_msg_at desc, id desc) —— 最近真正活跃的那条才是当前会话。
+
+    Returns: 被取代的 [(id, user_id, agent_hash), ...]（便于自证脚本断言）
+    """
+    from datetime import datetime as _dt
+    from models.database import WeChatBinding as _WCB
+    changed = []
+    db = SessionLocal()
+    try:
+        actives = db.query(_WCB).filter(_WCB.status == "active").all()
+        groups = {}
+        for b in actives:
+            key = (b.wx_openid or "").strip()
+            if not key:
+                continue
+            groups.setdefault(key, []).append(b)
+        for key, rows in groups.items():
+            if len(rows) < 2:
+                continue
+            rows.sort(key=lambda r: (r.last_msg_at is not None, r.last_msg_at or _dt.min, r.id), reverse=True)
+            for loser in rows[1:]:
+                changed.append((loser.id, loser.user_id, loser.agent_hash))
+                loser.status = "superseded"
+        if changed:
+            db.commit()
+            logger.warning(
+                "Q2-A: superseded {} duplicate active wechat binding(s) "
+                "(id, user_id, agent_hash)={}".format(len(changed), changed)
+            )
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Q2-A: wechat binding supersede migration failed: {e}")
+    finally:
+        db.close()
+    return changed
 
 
 @asynccontextmanager
@@ -164,6 +212,7 @@ async def lifespan(app: FastAPI):
     from models.fehub import FePublish, AppData  # noqa: F401
     from models.agent_buffer import AgentBuffer  # noqa: F401  (Agent V2 ReplyBuffer)
     from models.zentrim import ZentrimEntry, ZentrimTimeline, ZentrimTimelineEntry, ZentrimReference  # noqa: F401  (Zentrim 格物所)
+    from models.organization import Organization  # noqa: F401  (P4: 组织)
     init_db()
     logger.info("Database initialized")
 
@@ -239,6 +288,19 @@ async def lifespan(app: FastAPI):
             conn.commit()
             logger.info("Added tier column to users table")
 
+        # Q1 登出吊销：users.jwt_version（登出 +1 ⇒ 旧 token 立即失效）
+        # 幂等：先查 information_schema，已存在则跳过。默认 0 ⇒ 不强制登出现有用户。
+        result = conn.execute(text(
+            "SELECT COLUMN_NAME FROM information_schema.COLUMNS "
+            "WHERE TABLE_NAME = 'users' AND COLUMN_NAME = 'jwt_version' AND TABLE_SCHEMA = DATABASE()"
+        ))
+        if not result.fetchone():
+            conn.execute(text(
+                "ALTER TABLE users ADD COLUMN jwt_version INT NOT NULL DEFAULT 0"
+            ))
+            conn.commit()
+            logger.info("Added jwt_version column to users table (Q1 logout revocation)")
+
         # P0.4 bcrypt 迁移：放宽 salt 列允许 NULL（bcrypt 用户不需要 salt）
         result = conn.execute(text(
             "SELECT IS_NULLABLE FROM information_schema.COLUMNS "
@@ -275,6 +337,76 @@ async def lifespan(app: FastAPI):
             conn.commit()
         except Exception:
             pass
+
+        # P4: groups.organization_id 列 + 索引（外键 use_alter 避免循环依赖）
+        try:
+            org_cols = [r[0] for r in conn.execute(text(
+                "SELECT COLUMN_NAME FROM information_schema.COLUMNS "
+                "WHERE TABLE_NAME='groups' AND TABLE_SCHEMA=DATABASE()"
+            )).fetchall()]
+            if 'organization_id' not in org_cols:
+                conn.execute(text(
+                    "ALTER TABLE groups ADD COLUMN organization_id INT NULL"
+                ))
+                conn.execute(text(
+                    "CREATE INDEX idx_groups_organization_id ON groups(organization_id)"
+                ))
+                conn.commit()
+                logger.info("P4: added groups.organization_id column + index")
+        except Exception as _e:
+            logger.debug(f"P4: groups.organization_id migration skipped: {_e}")
+
+        # P1.x: group_members 新增 3 列（job_description/status/allow_dm）
+        # 与 models/group.py 的 GroupMember 对齐；缺列会导致群成员相关接口 500。
+        try:
+            gm_cols = [r[0] for r in conn.execute(text(
+                "SELECT COLUMN_NAME FROM information_schema.COLUMNS "
+                "WHERE TABLE_NAME='group_members' AND TABLE_SCHEMA=DATABASE()"
+            )).fetchall()]
+            _gm_added = []
+            if 'job_description' not in gm_cols:
+                conn.execute(text("ALTER TABLE group_members ADD COLUMN job_description TEXT NULL"))
+                _gm_added.append('job_description')
+            if 'status' not in gm_cols:
+                conn.execute(text("ALTER TABLE group_members ADD COLUMN status VARCHAR(16) DEFAULT 'dormant'"))
+                _gm_added.append('status')
+            if 'allow_dm' not in gm_cols:
+                conn.execute(text("ALTER TABLE group_members ADD COLUMN allow_dm BOOLEAN DEFAULT 1"))
+                _gm_added.append('allow_dm')
+            if _gm_added:
+                conn.commit()
+                logger.info(f"P1.x: added group_members columns: {', '.join(_gm_added)}")
+        except Exception as _e:
+            logger.debug(f"P1.x: group_members columns migration skipped: {_e}")
+
+        # Q7/DEPLOY-GATE: 补缺列幂等迁移 —— 与 models/database.py 对齐
+        # conversation_sessions.channel + chat_history.tool_call_id/tool_name/tool_args
+        # 旧库升级时 create_all 不会给已存在的表加列，缺列会导致相关接口 500。
+        try:
+            _missing_cols = {
+                "conversation_sessions": {"channel": "VARCHAR(32) NULL"},
+                "chat_history": {
+                    "tool_call_id": "VARCHAR(64) NULL",
+                    "tool_name": "VARCHAR(64) NULL",
+                    "tool_args": "JSON NULL",
+                },
+            }
+            for _tbl, _cols in _missing_cols.items():
+                _existing = [r[0] for r in conn.execute(text(
+                    "SELECT COLUMN_NAME FROM information_schema.COLUMNS "
+                    f"WHERE TABLE_NAME='{_tbl}' AND TABLE_SCHEMA=DATABASE()"
+                )).fetchall()]
+                _added = [c for c in _cols if c not in _existing]
+                for _col in _added:
+                    conn.execute(text(f"ALTER TABLE {_tbl} ADD COLUMN {_col} {_cols[_col]}"))
+                if _added:
+                    conn.commit()
+                    logger.info(f"Q7: added {_tbl} columns: {', '.join(_added)}")
+        except Exception as _e:
+            logger.debug(f"Q7: missing-column migration skipped: {_e}")
+
+    # Q2-A/D：微信多绑定根治（逻辑见 migrate_wechat_binding_supersede，便于自证脚本复用它）
+    migrate_wechat_binding_supersede()
 
     # 创建默认管理员用户（如果不存在）
     db = SessionLocal()
@@ -627,6 +759,8 @@ else:
     app.include_router(console.router)  # 控制台 API (必须在 static_site_public 之前)
     app.include_router(user_router)  # 用户 API (注册、登录)
     app.include_router(group_router)  # Group Chat API
+    app.include_router(approval_router)  # P4: 审批同意/拒绝 API
+    app.include_router(organization_router)  # P4: 组织 API
     app.include_router(admin_router)  # 管理后台 API (/api/admin/*)
     app.include_router(admin_panel_router)  # 管理后台页面 + 配置 + 统计 (/admin/*)
     app.include_router(setup_router)  # 首次启动配置向导 API（正常启动时也挂载，供 admin 在后台调整）

@@ -23,6 +23,7 @@ from services.tools.universal_parser import ParseFileMixin
 from services.tools.pptx_tools import PptxToolsMixin
 from services.tools.todo_tools import TodoToolsMixin
 from services.tools.reply_buffer_tools import ReplyBufferToolsMixin
+from services.tools.permission_tools import PermissionToolsMixin
 
 
 class AgentToolsService(
@@ -33,6 +34,7 @@ class AgentToolsService(
     ParseFileMixin,
     FeHubToolsMixin,
     MomentsToolsMixin,
+    PermissionToolsMixin,
     FileOpsMixin,
     AIToolsMixin,
     WebToolsMixin,

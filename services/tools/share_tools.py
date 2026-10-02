@@ -49,11 +49,16 @@ class ShareToolsMixin(AgentToolsServiceBase):
         )
 
         if result is None:
-            return "Error: 创建分享链接失败（可能是敏感文件或无效路径）"
-        if isinstance(result, dict) and result.get("_error") == "not_found":
-            return f"Error: 文件不存在，无法分享：{result.get('vfs_path', path)}"
+            return "Error: 创建分享链接失败（服务内部错误，详见服务端日志）"
+        if isinstance(result, dict) and result.get("_error"):
+            err = result["_error"]
+            if err == "not_found":
+                return f"Error: 文件不存在，无法分享：{result.get('vfs_path', path)}"
+            if err == "storage_error":
+                return f"Error: 存储服务不可用，无法创建分享链接：{result.get('message', '未知原因')}"
+            return f"Error: 创建分享链接失败：{result.get('message', err)}"
 
-        return result["url"]
+        return result.get("url") or "Error: 创建分享链接失败（返回结果缺少 url）"
 
     @tool(description="解析分享页引用令牌，获取选中原文和上下文", category="file")
     def resolve_share_reference(self, ref_hash: str) -> str:

@@ -13,7 +13,7 @@ const Auth = {
   EXPIRES_KEY: 'feclaw_jwt_expires_at',
 
   // 根域名（SSO 同步用）
-  ROOT_DOMAIN: window.ROOT_DOMAIN || ''
+  ROOT_DOMAIN: window.ROOT_DOMAIN || '',
 
   // API 端点
   API_BASE: '/api/workspace',
@@ -61,8 +61,9 @@ const Auth = {
     }
 
     // 2. JWT 已过期 → 清除并跳转登录
+    //    serverRevoke:false —— 被动过期不是用户主动登出，不能吊销该用户其他设备的 token
     if (expiresAt && Date.now() > parseInt(expiresAt)) {
-      this.clearAuth();
+      this.clearAuth({ serverRevoke: false });
       if (!window.location.pathname.includes('/login')) {
         this.redirectToLogin();
       }
@@ -173,11 +174,27 @@ const Auth = {
   },
 
   /**
-   * 从 host 中提取 agent hash
+   * 从 host 解析 agent hash（全局唯一实现，勿在别处再写正则）
+   *
+   * 统一口径：**4–8 位 hex**。
+   *   - 老 agent 为 4 位（如 5178）
+   *   - `services/agent_init_service.create_agent` 新建为 8 位（如 692eaa5e）
+   * 后端 `utils/agent_access.extract_hash_from_host` 口径与此一致。
+   *
+   * @param {string} host - window.location.hostname / host（可带端口）
+   * @returns {string|null} 小写 hash；不匹配返回 null
+   */
+  parseAgentHash(host) {
+    if (!host) return null;
+    const match = String(host).match(/^([a-f0-9]{4,8})\./i);
+    return match ? match[1].toLowerCase() : null;
+  },
+
+  /**
+   * 从 host 中提取 agent hash（兼容旧调用，内部走 parseAgentHash）
    */
   _getAgentHashFromHost(host) {
-    const match = host.match(/^([a-f0-9]{4})\./);
-    return match ? match[1] : 'unknown';
+    return this.parseAgentHash(host) || 'unknown';
   },
 
   /**
@@ -251,8 +268,9 @@ const Auth = {
     const response = await window._originalFetch(url, options);
 
     // 认证失败 → 清除认证并跳转登录
+    // serverRevoke:false —— 401 可能只是本浏览器 token 陈旧，不该连带吊销其他设备
     if (response.status === 401) {
-      this.clearAuth();
+      this.clearAuth({ serverRevoke: false });
       this.redirectToLogin();
       throw new Error('Authentication failed');
     }
@@ -261,42 +279,74 @@ const Auth = {
   },
 
   /**
+   * 按名字删除认证 cookie —— 覆盖「带 domain」和「host-only」两种变体
+   *
+   * cookie 身份 = name + domain + path（RFC 6265）：登录时 oauth.py 写的是
+   * `.ROOT_DOMAIN` 跨子域名 cookie（如 .feclaw.lizidaren.cn），
+   * 本地登录/旧代码写的是 host-only —— 两者是不同的 cookie，必须各删一次，
+   * 否则会出现「登出后 cookie 还在、旧 token 还能用」的假退出。
+   */
+  _clearCookie(name) {
+    var domains = [''];
+    if (this.ROOT_DOMAIN) {
+      domains.push('; domain=.' + this.ROOT_DOMAIN);
+      domains.push('; domain=' + this.ROOT_DOMAIN);
+    }
+    for (var i = 0; i < domains.length; i++) {
+      document.cookie = name + '=; path=/' + domains[i] + '; SameSite=Lax; max-age=0';
+    }
+  },
+
+  /**
    * 清除所有认证信息
-   * @param {object} options - { redirectToLogout: boolean } 是否重定向到 Platform OIDC end_session
+   * @param {object} options
+   *   - redirectToLogout: 是否重定向到 Platform OIDC end_session
+   *   - serverRevoke: 是否调用后端吊销旧 token（默认 true）。
+   *     被动清理（token 过期、401）请显式传 false —— 否则会把该用户
+   *     其他设备的 token 一起吊销（jwt_version 是按用户而非按会话计数的）。
+   * @returns {Promise} 后端登出请求的 promise（供调用方在跳转前 await）
    */
   clearAuth(options = {}) {
     localStorage.removeItem(this.JWT_KEY);
     localStorage.removeItem(this.EXPIRES_KEY);
+    localStorage.removeItem('feclaw_jwt_expires');
     localStorage.removeItem(this.USER_KEY);
     localStorage.removeItem('feclaw_agent_hash');
-    // 清除主 cookie
-    document.cookie = 'feclaw_jwt=; path=/; SameSite=Lax; max-age=0';
-    document.cookie = 'feclaw_jwt=; path=/; SameSite=Lax; max-age=0';
+    // 清除认证 cookie（三个名字，各含 domain + host-only 变体）
+    this._clearCookie('feclaw_jwt');
+    this._clearCookie('feclaw_id_token');
+    this._clearCookie('platform_token');
     // 清除所有 TOTP Agent 专属 cookie
     var cookies = document.cookie.split('; ');
     for (var i = 0; i < cookies.length; i++) {
       var parts = cookies[i].split('=');
       if (parts[0].startsWith('feclaw_jwt_totp_')) {
-        document.cookie = parts[0] + '=; path=/; max-age=0';
-        document.cookie = parts[0] + '=; path=/; SameSite=Lax; max-age=0';
+        this._clearCookie(parts[0]);
       }
+    }
+
+    // 服务端吊销：jwt_version +1 ⇒ 旧 token 立刻失效。
+    // keepalive:true 保证紧跟的页面跳转不会把请求取消掉。
+    var pending = Promise.resolve();
+    if (options.serverRevoke !== false) {
+      pending = fetch('/api/auth/logout', { method: 'POST', keepalive: true, credentials: 'same-origin' })
+        .catch(function() { /* 网络失败不阻塞登出 */ });
     }
 
     if (options.redirectToLogout) {
       // 调用后端获取 OIDC end_session 跳转地址
-      fetch('/api/oauth/logout', { method: 'POST' })
-        .then(function(res) { return res.json(); })
-        .then(function(data) {
-          if (data.redirect_url) {
-            window.location.href = data.redirect_url;
-          } else {
+      return pending.then(function() {
+        return fetch('/api/oauth/logout', { method: 'POST' })
+          .then(function(res) { return res.json(); })
+          .then(function(data) {
+            window.location.href = data.redirect_url || this.LOGIN_PATH;
+          }.bind(this))
+          .catch(function() {
             window.location.href = this.LOGIN_PATH;
-          }
-        }.bind(this))
-        .catch(function() {
-          window.location.href = this.LOGIN_PATH;
-        }.bind(this));
+          }.bind(this));
+      }.bind(this));
     }
+    return pending;
   },
 
   /**
@@ -355,7 +405,7 @@ const Auth = {
   /**
    * 就地验证 TOTP（当前页面验证，不跳转）
    * @param {string} code - 6位验证码
-   * @param {string} agentHash - Agent 的 4位 hash（可选，部分场景需要）
+   * @param {string} agentHash - Agent 的 4–8 位 hash（可选，部分场景需要）
    * @returns {Promise<{success: boolean, token?: string, error?: string}>}
    */
   async verifyTotp(code, agentHash = null) {
@@ -450,7 +500,7 @@ const Auth = {
   /**
    * 使用 Agent hash + TOTP 验证
    * （调用 Agent TOTP 验证 API）
-   * @param {string} agentHash - Agent 的 4位 hash
+   * @param {string} agentHash - Agent 的 4–8 位 hash
    * @param {string} code - 6位验证码
    * @returns {Promise<{success: boolean, token?: string, error?: string}>}
    */

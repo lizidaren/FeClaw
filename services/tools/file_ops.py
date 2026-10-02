@@ -3,6 +3,11 @@ Agent 工具服务 - 文件操作工具
 包含 file_read/write/list/delete/edit
 
 支持群共享空间路径 /mnt/group/{group_id}/xxx → feclaw/groups/{gid}/xxx
+
+P3 (Agent 文件权限)：
+- .share/ 活文档：Agent 不能直接写，需通过 request_permission 申请
+- .ref/ 参考库：只读，永远不能写
+- .attach/ 附件：只读，永远不能写
 """
 
 import asyncio
@@ -11,10 +16,51 @@ from typing import Optional, Tuple
 
 from services.tool_registry import tool
 from services.tools.base import AgentToolsServiceBase
+from services.vfs.paths import GROUP_ATTACH_DIR, GROUP_REF_DIR, GROUP_SHARE_DIR
 from models.group import GroupMember
 from models.database import SessionLocal
 
 logger = logging.getLogger(__name__)
+
+
+def _check_group_shared_write_allowed(path: str) -> Optional[str]:
+    """检查群共享空间路径是否允许直接写入。
+
+    Returns:
+        None 表示允许写入；非 None 是错误消息（Agent 应使用 request_permission）。
+    """
+    # /mnt/group/{id}/{scope}/...
+    parts = path.strip("/").split("/")
+    if len(parts) < 4:
+        return None  # 不在三层空间内（罕见，如 /mnt/group/1）→ 放行给更严格的检查
+    scope = parts[3]
+    if scope == GROUP_REF_DIR or scope == GROUP_ATTACH_DIR:
+        # 参考库 / 附件 → 永远只读
+        if scope == GROUP_REF_DIR:
+            return (
+                f"Error: 参考库文件不可修改（{path}）。"
+                f"Agent 对 .ref/ 没有写权限，申请也不批。"
+                f"如需更新参考库，请让用户手动操作。"
+            )
+        return (
+            f"Error: 附件不可修改（{path}）。"
+            f"Agent 对 .attach/ 没有写权限，附件是聊天流的只读存档。"
+        )
+    if scope == GROUP_SHARE_DIR:
+        # 活文档 → 引导用 request_permission
+        return (
+            f"Error: 群共享活文档不能由 Agent 直接修改（{path}）。"
+            f"请改用 request_permission 工具申请修改，"
+            f"等待群主审批通过后系统会自动执行。"
+            f"\n\n示例："
+            f"\n  request_permission("
+            f"\n    action='file_write',"
+            f"\n    intent='<你的解释>',"
+            f"\n    target='group:<group_id>',"
+            f"\n    arguments={{'path': '{path}', 'content': '<内容>'}}"
+            f"\n  )"
+        )
+    return None  # 其他 scope（未来扩展）放行
 
 
 # 群组别名映射（测试用，每次重测前更新）
@@ -22,6 +68,11 @@ logger = logging.getLogger(__name__)
 GROUP_ALIASES = {
     "interview": "b20440ba-93f3-4390-864d-78912a607d3b",
 }
+
+
+# P4: 哨兵错误码 —— _resolve_organization_path 在群未绑定组织时返回此值
+# 调用方据此返回"空目录 / 文件不存在"
+ORG_NOT_BOUND = "_ORG_NOT_BOUND_"
 
 
 class FileOpsMixin(AgentToolsServiceBase):
@@ -68,14 +119,59 @@ class FileOpsMixin(AgentToolsServiceBase):
         """
         工具层统一路径解析（V2 群共享空间支持）
 
-        /mnt/group/{gid}/... → feclaw/groups/{gid}/...
+        /mnt/group/{gid}/.ref/_organization/xxx → feclaw/organizations/{org_id}/.ref/xxx
+        /mnt/group/{gid}/...                    → feclaw/groups/{gid}/...
         其他路径走 VFS _resolve_path
         """
         if self._is_group_path(path):
+            # P4: 检测 _organization/ 路径 → 解析为组织共享
+            if "/.ref/_organization/" in path or path.rstrip("/").endswith("/.ref/_organization"):
+                resolved = self._resolve_organization_path(path)
+                if resolved[0] is not None or resolved[1] is not None:
+                    return resolved
+                # _organization 但解析失败（群未绑定组织）→ 返回特殊标记
+                # 调用方据此返回空目录/文件不存在
             return self._resolve_group_path(path)
         return self._vfs._resolve_path(path)
 
-    def _check_group_access(self, group_id: str) -> Optional[str]:
+    def _resolve_organization_path(self, path: str) -> Tuple[Optional[str], Optional[str]]:
+        """解析 /mnt/group/{id}/.ref/_organization/xxx → feclaw/organizations/{org_id}/.ref/xxx
+
+        Returns:
+            (cos_key, error_msg)
+            - 成功：(feclaw/organizations/{org_id}/.ref/xxx, None)
+            - 群未绑定：(None, "_NOT_BOUND_")  ← 哨兵值，调用方据此返回空目录/不存在
+            - 路径格式错误：(None, "Error: ...")
+        """
+        import re
+        m = re.match(r"^/mnt/group/(\d+)/\.ref/_organization(?:/(.*))?$", path.rstrip("/"))
+        if not m:
+            return (None, "Error: /_organization/ 路径格式错误，应为 /mnt/group/{id}/.ref/_organization/{filename}")
+        gid = m.group(1)
+        rest = m.group(2) or ""
+        if ".." in rest:
+            return (None, "Error: 路径不允许 .. 穿越")
+
+        try:
+            from models.database import SessionLocal
+            from models.group import Group as _Group
+            db = SessionLocal()
+            try:
+                group = db.query(_Group).filter(_Group.id == int(gid)).first()
+                if not group or group.organization_id is None:
+                    # 群未绑定组织 → 哨兵
+                    return (None, ORG_NOT_BOUND)
+                org_id = group.organization_id
+            finally:
+                db.close()
+        except Exception as e:
+            return (None, f"Error: 解析组织失败: {e}")
+
+        if rest:
+            return (f"feclaw/organizations/{org_id}/.ref/{rest}", None)
+        return (f"feclaw/organizations/{org_id}/.ref/", None)
+
+    def _check_group_access(self, group_id: int) -> Optional[str]:
         """检查当前 Agent 是否是指定群的成员
 
         Returns:
@@ -116,7 +212,9 @@ class FileOpsMixin(AgentToolsServiceBase):
             access_err = self._check_group_access(gid)
             if access_err:
                 return access_err
-            cos_key, err = self._resolve_group_path(path)
+            cos_key, err = self._resolve_path(path)
+            if err == ORG_NOT_BOUND:
+                return f"Error: 群未绑定组织，_organization/ 不可见: {path}"
             if err:
                 return err
             try:
@@ -152,6 +250,10 @@ class FileOpsMixin(AgentToolsServiceBase):
             access_err = self._check_group_access(gid)
             if access_err:
                 return access_err
+            # P3: .share/.ref/.attach 写拦截 —— Agent 不能直接改群共享文件
+            blocked = _check_group_shared_write_allowed(path)
+            if blocked:
+                return blocked
             cos_key, err = self._resolve_group_path(path)
             if err:
                 return err
@@ -178,7 +280,9 @@ class FileOpsMixin(AgentToolsServiceBase):
             access_err = self._check_group_access(gid)
             if access_err:
                 return access_err
-            cos_prefix, err = self._resolve_group_path(dir)
+            cos_prefix, err = self._resolve_path(dir)
+            if err == ORG_NOT_BOUND:
+                return "（空目录 — 群未绑定组织）"
             if err:
                 return err
             # 确保目录前缀以 / 结尾
@@ -257,6 +361,14 @@ class FileOpsMixin(AgentToolsServiceBase):
         try:
             # 群共享空间路径：直读直写
             if self._is_group_path(path):
+                # P3: .share/.ref/.attach 写拦截 —— Agent 不能直接改群共享文件
+                # （同 file_write，request_permission 走单独工具）
+                access_err = self._check_group_access(path.strip("/").split("/")[2])
+                if access_err:
+                    return access_err
+                blocked = _check_group_shared_write_allowed(path)
+                if blocked:
+                    return blocked
                 cos_key, err = self._resolve_group_path(path)
                 if err:
                     return err

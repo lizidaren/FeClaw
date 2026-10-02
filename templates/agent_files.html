@@ -2,18 +2,27 @@
 <html lang="zh-CN">
 <head>
     <script>window.ROOT_DOMAIN = "{{ feclaw_domain }}";</script>
+    <script src="/static/js/token-sync.js"></script>
     <script src="/static/js/auth.js"></script>
     <script>
         // 阻塞式检查认证，未认证则不渲染页面
-        Auth.checkAuthBeforeRender().then(authenticated => {
-            if (!authenticated) {
-                // 阻止页面渲染
-                document.write('<div style="display:none">');
-            }
-        }).catch(e => {
-            document.getElementById('fileList').innerHTML =
-                '<div class="empty-state"><div class="icon">❌</div><p>认证异常: ' + (e.message || e) + '</p></div>';
-        });
+        // Q3b：auth.js 可能加载失败（网络 / CDN / 旧缓存没这个函数）——
+        // 那种情况下这里抛错会把整页打成砖。检测不到就跳过，
+        // 由 body 末尾的 fail-safe 兜底提示，而不是永远停在「⏳ 加载中...」。
+        if (typeof Auth !== 'undefined' && typeof Auth.checkAuthBeforeRender === 'function') {
+            Auth.checkAuthBeforeRender().then(authenticated => {
+                if (!authenticated) {
+                    // 阻止页面渲染
+                    document.write('<div style="display:none">');
+                }
+            }).catch(e => {
+                var fl = document.getElementById('fileList');
+                if (fl) {
+                    fl.innerHTML =
+                        '<div class="empty-state"><div class="icon">❌</div><p>认证异常: ' + (e.message || e) + '</p></div>';
+                }
+            });
+        }
     </script>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -371,6 +380,26 @@
     </div>
 
     <script>
+        // ── Q3b fail-safe：页面不许变砖 ────────────────────────────────
+        // 注册在**所有业务代码之前**：后面任何一行抛错（auth.js 缺失/旧缓存、
+        // 语法错、SDK 异常…），8 秒后都必须把「⏳ 加载中...」换成可见的错误 + 重试，
+        // 而不是让用户对着一个永远转圈的页面。纯原生 JS，不阻塞首屏。
+        var listSettled = false;
+        function __showListFallback(msg) {
+            if (listSettled) return;
+            listSettled = true;
+            var el = document.getElementById('fileList');
+            if (el) el.innerHTML = '<div class="empty-state"><div class="icon">⚠️</div>'
+                + '<p>' + msg + '</p>'
+                + '<button onclick="location.reload()" style="margin-top:12px;padding:8px 16px;border:1px solid #ddd;background:#fff;border-radius:6px;cursor:pointer">🔄 重试</button>'
+                + '</div>';
+        }
+        // 15s：fetchVFSDir 自身 10s 超时 + 前面 STS 取凭证的网络往返，
+        // 留够余量，正常慢网络不会被这个兜底误伤（只兜「真卡死/脚本没跑」）。
+        setTimeout(function () { __showListFallback('文件列表加载超时，页面脚本可能未正常运行'); }, 15000);
+        // 顶层脚本抛错会让整块 <script> 中止执行 —— 立刻把砖换成可读提示
+        window.addEventListener('error', function () { __showListFallback('页面脚本执行出错，请刷新重试'); });
+
         let jwt = localStorage.getItem('feclaw_jwt');
         let currentPath = '';
         let dirtyFile = false;        // 编辑器内容是否已修改
@@ -403,11 +432,15 @@
 
         const host = window.location.host;
         const path = window.location.pathname;
-        // 子域名模式：从 host 提取
-        const hashMatch = host.match(/^([a-f0-9]{4})\./);
+        // 子域名模式：从 host 提取（4–8 位 hex，优先走 Auth.parseAgentHash）
+        // Q3b：auth.js 万一缺失/是旧缓存（没有 parseAgentHash），这里不能抛错 ——
+        // 顶层抛错会中止整个 <script>，列表就永远出不来了。退回本地同口径正则。
+        const hashFromHost = (typeof Auth !== 'undefined' && typeof Auth.parseAgentHash === 'function')
+            ? Auth.parseAgentHash(host)
+            : ((host.match(/^([a-f0-9]{4,8})\./i) || [])[1] || null);
         // 单站点模式：从 URL 路径 /agent/{hash}/... 提取
         const pathMatch = path.match(/^\/agent\/([a-f0-9]+)\//);
-        const agentHash = (hashMatch ? hashMatch[1] : null) || (pathMatch ? pathMatch[1] : null);
+        const agentHash = hashFromHost || (pathMatch ? pathMatch[1] : null);
         document.getElementById('agentHash').textContent = 'Agent: ' + agentHash;
 
         if (!jwt) {
@@ -434,12 +467,14 @@
                 try { data = await res.json(); } catch (e) { /* 可能无 body */ }
 
                 // 没有任何 COS 配置 → 本地存储模式
+                // （Q3：后端此时返回 501/4xx，前端据此回退，不再视为异常）
                 const isCosReady = (res.status === 200) && data && data.credentials;
                 if (!isCosReady) {
                     STORAGE_BACKEND = 'local';
                     console.log('[File] 本地存储模式');
                     updateBackendBadge();
                     restorePathFromUrl();
+                    setTimeout(autoRestoreOnLoad, 100);
                     return;
                 }
 
@@ -472,8 +507,10 @@
             const p = new URLSearchParams(window.location.search).get('path');
             if (p !== null && p !== '') {
                 currentPath = p;
-                loadFiles();
             }
+            // Q3：无论 URL 有没有 ?path=，首屏都必须拉一次列表 ——
+            // 此前无 ?path= 时这里直接不调用 loadFiles()，页面永远停在「⏳ 加载中...」。
+            loadFiles();
         }
 
         function updateMarkdownPreview() {
@@ -498,9 +535,13 @@
         }
 
         function logout() {
-            if (typeof Auth !== 'undefined') { Auth.clearAuth(); }
-            else { localStorage.removeItem('feclaw_jwt'); }
-            window.location.href = '/login';
+            // 等后端吊销完成（jwt_version +1）再跳转，避免请求被跳转取消
+            if (typeof Auth !== 'undefined') {
+                Auth.clearAuth().then(function() { window.location.href = '/login'; });
+            } else {
+                localStorage.removeItem('feclaw_jwt');
+                window.location.href = '/login';
+            }
         }
 
         // --- VFS API ---
@@ -691,9 +732,11 @@
         function loadFiles() {
             fetchVFSDir(currentPath).then(files => {
                 fileListCache = files;
+                listSettled = true;   // 列表已经有结果了，关掉 fail-safe
                 renderFiles(files);
                 updateBreadcrumb();
             }).catch(e => {
+                listSettled = true;   // 失败也算「有结果」，别被超时提示盖掉
                 document.getElementById('fileList').innerHTML =
                     '<div class="empty-state"><div class="icon">❌</div><p>加载失败: ' + e.message + '</p></div>';
             });

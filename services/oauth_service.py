@@ -302,6 +302,9 @@ class OAuthService:
         """
         根据 Platform 返回的用户信息创建本地 JWT
         用于后续 API 认证
+
+        自动写入 `jwt_version`（当前用户吊销版本号），与
+        `verify_local_jwt` 的校验配套 —— 登出后旧 token 立即失效。
         """
         user_id = user_info.get("sub")
         payload = {
@@ -314,14 +317,20 @@ class OAuthService:
             "iat": datetime.utcnow(),
             "exp": datetime.utcnow() + timedelta(hours=settings.JWT_EXPIRE_HOURS)
         }
+        from utils.auth import attach_jwt_version
+        attach_jwt_version(payload)
         return jwt.encode(payload, settings.JWT_SECRET, algorithm=settings.JWT_ALGORITHM)
 
     def verify_local_jwt(self, token: str) -> Optional[Dict[str, Any]]:
-        """验证由 create_local_jwt 签发的本地 JWT"""
+        """验证由 create_local_jwt 签发的本地 JWT（含登出吊销校验）"""
         try:
-            return jwt.decode(token, settings.JWT_SECRET, algorithms=[settings.JWT_ALGORITHM])
+            payload = jwt.decode(token, settings.JWT_SECRET, algorithms=[settings.JWT_ALGORITHM])
         except Exception:
             return None
+        from utils.auth import is_token_revoked
+        if is_token_revoked(payload):
+            return None
+        return payload
 
 
 # 全局服务实例

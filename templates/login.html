@@ -333,7 +333,7 @@
                 if (m) tk = m[1];
             }
             if (tk) {
-                fetch('/api/user/me', { headers: { 'Authorization': 'Bearer ' + tk } })
+                fetch('/api/oauth/me', { headers: { 'Authorization': 'Bearer ' + tk } })
                     .then(function(r) {
                         if (r.ok) window.location.href = '/dashboard';
                     })

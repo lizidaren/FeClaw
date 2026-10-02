@@ -191,7 +191,9 @@ async def bind_wechat(request: BindRequest, user: User = Depends(get_current_use
         }
 
         # 更新全局状态（供其他端点使用）
-        wechat_service.login_state.update({
+        # ⚠️ 必须走 update_login_state()：login_state 是 property，返回**副本**，
+        #    在副本上 .update() 是空操作（曾导致此处写入的凭证根本没进内存）。
+        wechat_service.update_login_state({
             "status": "confirmed",
             **login_data
         })
@@ -264,15 +266,19 @@ async def bind_wechat(request: BindRequest, user: User = Depends(get_current_use
 
 
 @router.get("/messages", response_model=List[WeChatMessageResponse])
-async def get_messages(user: User = Depends(get_current_user), limit: int = 50, db: Session = Depends(get_db)):
+async def get_messages(request: Request, user: User = Depends(get_current_user), limit: int = 50, db: Session = Depends(get_db)):
     """
-    获取聊天记录
+    获取聊天记录（按子域名 Agent 隔离）
 
     Args:
         limit: 返回条数
     """
     try:
-        messages = wechat_service.get_messages(user.id, limit)
+        # B 节：按 Host 推导 agent_hash，避免同一用户多 Agent 时取到别的绑定的历史
+        from routers.feclaw_domain import extract_hash_from_host
+        host = request.headers.get("X-Forwarded-Host", "") or request.headers.get("host", "")
+        agent_hash = extract_hash_from_host(host) if host else None
+        messages = wechat_service.get_messages(user.id, limit, agent_hash=agent_hash)
         return [WeChatMessageResponse(**msg) for msg in messages]
     except HTTPException:
         raise
@@ -577,7 +583,20 @@ async def setup_message_handler():
             logger.debug(f"[WeChat] handle_wechat_message [{msg.get('_trace_id', 'N/A')}]: content_type={content_type}, image_url={image_url}")
 
             # 预先查找绑定（CDN 下载需要 user_id）
-            binding = wechat_service.get_binding_by_ilink_user_id(from_user_id)
+            # B 节：优先用 wechat_service 已解析好的绑定（_handle_message 带了 agent 上下文）；
+            # 只有老路径（_polling_loop）拿不到 _binding_id 时，才退回「按 ilink_user_id 取 id 最大者」
+            # —— 那个退化查询正是 §AH「招呼被 e45a 回了」的根因。
+            binding = None
+            _binding_id = msg.get("_binding_id")
+            if _binding_id is not None:
+                from models.database import SessionLocal as _SL, WeChatBinding as _WCB
+                _bdb = _SL()
+                try:
+                    binding = _bdb.query(_WCB).filter(_WCB.id == _binding_id).first()
+                finally:
+                    _bdb.close()
+            if binding is None:
+                binding = wechat_service.get_binding_by_ilink_user_id(from_user_id)
             internal_user_id = binding.user_id if binding else None
             _trace("binding 查找结果",
                    from_user_id=str(from_user_id)[:30] if from_user_id else None,
@@ -723,7 +742,7 @@ async def setup_message_handler():
                                             # 使用 internal_user_id 查找 binding（更可靠）
                                             if internal_user_id:
                                                 _trace("分支: internal_user_id 存在, 更新 DB 消息")
-                                                binding_for_update = wechat_service.get_binding_by_user(internal_user_id)
+                                                binding_for_update = wechat_service.get_binding_by_user(internal_user_id, agent_hash=binding.agent_hash)
                                                 if binding_for_update:
                                                     _trace("分支: binding_for_update 存在, 执行 update_message_content")
                                                     wechat_service.update_message_content(
@@ -913,7 +932,8 @@ async def setup_message_handler():
                                 context_token=context_token
                             )
                             asyncio.create_task(
-                                wechat_service.send_typing(from_user_id, context_token)
+                                wechat_service.send_typing(from_user_id, context_token,
+                                    agent_hash=binding.agent_hash if binding else None)
                             )
                             logger.warning(f"[WeChat] Image no-context, SR replied with '{_reply_text}', 3D cached")
                             _trace("return 前: SR ON 无上下文，等待用户文字")
@@ -948,7 +968,8 @@ async def setup_message_handler():
                             context_token=context_token
                         )
                         asyncio.create_task(
-                            wechat_service.send_typing(from_user_id, context_token)
+                            wechat_service.send_typing(from_user_id, context_token,
+                                agent_hash=binding.agent_hash if binding else None)
                         )
 
                         _wc = WeChatChannelService(
@@ -1003,7 +1024,8 @@ async def setup_message_handler():
             try:
                 _trace("try send_typing 开始")
                 await asyncio.wait_for(
-                    wechat_service.send_typing(from_user_id, context_token),
+                    wechat_service.send_typing(from_user_id, context_token,
+                        agent_hash=binding.agent_hash if binding else None),
                     timeout=10.0
                 )
                 _trace("try send_typing 成功")

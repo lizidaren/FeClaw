@@ -41,6 +41,9 @@ class User(Base):
     password_hash = Column(String(128), nullable=False)
     salt = Column(String(64), nullable=True)  # 仅 SHA-256 legacy 用户需要；bcrypt 用户为 NULL
     password_version = Column(Integer, default=1)  # 1=SHA-256+salt, 2=bcrypt；详见 utils.auth
+    # 登出吊销版本号：create_local_jwt/create_jwt_token 写入 payload，
+    # 校验时与库中比对；登出 +1 ⇒ 旧 token 立即失效。默认 0（不强制登出现有用户）。
+    jwt_version = Column(Integer, nullable=False, default=0, server_default="0")
     is_admin = Column(Boolean, default=False)
     tier = Column(String(20), default="pro")  # "pro" | "enterprise"
     created_at = Column(DateTime, default=datetime.utcnow)

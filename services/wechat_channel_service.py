@@ -207,7 +207,8 @@ class WeChatChannelService:
         await self.wechat_service.send_message(
             to_user_id=self.to_user_id,
             text=merged_text,
-            context_token=self.context_token
+            context_token=self.context_token,
+            agent_hash=self.agent_hash,
         )
         logger.info(f"[WeChat] Flushed buffer as message #{self.msg_count}")
 
@@ -218,7 +219,8 @@ class WeChatChannelService:
         await self.wechat_service.send_message(
             to_user_id=self.to_user_id,
             text=text,
-            context_token=self.context_token
+            context_token=self.context_token,
+            agent_hash=self.agent_hash,
         )
         logger.info(f"[WeChat] Sent single message #{self.msg_count}")
 
@@ -259,7 +261,8 @@ class WeChatChannelService:
                     await self.wechat_service.send_message(
                         to_user_id=self.to_user_id,
                         text=f"抱歉，您的今日积分已用完（每日{settings.DAILY_FREE_POINTS}点），请明日再来～",
-                        context_token=self.context_token
+                        context_token=self.context_token,
+                        agent_hash=self.agent_hash,
                     )
                     return
             except Exception as e:
@@ -272,7 +275,7 @@ class WeChatChannelService:
 
             # 创建 ChatService（渠道无关的聊天服务）
             from services.wechat_service import wechat_service as _global_wechat
-            binding = _global_wechat.get_binding_by_user(self.user_id)
+            binding = _global_wechat.get_binding_by_user(self.user_id, agent_hash=self.agent_hash)
             session_reset_at = binding.session_reset_at if binding else None
 
             chat_service = ChatService(
@@ -348,7 +351,8 @@ class WeChatChannelService:
                             await self.wechat_service.send_message(
                                 to_user_id=self.to_user_id,
                                 text="图片处理失败，请稍后重试。",
-                                context_token=self.context_token
+                                context_token=self.context_token,
+                                agent_hash=self.agent_hash,
                             )
                             return
             else:
@@ -368,14 +372,16 @@ class WeChatChannelService:
                         await self.wechat_service.send_message(
                             to_user_id=self.to_user_id,
                             text=_greeting,
-                            context_token=self.context_token
+                            context_token=self.context_token,
+                            agent_hash=self.agent_hash,
                         )
                         logger.info(f"[WeChat] Sent greeting via router-level end_conversation")
                 else:
                     await self.wechat_service.send_message(
                         to_user_id=self.to_user_id,
                         text=_result or "操作失败",
-                        context_token=self.context_token
+                        context_token=self.context_token,
+                        agent_hash=self.agent_hash,
                     )
                 return
 
@@ -393,10 +399,12 @@ class WeChatChannelService:
                         await self.wechat_service.send_message(
                             to_user_id=self.to_user_id,
                             text=step.content,
-                            context_token=self.context_token
+                            context_token=self.context_token,
+                            agent_hash=self.agent_hash,
                         )
                         asyncio.create_task(
-                            self.wechat_service.send_typing(self.to_user_id, self.context_token)
+                            self.wechat_service.send_typing(self.to_user_id, self.context_token,
+                                                            agent_hash=self.agent_hash)
                         )
                         logger.warning(f"[WeChat] Sent thinking buffer + typing to {self.to_user_id[:20]}")
 
@@ -414,7 +422,8 @@ class WeChatChannelService:
                             await self.wechat_service.send_message(
                                 to_user_id=self.to_user_id,
                                 text=accumulated_tokens,
-                                context_token=self.context_token
+                                context_token=self.context_token,
+                                agent_hash=self.agent_hash,
                             )
                         accumulated_tokens = ""
 
@@ -426,7 +435,8 @@ class WeChatChannelService:
                         await self.wechat_service.send_message(
                             to_user_id=self.to_user_id,
                             text=error_msg,
-                            context_token=self.context_token
+                            context_token=self.context_token,
+                            agent_hash=self.agent_hash,
                         )
                         self.buffer = []
                         accumulated_tokens = ""
@@ -442,7 +452,8 @@ class WeChatChannelService:
                                 await self.wechat_service.send_message(
                                     to_user_id=self.to_user_id,
                                     text=accumulated_tokens,
-                                    context_token=self.context_token
+                                    context_token=self.context_token,
+                                    agent_hash=self.agent_hash,
                                 )
                                 logger.info(f"[WeChat] Sent accumulated tokens to {self.to_user_id}")
                             accumulated_tokens = ""
@@ -488,7 +499,8 @@ class WeChatChannelService:
                         await self.wechat_service.send_message(
                             to_user_id=self.to_user_id,
                             text=accumulated_tokens,
-                            context_token=self.context_token
+                            context_token=self.context_token,
+                            agent_hash=self.agent_hash,
                         )
                         logger.info(f"[WeChat] Sent remaining accumulated tokens to {self.to_user_id}")
                 elif self.buffer:
@@ -519,7 +531,8 @@ class WeChatChannelService:
                 await self.wechat_service.send_message(
                     to_user_id=self.to_user_id,
                     text="执行出错，请重试",
-                    context_token=self.context_token
+                    context_token=self.context_token,
+                    agent_hash=self.agent_hash,
                 )
         except Exception as e:
             logger.error(f"[WeChat] stream_response error: {e}")
@@ -527,7 +540,8 @@ class WeChatChannelService:
             await self.wechat_service.send_message(
                 to_user_id=self.to_user_id,
                 text="执行出错，请重试",
-                context_token=self.context_token
+                context_token=self.context_token,
+                agent_hash=self.agent_hash,
             )
         finally:
             try:

@@ -1043,6 +1043,19 @@ class VirtualFileSystem:
         public_base = self._get_public_base_path()
         return cos_key.startswith(public_base)
 
+    def _is_group_shared_path(self, cos_key: str) -> bool:
+        """P3: 检查 cos_key 是否落在群共享空间（feclaw/groups/.../）。
+
+        这层防护覆盖 Workbench、bash、任何经 VFS 的写操作 —— Agent 不管从哪条路径
+        试图改群共享文件，都会被挡下。详细文档见 /tmp/phase3-agent-permission.md。
+        """
+        if not cos_key:
+            return False
+        # 群共享空间：{STORAGE_PREFIX}groups/{id}/.share|.ref|.attach/...
+        # settings.STORAGE_PREFIX 形如 "feclaw/" 或 ""（dev/test）
+        prefix = f"{settings.STORAGE_PREFIX}groups/"
+        return cos_key.startswith(prefix)
+
     def _is_tool_log_path(self, path_or_key: str) -> bool:
         """检查 VFS 路径或存储 key 是否属于只读工具日志目录。"""
         if is_tool_log_vfs_path(path_or_key) or is_tool_log_cos_key(path_or_key):
@@ -1241,6 +1254,15 @@ class VirtualFileSystem:
             return f"Error: /public/ is a read-only system directory"
         if is_tool_log_cos_key(cos_key):
             return "Error: /.logs/ is a read-only system directory"
+        # P3: 群共享空间（.share/.ref/.attach）由 file_ops 层和 request_permission 工具管理。
+        # VFS 层只兜底：任何经 VFS 写入群共享文件的尝试一律拒绝，
+        # 包括 bash 的 echo > / 重定向、touch、mv 等。
+        if self._is_group_shared_path(cos_key):
+            return (
+                f"Error: 群共享文件不可通过 VFS 直接写入 ({path})。"
+                f"Agent 修改群共享文件必须走 request_permission 工具申请审批。"
+                f"详见 docs/phase3-agent-permission.md。"
+            )
 
         # 处理虚拟配置路径
         if cos_key.startswith("__CONFIG__:"):
@@ -1547,6 +1569,12 @@ class VirtualFileSystem:
             return err
         if is_tool_log_cos_key(cos_key):
             return "Error: /.logs/ is a read-only system directory"
+        # P3: 群共享空间只读
+        if self._is_group_shared_path(cos_key):
+            return (
+                f"Error: 群共享文件不可通过 VFS 直接创建/修改 ({path})。"
+                f"Agent 修改群共享文件必须走 request_permission 工具申请审批。"
+            )
 
         from services.file_locker import DistributedFileLock
         locker = DistributedFileLock()
@@ -1668,6 +1696,12 @@ class VirtualFileSystem:
             return f"Error: /public/ is a read-only system directory"
         if is_tool_log_cos_key(cos_key):
             return "Error: /.logs/ is a read-only system directory"
+        # P3: 群共享空间只读
+        if self._is_group_shared_path(cos_key):
+            return (
+                f"Error: 群共享文件不可通过 VFS 直接删除 ({path})。"
+                f"如需删除群共享文件，请联系群主操作。"
+            )
 
         from services.file_locker import DistributedFileLock
         locker = DistributedFileLock()
@@ -1863,6 +1897,12 @@ class VirtualFileSystem:
             return f"Error: /public/ is a read-only system directory"
         if is_tool_log_cos_key(dst_key):
             return "Error: /.logs/ is a read-only system directory"
+        # P3: 群共享空间只读（dst 不能是群共享）
+        if self._is_group_shared_path(dst_key):
+            return (
+                f"Error: 群共享文件不可通过 VFS 直接移动/重命名 ({dst})。"
+                f"Agent 修改群共享文件必须走 request_permission 工具申请审批。"
+            )
 
         # 禁止从系统只读目录移出（移动会删除源文件）
         src_key, err = self._resolve_path(src)
@@ -1872,6 +1912,12 @@ class VirtualFileSystem:
             return f"Error: /public/ files cannot be moved"
         if is_tool_log_cos_key(src_key):
             return "Error: /.logs/ is a read-only system directory"
+        # P3: 群共享空间只读（src 也不能从群共享移出）
+        if self._is_group_shared_path(src_key):
+            return (
+                f"Error: 群共享文件不可通过 VFS 直接移动/重命名 ({src})。"
+                f"如需重命名/移动群共享文件，请联系群主操作。"
+            )
 
         # 验证目标文件名
         import os

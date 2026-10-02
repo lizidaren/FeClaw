@@ -12,7 +12,7 @@ import hashlib
 import asyncio
 import tempfile
 import logging
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from urllib.parse import urlparse, quote
 
 import httpx
@@ -174,9 +174,13 @@ class WebToolsMixin(AgentToolsServiceBase):
 
         return None
 
-    async def _try_fallback_search_async(self, query: str, failed_level: str, original_start_time: float) -> str:
+    async def _try_fallback_search_async(self, query: str, failed_level: str, original_start_time: float, on_progress=None) -> str:
         """
         搜索失败时尝试降级到其他级别（异步版本）
+
+        on_progress: 透传给 search_qwen 的流式进度回调；缺省为 None。
+        （此前函数签名没有该参数，deep 降级到 balanced 时引用 on_progress 会抛
+        NameError 被 except: continue 吞掉，导致 deep 降级链实际断掉。）
         """
         level_map = {"research": "deep", "advanced": "balanced", "minimal": "quick"}
         failed_level = level_map.get(failed_level, failed_level)
@@ -663,14 +667,20 @@ class WebToolsMixin(AgentToolsServiceBase):
             # 处理图片搜索结果
             if allow_images and len(gathered) > 1:
                 img_res = gathered[1]
-                if isinstance(img_res, list) and img_res:
-                    try:
-                        image_section = await self._download_and_format_images(img_res, query)
-                    except Exception as e:
-                        logger.warning(f"[web_search] 图片下载汇总失败: {e}")
-                        image_section = "\n\n[图片搜索结果] (下载失败)"
+                if isinstance(img_res, tuple):
+                    images, degrade_reason = img_res
+                    if degrade_reason:
+                        # 本该有图却因异常拿不到 → 显式降级提示（不再静默跳过）
+                        image_section = f"\n\n[图片搜索] 不可用（{degrade_reason}）"
+                    elif images:
+                        try:
+                            image_section = await self._download_and_format_images(images, query)
+                        except Exception as e:
+                            logger.warning(f"[web_search] 图片下载汇总失败: {e}")
+                            image_section = "\n\n[图片搜索结果] (下载失败)"
                 elif isinstance(img_res, Exception):
                     logger.warning(f"[web_search] 图片搜索异常: {img_res}")
+                    image_section = "\n\n[图片搜索] 不可用（图片搜索服务异常）"
         elif level == "raw":
             result = await self.search.search_tencent(query)
             service_name = "腾讯搜狗(原始)"
@@ -705,7 +715,7 @@ class WebToolsMixin(AgentToolsServiceBase):
         elapsed_sec = (time.time() - start_time)
 
         if isinstance(result, str) and result.startswith("Error:"):
-            fallback_result = await self._try_fallback_search_async(query, level, start_time)
+            fallback_result = await self._try_fallback_search_async(query, level, start_time, on_progress=on_progress)
             if fallback_result:
                 return fallback_result
             return f"{result} | 耗时: {elapsed_sec:.1f}s [{service_name}]"
@@ -748,18 +758,20 @@ class WebToolsMixin(AgentToolsServiceBase):
                 return "jpg" if ext == "jpeg" else ext  # 统一用 jpg 扩展名
         return None
 
-    async def _search_qwen_images(self, query: str) -> List[Dict[str, str]]:
+    async def _search_qwen_images(self, query: str) -> Tuple[List[Dict[str, str]], Optional[str]]:
         """
-        调用 Alibaba Responses API 的 web_search_image 工具，返回图片列表
-        失败 / 无结果时返回空列表（不抛异常，让文本搜索结果照常返回）
+        调用 Alibaba Responses API 的 web_search_image 工具，返回 (图片列表, 降级原因)
+
+        - 成功（含后端正常但确实无图）: ([...], None)
+        - 降级（未配置 key / API 异常，本该有图却拿不到）: ([], "原因")
 
         Returns:
-            [{"url": "...", "title": "..."}, ...] （最多 IMAGE_SEARCH_MAX_COUNT 项）
+            ([{"url": "...", "title": "..."}, ...], None) （最多 IMAGE_SEARCH_MAX_COUNT 项）
         """
-        qwen_key = settings.QWEN_API_KEY or settings.QWEN_VL_KEY or ""
+        qwen_key = settings.QWEN_API_KEY or getattr(settings, "QWEN_VL_KEY", "") or ""
         if not qwen_key:
             logger.warning("[IMAGE-SEARCH] QWEN_API_KEY 未配置，跳过图片搜索")
-            return []
+            return [], "Qwen 图片搜索未配置（QWEN_API_KEY）"
 
         headers = {
             "Authorization": f"Bearer {qwen_key}",
@@ -777,9 +789,12 @@ class WebToolsMixin(AgentToolsServiceBase):
                 resp = await client.post(QWEN_RESPONSES_URL, headers=headers, json=body)
                 resp.raise_for_status()
                 data = resp.json()
+        except httpx.HTTPStatusError as e:
+            logger.warning(f"[IMAGE-SEARCH] Responses API 调用失败: HTTP {e.response.status_code}: {e}")
+            return [], f"Qwen 图片搜索接口返回 HTTP {e.response.status_code}（欠费/未配置）"
         except Exception as e:
             logger.warning(f"[IMAGE-SEARCH] Responses API 调用失败: {e}")
-            return []
+            return [], f"Qwen 图片搜索接口调用失败（{type(e).__name__}）"
 
         images: List[Dict[str, str]] = []
         try:
@@ -825,7 +840,7 @@ class WebToolsMixin(AgentToolsServiceBase):
             logger.warning(f"[IMAGE-SEARCH] 解析 output 异常: {e}")
 
         logger.info(f"[IMAGE-SEARCH] query={query[:30]!r} 返回 {len(images)} 张图片")
-        return images
+        return images, None
 
     async def _download_image_to_vfs(self, url: str, base_vfs_path: str) -> Optional[str]:
         """

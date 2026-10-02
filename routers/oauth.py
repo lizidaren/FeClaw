@@ -32,6 +32,13 @@ from utils.auth_dependencies import (
     get_current_user,
     get_current_token_payload,
 )
+from utils.auth_cookies import (
+    AUTH_COOKIE_ID_TOKEN,
+    AUTH_COOKIE_JWT,
+    AUTH_COOKIE_PLATFORM_TOKEN,
+    clear_auth_cookies,
+    set_auth_cookie,
+)
 from utils.oauth_helpers import (
     decode_refresh_token,
     find_or_create_user_from_platform,
@@ -281,44 +288,27 @@ async def oauth_callback(
     redirect_to = "/dashboard"
 
     # P0-2 修复：token 只走 cookie，不暴露在 URL 中
-    domain = f".{settings.FECLAW_PUBLIC_URL}" if settings.FECLAW_PUBLIC_URL else None
+    # Q1 修复：写入统一走 auth_cookies（与登出清除共用同一 domain 推导，保证删得掉）
     response = RedirectResponse(url=redirect_to)
 
-    response.set_cookie(
-        key="feclaw_jwt",
-        value=local_jwt,
-        secure=True,
-        samesite="lax",
-        path="/",
-        domain=domain,
-        max_age=settings.JWT_EXPIRE_HOURS * 3600,
+    set_auth_cookie(
+        response, AUTH_COOKIE_JWT, local_jwt,
+        secure=True, max_age=settings.JWT_EXPIRE_HOURS * 3600,
     )
 
     # P1-4 修复：保存 id_token 到 cookie，供 logout 时传递 id_token_hint
     if id_token:
-        response.set_cookie(
-            key="feclaw_id_token",
-            value=id_token,
-            httponly=True,
-            secure=True,
-            samesite="lax",
-            path="/",
-            max_age=3600
+        set_auth_cookie(
+            response, AUTH_COOKIE_ID_TOKEN, id_token,
+            httponly=True, secure=True, max_age=3600,
         )
 
     # 保存 Platform access_token 到 cookie（非 HttpOnly），
     # 方便 Platform dashboard JS 跨域读取并调用 Platform API
     if access_token:
-        # 从 FECLAW_PUBLIC_URL 推导 cookie domain（子域名部署需跨域共享 cookie）
-        oauth_domain = settings.FECLAW_PUBLIC_URL or None
-        response.set_cookie(
-            key="platform_token",
-            value=access_token,
-            secure=True,
-            samesite="lax",
-            path="/",
-            domain=oauth_domain,
-            max_age=settings.JWT_EXPIRE_HOURS * 3600,
+        set_auth_cookie(
+            response, AUTH_COOKIE_PLATFORM_TOKEN, access_token,
+            secure=True, max_age=settings.JWT_EXPIRE_HOURS * 3600,
         )
 
     return response
@@ -723,9 +713,8 @@ async def oauth_logout(request: Request):
         )
     })
 
-    # 清除 FeClaw 自身 cookie
-    response.delete_cookie(key="feclaw_jwt", path="/")
-    response.delete_cookie(key="feclaw_id_token", path="/")
+    # 清除 FeClaw 自身 cookie（Q1：统一走 auth_cookies，带上写入时的 domain）
+    clear_auth_cookies(response, names=(AUTH_COOKIE_JWT, AUTH_COOKIE_ID_TOKEN))
 
     return response
 
@@ -749,8 +738,8 @@ async def oauth_logout_get(
             safe_redirect = redirect
 
     response = RedirectResponse(url=safe_redirect, status_code=302)
-    response.delete_cookie(key="feclaw_jwt", path="/")
-    response.delete_cookie(key="feclaw_id_token", path="/")
+    # Q1：统一走 auth_cookies，带上写入时的 domain，否则删不掉
+    clear_auth_cookies(response, names=(AUTH_COOKIE_JWT, AUTH_COOKIE_ID_TOKEN))
     return response
 
 

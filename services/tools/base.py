@@ -64,7 +64,7 @@ DEFAULT_CONFIG = {
 class AgentToolsServiceBase:
     """Agent 工具服务基类 — 通用属性和方法"""
 
-    def __init__(self, agent_hash: str, group_id: str = None):
+    def __init__(self, agent_hash: str, group_id: int = None):
         """
         初始化 Agent 工具服务
 
@@ -114,10 +114,13 @@ class AgentToolsServiceBase:
 
     @property
     def storage(self):
-        """懒加载 StorageService"""
+        """懒加载文件存储后端 —— 感知 STORAGE_MODE（cos / local / auto）
+
+        local 模式下返回 LocalStorage，图片下载写 VFS 等不再因硬绑 COS 而必然失败。
+        """
         if self._storage is None:
-            from services.storage_service import StorageService
-            self._storage = StorageService()
+            from services.file_storage import create_file_storage
+            self._storage = create_file_storage(mode=getattr(settings, "STORAGE_MODE", "auto"))
         return self._storage
 
     @property

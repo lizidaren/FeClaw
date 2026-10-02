@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from typing import List
 from datetime import datetime
 import asyncio
+import json
 import logging
 
 from models.database import get_db, User, AgentProfile
@@ -1020,10 +1021,13 @@ async def get_public_config():
         if callable(value):
             continue
         try:
-            # 确保值是 JSON 可序列化的
-            config_data[field_name] = value
+            # 真正做一次序列化探测 —— 赋值本身不会抛错，之前是“假校验”，
+            # 导致 model_fields（含 FieldInfo）/ model_fields_set（set）漏进来 →
+            # JSONResponse 渲染时 TypeError → 整个接口 500。
+            json.dumps(value)
         except (TypeError, ValueError):
             continue
+        config_data[field_name] = value
 
     return JSONResponse(content={
         "status": "success",

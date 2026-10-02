@@ -63,7 +63,7 @@ async def group_dashboard(request: Request):
 @router.get("/dashboard/group/api/messages")
 async def get_group_messages(
     request: Request,
-    group_id: str = Query(default="b20440ba-93f3-4390-864d-78912a607d3b"),
+    group_id: int = Query(default=1, description="群组 ID（Integer 自增，详见 phase1-group-shared-space）"),
     since: Optional[str] = Query(default=None, description="UTC timestamp ISO format"),
     limit: int = Query(default=200, ge=1, le=500),
     db: Session = Depends(get_db),
@@ -135,6 +135,8 @@ async def get_group_messages(
 PAGE_HTML = """<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
+    <script src="/static/js/token-sync.js"></script>
+
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>FeClaw Group Chat Dashboard</title>
@@ -456,7 +458,8 @@ PAGE_HTML = """<!DOCTYPE html>
 
     <script src="/static/marked.min.js"></script>
     <script>
-        const GROUP_ID = "b20440ba-93f3-4390-864d-78912a607d3b";
+        // P1.x: group_id 改为 Integer 自增；前端默认从 query string 拿
+        const GROUP_ID = (new URLSearchParams(window.location.search)).get("group_id") || "1";
         let lastTimestamp = "";
         let knownIds = new Set();
         let isLoading = false;

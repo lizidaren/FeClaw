@@ -8,6 +8,7 @@ FileStorage 抽象层 — 分离文件存储后端
     storage = create_file_storage(mode="local") # 强制本地磁盘
 """
 
+import asyncio
 import logging
 from abc import ABC, abstractmethod
 from typing import Optional, List, Dict
@@ -72,6 +73,28 @@ class FileStorage(ABC):
             文件元数据 dict（含 size, mtime 等），不存在时返回 None
         """
         ...
+
+    # ==================== 异步包装方法（所有后端通用） ====================
+    # 之前只有 CosStorage 提供 *_async 方法，LocalStorage 没有；工具层（如
+    # file_ops.py 的群共享空间 file_read/file_write）通过 self.storage 调用这些方法，
+    # 一旦 self.storage 按 STORAGE_MODE 切到 LocalStorage 就会 AttributeError。
+    # 这里统一在基类提供，LocalStorage / CosStorage 均可用。
+
+    async def put_object_async(self, key: str, file_bytes: bytes) -> None:
+        """异步包装：写入文件"""
+        return await asyncio.to_thread(self.put_object, key, file_bytes)
+
+    async def get_file_content_async(self, key: str) -> Optional[bytes]:
+        """异步包装：获取文件内容"""
+        return await asyncio.to_thread(self.get_file_content, key)
+
+    async def list_objects_async(self, prefix: str, max_keys: int = 1000) -> Optional[List[Dict]]:
+        """异步包装：列出对象"""
+        return await asyncio.to_thread(self.list_objects, prefix, max_keys)
+
+    async def delete_file_by_key_async(self, key: str) -> bool:
+        """异步包装：按 key 删除文件"""
+        return await asyncio.to_thread(self.delete_file_by_key, key)
 
 
 def create_file_storage(mode: str = "auto") -> FileStorage:

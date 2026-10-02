@@ -19,6 +19,7 @@ from uuid import uuid4
 from typing import Optional, Dict, Any, List, Callable
 
 import aiohttp
+from sqlalchemy import or_
 
 from models.database import SessionLocal, WeChatBinding, WeChatMessage, ChatHistory
 from services.wechatbot_sdk import IncomingMessage
@@ -434,13 +435,94 @@ class WeChatService:
     # 问题 1 & 4: Per-user 轮询管理 + 看门狗
     # ============================================================
 
+    def restore_login_state_from_db(self) -> bool:
+        """启动时把最近活跃绑定的凭证读回内存 _login_state（C 节）。
+
+        背景（§AC）：bot_token 原来只存在内存 _login_state 里，进程一重启就没了，
+        前端 /login-status 变回未登录 ⇒ 用户必须重新扫码；出站 send_message 也会
+        因为 _login_state 为空而退化到「按 ilink_user_id 猜绑定」的老路径。
+
+        注意：_login_state 是全局单例，只能代表「一条」会话，这里取最近活跃的那条
+        （与重启前的语义一致）。多 Agent 各自的出站仍以 DB 绑定为准。
+
+        token 是敏感数据：本方法只把前后 4 位写进日志。
+        """
+        db = SessionLocal()
+        try:
+            binding = db.query(WeChatBinding).filter(
+                WeChatBinding.status == self.BINDING_STATUS_ACTIVE
+            ).order_by(
+                # MySQL 不支持 NULLS LAST：last_msg_at 为 NULL 的排最后
+                WeChatBinding.last_msg_at.is_(None),
+                WeChatBinding.last_msg_at.desc(),
+                WeChatBinding.id.desc(),
+            ).first()
+            if not binding:
+                logger.info("[WeChat] restore_login_state_from_db: no active binding")
+                return False
+
+            base_info = None
+            if binding.ilink_token:
+                try:
+                    cred = json.loads(binding.ilink_token)
+                    base_info = {
+                        "bot_token": cred.get("token"),
+                        "ilink_bot_id": cred.get("account_id"),
+                        "ilink_user_id": cred.get("user_id"),
+                        "base_url": cred.get("base_url"),
+                    }
+                except (json.JSONDecodeError, TypeError) as e:
+                    logger.warning("[WeChat] restore_login_state_from_db: ilink_token parse failed: {}".format(e))
+                    base_info = None
+
+            if not (base_info and base_info.get("bot_token")):
+                base_info = {
+                    "bot_token": binding.bot_token,
+                    "ilink_bot_id": binding.ilink_bot_id,
+                    "ilink_user_id": binding.ilink_user_id,
+                    "base_url": binding.base_url,
+                }
+            if not base_info.get("bot_token"):
+                logger.warning("[WeChat] restore_login_state_from_db: binding id={} has no usable bot_token".format(binding.id))
+                return False
+
+            self._login_state.update({
+                "status": "confirmed",
+                "bot_token": base_info.get("bot_token"),
+                "ilink_bot_id": base_info.get("ilink_bot_id"),
+                "ilink_user_id": base_info.get("ilink_user_id"),
+                "base_url": base_info.get("base_url"),
+            })
+            logger.info("[WeChat] restore_login_state_from_db: restored binding id={} user_id={} agent_hash={} bot_token={}".format(
+                binding.id, binding.user_id, binding.agent_hash,
+                self._mask_secret(base_info.get("bot_token"))))
+            return True
+        except Exception as e:
+            logger.error("[WeChat] restore_login_state_from_db error: {}".format(e))
+            return False
+        finally:
+            db.close()
+
+    def update_login_state(self, data: Dict[str, Any]) -> None:
+        """写入 _login_state 的正确入口。
+
+        ⚠️ 不要写 `wechat_service.login_state.update(...)`：login_state 是 property，
+        返回的是 **副本**，在副本上 update 是空操作（曾导致 /bind 写入的凭证丢失）。
+        """
+        self._login_state.update(data)
+
     async def restore_all_polling(self):
         """启动时恢复所有 active 绑定的轮询（问题1修复）"""
         logger.info("[WeChat] restore_all_polling: STARTING")
+        # C 节：先把凭证恢复进内存，重启后无需重扫码
+        try:
+            self.restore_login_state_from_db()
+        except Exception as e:
+            logger.error("[WeChat] restore_all_polling: restore_login_state_from_db failed: {}".format(e))
         db = SessionLocal()
         try:
             bindings = db.query(WeChatBinding).filter(
-                WeChatBinding.status == "active"
+                WeChatBinding.status == self.BINDING_STATUS_ACTIVE
             ).all()
             logger.info("[WeChat] restore_all_polling: found {} active bindings".format(len(bindings)))
             tasks = []
@@ -449,9 +531,12 @@ class WeChatService:
                 if not binding.ilink_token:
                     logger.warning("[WeChat] restore_all_polling: user {} has no ilink_token, skipping".format(binding.user_id))
                     continue
-                logger.info("[WeChat] restore_all_polling: scheduling start_polling for user {}".format(binding.user_id))
+                logger.info("[WeChat] restore_all_polling: scheduling start_polling for user {} agent_hash={} binding_id={}".format(
+                    binding.user_id, binding.agent_hash, binding.id))
+                # 带 agent 上下文恢复（B 节）：按 binding.id 精确加载凭证，不按 user_id 猜
                 tasks.append(asyncio.wait_for(
-                    self.start_polling(user_id=binding.user_id),
+                    self.start_polling(user_id=binding.user_id, agent_hash=binding.agent_hash,
+                                       binding_id=binding.id),
                     timeout=30.0
                 ))
 
@@ -508,13 +593,18 @@ class WeChatService:
         finally:
             db.close()
 
-    async def start_polling(self, user_id: int = None, base_info: Dict[str, Any] = None):
+    async def start_polling(self, user_id: int = None, base_info: Dict[str, Any] = None,
+                            agent_hash: str = None, binding_id: int = None):
         """
         为单个用户启动 SDK 轮询（per-user 版本）
 
         支持两种调用方式：
         1. start_polling(user_id) - 从 DB 加载凭证（推荐，fake login 模式）
         2. start_polling(base_info={...}) - 兼容旧调用方式
+
+        Args:
+            agent_hash / binding_id: agent 上下文（B 节）。有则从**指定绑定**加载凭证，
+                而不是按 user_id 猜——同一用户多 Agent 时猜错会把消息路由到错误的 Agent（§AH）。
 
         SDK 的 start() 方法会先调用 _load_credentials()，如果 DB 中有凭证则跳过 login()。
         """
@@ -524,18 +614,15 @@ class WeChatService:
             if not ilink_uid:
                 logger.error("[WeChat] start_polling: ilink_user_id not available in base_info")
                 return
-            db = SessionLocal()
-            try:
-                binding = db.query(WeChatBinding).filter(
-                    WeChatBinding.ilink_user_id == ilink_uid,
-                    WeChatBinding.status == "active"
-                ).first()
-                if not binding:
-                    logger.error("[WeChat] start_polling: no active binding for ilink_user_id={}".format(ilink_uid))
-                    return
-                user_id = binding.user_id
-            finally:
-                db.close()
+            binding = self.get_binding_by_ilink_user_id(
+                ilink_uid, agent_hash=base_info.get("agent_hash"),
+                ilink_bot_id=base_info.get("ilink_bot_id"),
+            )
+            if not binding:
+                logger.error("[WeChat] start_polling: no active binding for ilink_user_id={}".format(ilink_uid))
+                return
+            user_id = binding.user_id
+            binding_id = binding.id
 
         if user_id is None:
             logger.error("[WeChat] start_polling: user_id is required")
@@ -588,16 +675,25 @@ class WeChatService:
             self._last_heartbeat[user_id] = time.time()
 
         # 创建 SDK client 并注册回调
-        client = DatabaseBackedClient(user_id, on_heartbeat=heartbeat_callback)
+        # binding_id / agent_hash：把 agent 上下文带进凭证加载（B 节，避免按 user_id 猜绑定）
+        client = DatabaseBackedClient(user_id, on_heartbeat=heartbeat_callback,
+                                      binding_id=binding_id, agent_hash=agent_hash)
         self._user_clients[user_id] = client
 
+        # 本轮会话的 bot 凭证（account_id == binding.ilink_bot_id），
+        # 用于入站消息路由：它唯一确定「哪条绑定在收消息」（B 节）
+        _session_creds = client.get_credentials()
+        session_bot_id = _session_creds.account_id if _session_creds else None
+        logger.info("[WeChat] start_polling: user_id={} binding_id={} session_bot_id={}".format(
+            user_id, binding_id, session_bot_id))
+
         # Callback wrapper that uses the captured main loop to schedule async handler
-        def make_callback(uid: int, main_loop: asyncio.AbstractEventLoop):
+        def make_callback(uid: int, main_loop: asyncio.AbstractEventLoop, bot_id: str):
             def callback(msg: IncomingMessage):
-                self._on_sdk_message(msg, uid, main_loop)
+                self._on_sdk_message(msg, uid, main_loop, bot_id)
             return callback
 
-        client.on_message(make_callback(user_id, loop))
+        client.on_message(make_callback(user_id, loop, session_bot_id))
 
         def sdk_loop():
             logger.debug("[WeChat] sdk_loop started for user {}".format(user_id))
@@ -690,11 +786,16 @@ class WeChatService:
             self._last_activity.pop(uid, None)
             logger.info("[WeChat] Stopped polling for user {}".format(uid))
 
+    async def stop_all_polling(self):
+        """停止所有用户的轮询（Q5：关机路径 main.py 调用，此前方法缺失告警）"""
+        await self.stop_polling()
+
     # ============================================================
     # 问题 2 修复: _on_sdk_message 用 add_done_callback 捕获异常
     # ============================================================
 
-    def _on_sdk_message(self, msg: IncomingMessage, user_id: int, main_loop: asyncio.AbstractEventLoop):
+    def _on_sdk_message(self, msg: IncomingMessage, user_id: int, main_loop: asyncio.AbstractEventLoop,
+                        session_bot_id: str = None):
         """SDK 消息回调（在 SDK 线程中调用）—— 使用官方 SDK 的 IncomingMessage 类型
         import traceback as _tb
         logger.debug(f"[WX_DEBUG] _on_sdk_message: type={msg.type}, images={len(msg.images)}, content={str(msg.content)[:100] if msg.content else "None"}")
@@ -706,6 +807,8 @@ class WeChatService:
             msg: The incoming message from the SDK
             user_id: The user_id this polling session belongs to
             main_loop: The main service's event loop (captured from start_polling)
+            session_bot_id: 本轮轮询会话的 bot ilink_bot_id（== 绑定的 ilink_bot_id），
+                入站路由的 agent 上下文（B 节）
         """
         # 更新看门狗心跳
         self._last_activity[user_id] = time.time()
@@ -763,8 +866,9 @@ class WeChatService:
                 logger.debug(f"[WeChat] DEBUG: image[{i}]: url={img.url}, has_media={img.media is not None}")
 
         # Schedule the async handler in the main event loop (not the SDK's loop)
+        # 带上 agent 上下文（轮询会话的 user_id + bot id），路由才不会命中旧绑定（§AH）
         future = asyncio.run_coroutine_threadsafe(
-            self._handle_message(msg_dict),
+            self._handle_message(msg_dict, user_id=user_id, ilink_bot_id=session_bot_id),
             main_loop
         )
 
@@ -821,11 +925,16 @@ class WeChatService:
     # 消息分发：按 content_type 路由到对应 handler
     # ============================================================
 
-    async def _handle_message(self, msg: Dict[str, Any], user_id: int = None):
+    async def _handle_message(self, msg: Dict[str, Any], user_id: int = None,
+                              ilink_bot_id: str = None):
         """统一消息入口，按 content_type 分发到对应 handler。
 
         由 _on_sdk_message (SDK 线程回调 → run_coroutine_threadsafe) 调用。
         也兼容旧的 _polling_loop 路径。
+
+        Args:
+            user_id / ilink_bot_id: agent 上下文（B 节）。由轮询会话带入，
+                用于把入站消息定位到**正确的绑定**，而不是按 ilink_user_id 取 id 最大者。
         """
         logger.debug(f"[WeChat] _handle_message CALLED: msg_type={msg.get('msg_type')}, from_user_id={msg.get('from_user_id')}")
         try:
@@ -836,7 +945,9 @@ class WeChatService:
             if context_token and from_user_id:
                 self._context_tokens[(from_user_id, to_user_id)] = context_token
 
-            binding = self.get_binding_by_ilink_user_id(from_user_id)
+            binding = self._resolve_binding_for_inbound(
+                from_user_id, user_id=user_id, ilink_bot_id=ilink_bot_id
+            )
             logger.debug(f"[WeChat] _handle_message: binding found={binding is not None}, binding_id={binding.id if binding else None}")
             if binding:
                 self._update_last_msg_time(binding)
@@ -890,6 +1001,8 @@ class WeChatService:
         msg_id = msg.get("msg_id", "")
 
         await self._on_message({
+            "_binding_id": binding.id,
+            "_agent_hash": binding.agent_hash,
             "msg_type": msg_type,
             "from_user_id": from_user_id,
             "to_user_id": to_user_id,
@@ -1020,6 +1133,8 @@ class WeChatService:
         if _img_desc:
             _img_desc_kv["_image_description"] = _img_desc
         await self._on_message({
+            "_binding_id": binding.id,
+            "_agent_hash": binding.agent_hash,
             "msg_type": msg_type,
             "from_user_id": from_user_id,
             "to_user_id": to_user_id,
@@ -1068,6 +1183,8 @@ class WeChatService:
         if self._on_message:
             msg_type = msg.get("msg_type", 1)
             await self._on_message({
+                "_binding_id": binding.id,
+                "_agent_hash": binding.agent_hash,
                 "msg_type": msg_type,
                 "from_user_id": msg.get("from_user_id", ""),
                 "to_user_id": msg.get("to_user_id", ""),
@@ -1104,6 +1221,8 @@ class WeChatService:
             self._save_chat_history(msg, binding, "user", content_text)
             if self._on_message:
                 await self._on_message({
+                    "_binding_id": binding.id,
+                    "_agent_hash": binding.agent_hash,
                     "msg_type": msg.get("msg_type", 1),
                     "from_user_id": msg.get("from_user_id", ""),
                     "to_user_id": msg.get("to_user_id", ""),
@@ -1143,6 +1262,8 @@ class WeChatService:
 
         if self._on_message:
             await self._on_message({
+                "_binding_id": binding.id,
+                "_agent_hash": binding.agent_hash,
                 "msg_type": msg.get("msg_type", 1),
                 "from_user_id": msg.get("from_user_id", ""),
                 "to_user_id": msg.get("to_user_id", ""),
@@ -1385,21 +1506,32 @@ class WeChatService:
                     logger.warning("[WeChat] Watchdog: user {} polling thread is dead, restarting...".format(uid))
                     self._restart_counts[uid] = restart_count + 1
 
+                    # 停止前先留好 agent 上下文（B 节）：stop_polling 会把 client 清掉
+                    _dead_client = self._user_clients.get(uid)
+                    _prev_binding_id = getattr(_dead_client, "binding_id", None)
+                    _prev_agent_hash = getattr(_dead_client, "agent_hash", None)
+
                     # 停止旧的
                     await self.stop_polling(uid)
 
-                    # 重新启动：需要重新获取 base_info
+                    # 重新启动：按原 binding 恢复（而不是按 user_id 猜，否则多 Agent 会重连到错的）
                     db = SessionLocal()
                     try:
-                        binding = db.query(WeChatBinding).filter(
-                            WeChatBinding.user_id == uid,
-                            WeChatBinding.status == "active"
-                        ).first()
+                        query = db.query(WeChatBinding).filter(
+                            WeChatBinding.status == self.BINDING_STATUS_ACTIVE
+                        )
+                        if _prev_binding_id is not None:
+                            query = query.filter(WeChatBinding.id == _prev_binding_id)
+                        else:
+                            query = query.filter(WeChatBinding.user_id == uid)
+                            if _prev_agent_hash:
+                                query = query.filter(WeChatBinding.agent_hash == _prev_agent_hash)
+                        binding = query.order_by(WeChatBinding.id.desc()).first()
                         if binding and binding.ilink_token:
-                            # 使用 user_id 调用，凭证已存在 DB 中
-                            await self.start_polling(user_id=uid)
-                            logger.info("[WeChat] Watchdog: restarted polling for user {} (restart #{})".format(
-                                uid, restart_count + 1))
+                            await self.start_polling(user_id=uid, agent_hash=binding.agent_hash,
+                                                     binding_id=binding.id)
+                            logger.info("[WeChat] Watchdog: restarted polling for user {} agent_hash={} binding_id={} (restart #{})".format(
+                                uid, binding.agent_hash, binding.id, restart_count + 1))
                         else:
                             logger.warning("[WeChat] Watchdog: no valid binding for user {}, not restarting".format(uid))
                     except Exception as e:
@@ -1426,9 +1558,15 @@ class WeChatService:
         to_user_id: str,
         text: str,
         context_token: str = None,
-        base_info: Dict[str, Any] = None
+        base_info: Dict[str, Any] = None,
+        agent_hash: str = None
     ) -> bool:
-        """发送消息，超过 2000 字符时分片发送"""
+        """发送消息，超过 2000 字符时分片发送
+
+        Args:
+            agent_hash: agent 上下文（B 节）。调用方知道是哪个 Agent 在发就必须传，
+                否则 DB 兜底查询只能按 ilink_user_id 猜，可能用错 bot_token（§AC）。
+        """
         text = text or ""
         # 微信 Markdown 渲染器会将 {…} 识别为 LaTeX 公式起止符
         # 使用零宽空格断开大括号序列，防止渲染异常但视觉不变
@@ -1441,19 +1579,22 @@ class WeChatService:
             all_ok = True
             for idx, part in enumerate(parts):
                 prefix = f"({idx+1}/{len(parts)}) " if len(parts) > 1 else ""
-                ok = await self._send_single_message(to_user_id, prefix + part, context_token, base_info)
+                ok = await self._send_single_message(to_user_id, prefix + part, context_token, base_info,
+                                                     agent_hash=agent_hash)
                 if not ok:
                     all_ok = False
             return all_ok
 
-        return await self._send_single_message(to_user_id, text, context_token, base_info)
+        return await self._send_single_message(to_user_id, text, context_token, base_info,
+                                               agent_hash=agent_hash)
 
     async def _send_single_message(
         self,
         to_user_id: str,
         text: str,
         context_token: str = None,
-        base_info: Dict[str, Any] = None
+        base_info: Dict[str, Any] = None,
+        agent_hash: str = None
     ) -> bool:
         """发送单条消息（内部方法）"""
         # ========== 详细日志 ==========
@@ -1485,7 +1626,8 @@ class WeChatService:
             if not base_info.get("bot_token"):
                 logger.info("[WeChat] _send_single_message: _login_state has no bot_token, querying binding by to_user_id={}".format(to_user_id))
                 # to_user_id 是用户的 ilink_user_id，binding.ilink_user_id 存的也是用户的 ilink_user_id
-                binding = self.get_binding_by_ilink_user_id(to_user_id)
+                # 有 agent 上下文时按 agent_hash 收窄（B 节），避免取到别的 Agent 的 bot_token（§AC）
+                binding = self.get_binding_by_ilink_user_id(to_user_id, agent_hash=agent_hash)
                 logger.info("[WeChat] _send_single_message: get_binding_by_ilink_user_id result: {}".format(
                     "found binding id={}".format(binding.id) if binding else "None"))
                 if binding:
@@ -1601,9 +1743,10 @@ class WeChatService:
         self,
         to_user_id: str,
         context_token: str,
-        base_info: Dict[str, Any] = None
+        base_info: Dict[str, Any] = None,
+        agent_hash: str = None
     ) -> bool:
-        """发送 typing 状态"""
+        """发送 typing 状态（agent_hash：B 节，有 agent 上下文时必须传）"""
         # 如果没有传 base_info，尝试从数据库绑定记录中获取
         if base_info is None:
             base_info = {
@@ -1615,7 +1758,7 @@ class WeChatService:
 
             # 如果 _login_state 没有有效凭证，从数据库绑定记录获取
             if not base_info.get("bot_token"):
-                binding = self.get_binding_by_ilink_user_id(to_user_id)
+                binding = self.get_binding_by_ilink_user_id(to_user_id, agent_hash=agent_hash)
                 if binding:
                     if binding.ilink_token:
                         try:
@@ -1836,8 +1979,59 @@ class WeChatService:
 
     # ========== 数据库操作 ==========
 
+    # 绑定状态取值（改前只有 active / logout，本次新增 superseded）：
+    #   active     当前生效，消息路由到它
+    #   logout     用户在本平台主动解绑（unbind_user 写入）
+    #   superseded 被同一微信号的新绑定取代 —— 用户「取消绑定 → 绑新的」时
+    #              iLink 只会通知「绑定了新的」，**解绑旧的是无通知的**（李子 2026-10-02），
+    #              所以旧行必须由我们在写入新绑定的路径上主动标记。
+    #              不物理删除：保留历史（wechat_messages.binding_id 仍指向它），回退友好。
+    BINDING_STATUS_ACTIVE = "active"
+    BINDING_STATUS_LOGOUT = "logout"
+    BINDING_STATUS_SUPERSEDED = "superseded"
+
+    @staticmethod
+    def _mask_secret(value: Optional[str]) -> str:
+        """日志用：凭证只留前后 4 位（token 是敏感数据，禁止整串落日志）"""
+        if not value:
+            return "<empty>"
+        if len(value) <= 8:
+            return "***"
+        return "{}...{}".format(value[:4], value[-4:])
+
+    def _supersede_other_bindings(self, db, wx_openid: str, keep_id: int,
+                                  login_data: Optional[Dict[str, Any]] = None) -> int:
+        """把同一微信号的其它 active 绑定置为 superseded，返回被取代的行数。
+
+        匹配口径：ilink_user_id 优先（iLink 侧的用户标识），为空时退回 wx_openid。
+        只改 status —— 不清凭证、不删行（回退 = 一条 UPDATE 改回 active）。
+        """
+        login_data = login_data or {}
+        identity_ilink = (login_data.get("ilink_user_id") or wx_openid or "").strip()
+        identity_openid = (wx_openid or "").strip()
+        if not identity_ilink and not identity_openid:
+            return 0
+
+        conditions = []
+        if identity_ilink:
+            conditions.append(WeChatBinding.ilink_user_id == identity_ilink)
+        if identity_openid:
+            conditions.append(WeChatBinding.wx_openid == identity_openid)
+
+        others = db.query(WeChatBinding).filter(
+            or_(*conditions),
+            WeChatBinding.status == self.BINDING_STATUS_ACTIVE,
+            WeChatBinding.id != keep_id,
+        ).all()
+        for row in others:
+            row.status = self.BINDING_STATUS_SUPERSEDED
+        return len(others)
+
     def bind_user(self, user_id: int, wx_openid: str, login_data: Dict[str, Any]) -> WeChatBinding:
-        """绑定用户（按 agent_hash 查找已有绑定，支持同一用户多个 agent 各自绑定）"""
+        """绑定用户（按 agent_hash 查找已有绑定，支持同一用户多个 agent 各自绑定）
+
+        写入新绑定时会顺带把**同一个微信号**的其它 active 绑定置为 superseded（A 节）。
+        """
         db = SessionLocal()
         try:
             existing = db.query(WeChatBinding).filter(
@@ -1851,11 +2045,16 @@ class WeChatService:
                 existing.ilink_bot_id = login_data.get("ilink_bot_id", "")
                 existing.ilink_user_id = login_data.get("ilink_user_id", "")
                 existing.base_url = login_data.get("base_url", "")
-                existing.status = "active"
+                existing.status = self.BINDING_STATUS_ACTIVE
                 existing.agent_hash = login_data.get("agent_hash", existing.agent_hash or "")
                 existing.bound_at = datetime.now()
+                # 再绑即取代：同一微信号此前绑过的其它 Agent 从此收不到消息
+                superseded = self._supersede_other_bindings(db, wx_openid, existing.id, login_data)
                 db.commit()
                 binding_id = existing.id
+                if superseded:
+                    logger.info("[WeChat] bind_user: user_id={} agent_hash={} → superseded {} stale active binding(s)".format(
+                        user_id, login_data.get("agent_hash"), superseded))
                 db.close()
                 return WeChatBinding(id=binding_id)
 
@@ -1867,11 +2066,17 @@ class WeChatService:
                 ilink_user_id=login_data.get("ilink_user_id", ""),
                 base_url=login_data.get("base_url", ""),
                 agent_hash=login_data.get("agent_hash", ""),
-                status="active",
+                status=self.BINDING_STATUS_ACTIVE,
             )
             db.add(binding)
+            db.flush()  # 取到自增 id，才能排除自己
+            # 再绑即取代：该微信号此前绑的其它 Agent 全部失效
+            superseded = self._supersede_other_bindings(db, wx_openid, binding.id, login_data)
             db.commit()
             binding_id = binding.id
+            if superseded:
+                logger.info("[WeChat] bind_user: user_id={} agent_hash={} → superseded {} stale active binding(s)".format(
+                    user_id, login_data.get("agent_hash"), superseded))
             db.close()
             return WeChatBinding(id=binding_id)
         finally:
@@ -1879,12 +2084,12 @@ class WeChatService:
                 db.close()
 
     def get_binding_by_user(self, user_id: int, agent_hash: str = None) -> Optional[WeChatBinding]:
-        """获取用户的微信绑定"""
+        """获取用户的微信绑定（agent_hash 非空时只找该 Agent 的绑定）"""
         db = SessionLocal()
         try:
             query = db.query(WeChatBinding).filter(
                 WeChatBinding.user_id == user_id,
-                WeChatBinding.status == "active"
+                WeChatBinding.status == self.BINDING_STATUS_ACTIVE
             )
             if agent_hash:
                 query = query.filter(WeChatBinding.agent_hash == agent_hash)
@@ -1892,48 +2097,89 @@ class WeChatService:
         finally:
             db.close()
 
-    def get_binding_by_openid(self, wx_openid: str) -> Optional[WeChatBinding]:
-        """根据 openid 获取绑定"""
+    def get_binding_by_openid(self, wx_openid: str, agent_hash: str = None) -> Optional[WeChatBinding]:
+        """根据 openid 获取绑定（有 agent 上下文时务必传 agent_hash）"""
         db = SessionLocal()
         try:
-            return db.query(WeChatBinding).filter(
+            query = db.query(WeChatBinding).filter(
                 WeChatBinding.wx_openid == wx_openid,
-                WeChatBinding.status == "active"
-            ).first()
+                WeChatBinding.status == self.BINDING_STATUS_ACTIVE
+            )
+            if agent_hash:
+                query = query.filter(WeChatBinding.agent_hash == agent_hash)
+            return query.first()
         finally:
             db.close()
 
-    def get_binding_by_ilink_user_id(self, ilink_user_id: str) -> Optional[WeChatBinding]:
-        """根据 ilink_user_id 获取绑定（返回最新的 active 绑定）"""
-        db = SessionLocal()
-        try:
-            return db.query(WeChatBinding).filter(
-                WeChatBinding.ilink_user_id == ilink_user_id,
-                WeChatBinding.status == "active"
-            ).order_by(WeChatBinding.id.desc()).first()
-        finally:
-            db.close()
+    def get_binding_by_ilink_user_id(self, ilink_user_id: str, agent_hash: str = None,
+                                     user_id: int = None, ilink_bot_id: str = None) -> Optional[WeChatBinding]:
+        """根据 ilink_user_id 获取绑定（默认返回最新的 active 绑定）。
 
-    def get_binding_by_ilink_bot_id(self, ilink_bot_id: str) -> Optional[WeChatBinding]:
-        """根据 bot 的 ilink_user_id（ilink_bot_id）获取绑定
-
-        注意：binding.ilink_user_id 存的是 bot 的 ilink_user_id，
-        所以用 ilink_bot_id 来查找才能正确匹配。
+        调用方**有 agent 上下文时必须带上**（agent_hash / ilink_bot_id / user_id），
+        否则在历史重复数据未清理前会命中 id 最大的旧绑定，把消息路由到错误的 Agent
+        （§AA/§AC/§AH 三连事故的根因）。
         """
         db = SessionLocal()
         try:
-            return db.query(WeChatBinding).filter(
-                WeChatBinding.ilink_bot_id == ilink_bot_id,
-                WeChatBinding.status == "active"
-            ).first()
+            query = db.query(WeChatBinding).filter(
+                WeChatBinding.ilink_user_id == ilink_user_id,
+                WeChatBinding.status == self.BINDING_STATUS_ACTIVE
+            )
+            if agent_hash:
+                query = query.filter(WeChatBinding.agent_hash == agent_hash)
+            if user_id is not None:
+                query = query.filter(WeChatBinding.user_id == user_id)
+            if ilink_bot_id:
+                query = query.filter(WeChatBinding.ilink_bot_id == ilink_bot_id)
+            return query.order_by(WeChatBinding.id.desc()).first()
         finally:
             db.close()
 
-    def get_messages(self, user_id: int, limit: int = 50) -> List[Dict[str, Any]]:
-        """获取用户的微信消息记录"""
+    def get_binding_by_ilink_bot_id(self, ilink_bot_id: str, agent_hash: str = None,
+                                    user_id: int = None) -> Optional[WeChatBinding]:
+        """根据 bot 的 ilink_bot_id 获取绑定（bot id 能唯一确定是哪条绑定在收消息）
+
+        binding.ilink_bot_id 存的是 bot 的 ilink_bot_id（扫码时 iLink 返回，等同 SDK 的 account_id）。
+        """
+        if not ilink_bot_id:
+            return None
         db = SessionLocal()
         try:
-            binding = self.get_binding_by_user(user_id)
+            query = db.query(WeChatBinding).filter(
+                WeChatBinding.ilink_bot_id == ilink_bot_id,
+                WeChatBinding.status == self.BINDING_STATUS_ACTIVE
+            )
+            if agent_hash:
+                query = query.filter(WeChatBinding.agent_hash == agent_hash)
+            if user_id is not None:
+                query = query.filter(WeChatBinding.user_id == user_id)
+            return query.order_by(WeChatBinding.id.desc()).first()
+        finally:
+            db.close()
+
+    def _resolve_binding_for_inbound(self, from_user_id: str, user_id: int = None,
+                                     ilink_bot_id: str = None) -> Optional[WeChatBinding]:
+        """入站消息 → 绑定（按 agent 上下文精度从高到低解析，B 节）。
+
+        1. ilink_bot_id（+ user_id）：SDK 轮询会话的 bot 凭证，唯一确定哪条绑定在收消息；
+        2. user_id：退而用轮询会话所属用户；
+        3. 仅 ilink_user_id：最后兜底（调用方确实拿不到任何 agent 上下文时）。
+        """
+        if ilink_bot_id:
+            binding = self.get_binding_by_ilink_bot_id(ilink_bot_id, user_id=user_id)
+            if binding:
+                return binding
+        if user_id is not None:
+            binding = self.get_binding_by_ilink_user_id(from_user_id, user_id=user_id)
+            if binding:
+                return binding
+        return self.get_binding_by_ilink_user_id(from_user_id)
+
+    def get_messages(self, user_id: int, limit: int = 50, agent_hash: str = None) -> List[Dict[str, Any]]:
+        """获取用户的微信消息记录（agent_hash：B 节，按子域名 Agent 隔离）"""
+        db = SessionLocal()
+        try:
+            binding = self.get_binding_by_user(user_id, agent_hash=agent_hash)
             if not binding:
                 return []
 
@@ -1966,11 +2212,12 @@ class WeChatService:
                 query = query.filter(WeChatBinding.agent_hash == agent_hash)
             binding = query.first()
             if binding:
-                binding.status = "logout"
+                binding.status = self.BINDING_STATUS_LOGOUT
                 binding.bot_token = ""
                 binding.ilink_bot_id = ""
                 binding.ilink_user_id = ""
                 binding.base_url = ""
+                binding.ilink_token = None  # 凭证一并清掉，避免重启时被 restore 回内存
                 db.commit()
                 return True
             return False
@@ -1983,7 +2230,7 @@ class WeChatService:
         try:
             return db.query(WeChatBinding).filter(
                 WeChatBinding.user_id == user_id,
-                WeChatBinding.status == "active"
+                WeChatBinding.status == self.BINDING_STATUS_ACTIVE
             ).first() is not None
         finally:
             db.close()
@@ -1996,7 +2243,7 @@ class WeChatService:
         try:
             threshold = datetime.now() - timedelta(hours=24)
             bindings = db.query(WeChatBinding).filter(
-                WeChatBinding.status == "active",
+                WeChatBinding.status == self.BINDING_STATUS_ACTIVE,
                 WeChatBinding.last_msg_at < threshold
             ).all()
             return [b.user_id for b in bindings]

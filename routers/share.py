@@ -113,6 +113,24 @@ def _render_jsxgraph_file(content: bytes) -> str:
     return JSXGRAPH_TEMPLATE.replace("JSXGRAPH_CODE", code)
 
 
+def _share_error_page(status_code: int, title: str, message: str) -> Response:
+    """分享页友好错误页（替代 FastAPI 默认的裸 500 / JSON 错误）。"""
+    html = f"""<!DOCTYPE html>
+<html lang="zh"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{title}</title>
+<style>
+body{{margin:0;font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;
+background:#f5f6f8;color:#333;display:flex;align-items:center;justify-content:center;min-height:100vh;}}
+.card{{background:#fff;border-radius:12px;padding:40px 48px;max-width:420px;
+box-shadow:0 2px 12px rgba(0,0,0,.06);text-align:center;}}
+h1{{font-size:20px;margin:0 0 12px;}}
+p{{font-size:15px;line-height:1.6;color:#666;margin:0;}}
+</style></head>
+<body><div class="card"><h1>{title}</h1><p>{message}</p></div></body></html>"""
+    return Response(content=html, status_code=status_code, media_type="text/html")
+
+
 router = APIRouter(tags=["share"])
 
 
@@ -140,14 +158,22 @@ async def resolve_share_by_slug(slug: str, request: Request, db: Session = Depen
 
     vfs_path = mapping.vfs_path
 
-    # 通过 COS 获取文件（复用现有逻辑）
-    from services.storage_service import StorageService
+    # 通过存储后端获取文件（感知 STORAGE_MODE，构造失败不再裸 500）
     from datetime import datetime
 
     if mapping.expires_at and datetime.utcnow() > mapping.expires_at:
         raise HTTPException(status_code=410, detail="分享链接已过期")
 
-    storage = StorageService()
+    try:
+        from services.file_storage import create_file_storage
+        storage = create_file_storage(mode=getattr(settings, "STORAGE_MODE", "auto"))
+    except Exception as e:
+        logger.error(f"[Share] storage unavailable for /s/{slug}: {e}")
+        return _share_error_page(
+            503,
+            "存储服务不可用",
+            "文件存储服务当前不可用，暂时无法打开这个分享链接，请稍后再试。",
+        )
     cos_keys = []
     # vfs_path 可能以 /workspace/ 开头，拼接时避免重复 workspace 前缀
     _clean = vfs_path.removeprefix("/workspace/")
@@ -262,11 +288,19 @@ async def resolve_share(token: str, db: Session = Depends(get_db)):
         if mapping:
             agent_hash = mapping.agent_hash
 
-    # 通过 COS 获取文件
+    # 通过存储后端获取文件（感知 STORAGE_MODE，构造失败给可读错误页，不再裸 500）
     try:
-        from services.storage_service import StorageService
-        storage = StorageService()
+        from services.file_storage import create_file_storage
+        storage = create_file_storage(mode=getattr(settings, "STORAGE_MODE", "auto"))
+    except Exception as e:
+        logger.error(f"[Share] storage unavailable for /share/{token}: {e}")
+        return _share_error_page(
+            503,
+            "存储服务不可用",
+            "文件存储服务当前不可用，暂时无法打开这个分享链接，请稍后再试。",
+        )
 
+    try:
         cos_keys = []
         # vfs_path 可能以 /workspace/ 开头，拼接时避免重复 workspace 前缀
         _clean = vfs_path.removeprefix("/workspace/")
@@ -347,7 +381,7 @@ mermaid.run({{nodes:document.querySelectorAll('.mermaid')}});
                 return Response(content=content, media_type=content_type,
                               headers={"Content-Disposition": f"inline; filename*=UTF-8''{quote(_fname)}"})
     except Exception as e:
-        logger.warning(f"[Share] COS fetch failed: {e}")
+        logger.warning(f"[Share] storage fetch failed: {e}")
 
     # 尝试通过 FUSE 本地路径
     fuse_path = f"{settings.FUSE_MOUNT_DIR}{vfs_path}"

@@ -44,6 +44,7 @@ build/
 # Temporary
 *.tmp
 *.bak
+*.bak-*
 *.deprecated
 # Temp scripts
 tmp/
@@ -91,5 +92,5 @@ claude-tasks/
 # One-shot test / migration scripts
 scripts/compliance-prompt-iter.py
 scripts/migrate_passwords.py
-feclaw-storage/
-feclaw-fuse/
+/feclaw-storage/
+/feclaw-fuse/

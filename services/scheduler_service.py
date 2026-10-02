@@ -186,7 +186,7 @@ def _do_send(task_id: int):
 
         # 获取用户微信绑定并发送（需要新事件循环因为在 APScheduler 工作线程中）
         from services.wechat_service import wechat_service
-        binding = wechat_service.get_binding_by_user(int(task.user_id))
+        binding = wechat_service.get_binding_by_user(int(task.user_id), agent_hash=task.agent_hash)
         if binding and binding.ilink_user_id:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
@@ -194,7 +194,8 @@ def _do_send(task_id: int):
                 success = loop.run_until_complete(
                     wechat_service.send_message(
                         to_user_id=binding.ilink_user_id,
-                        text=f"⏰ {content}"
+                        text=f"⏰ {content}",
+                        agent_hash=task.agent_hash,
                     )
                 )
             finally:

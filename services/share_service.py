@@ -193,15 +193,23 @@ def create_share_link(
     """
     from models.database import ShareMapping, SessionLocal
 
-    try:
-        # 检查文件是否真的存在
-        if agent_hash and vfs_path:
-            from services.storage_service import StorageService
-            cos_key = f"feclaw/agents/{agent_hash}/{vfs_path.lstrip('/')}"
-            if not StorageService().file_exists(cos_key):
+    # 检查文件是否真的存在 —— 与 VFS 共用 create_file_storage()，感知 STORAGE_MODE
+    # （cos / local / auto 自动回退本地），local 模式下不再因硬绑 COS 而必然失败。
+    if agent_hash and vfs_path:
+        try:
+            from services.file_storage import create_file_storage
+            storage = create_file_storage(mode=getattr(settings, "STORAGE_MODE", "auto"))
+            cos_key = f"{settings.STORAGE_PREFIX}agents/{agent_hash}/{vfs_path.lstrip('/')}"
+            if not storage.file_exists(cos_key):
                 logger.warning(f"Share link failed: file not found in VFS: {cos_key}")
                 return {"_error": "not_found", "vfs_path": vfs_path}
+        except Exception as e:
+            # 存储后端本身不可用（如 COS 未配置、磁盘不可写）—— 把真因带出去，
+            # 不能吞掉后再让上层甩「可能是敏感文件或无效路径」这种误导文案。
+            logger.error(f"Share link failed: storage unavailable for {vfs_path}: {e}", exc_info=True)
+            return {"_error": "storage_error", "message": str(e)}
 
+    try:
         if mode == "path":
             url = f"https://{settings.FECLAW_STATIC_DOMAIN}/share/{vfs_path.lstrip('/')}"
             return {"url": url}
@@ -246,5 +254,5 @@ def create_share_link(
 
         return {"url": url, "token": token, "slug": slug, "expires_at": expires_at}
     except Exception as e:
-        logger.error(f"Failed to create share link: {e}")
+        logger.error(f"Failed to create share link: {e}", exc_info=True)
         return None

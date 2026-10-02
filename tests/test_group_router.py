@@ -82,10 +82,20 @@ class TestGroupRouterWithAuth:
 
     @pytest.fixture
     def mock_auth(self):
-        """Mock authentication to return user_id=1"""
-        with patch("utils.auth.get_current_user_id") as mock:
-            mock.return_value = 1
-            yield mock
+        """Override auth dependency to return user_id=1"""
+        # routers/group.py 用 `from utils.auth import get_current_user_id`，FastAPI 在
+        # 装饰期就捕获了该依赖对象 → 单纯 patch `utils.auth.*` 只在 main 尚未被前序
+        # 测试导入时有效（隔离跑 400、整文件跑 401）。正确做法是用 FastAPI 官方
+        # dependency_overrides（按 callable 身份匹配，请求期生效）。
+        from main import app
+        from utils.auth import get_current_user_id
+
+        async def _fake_user_id():
+            return 1
+
+        app.dependency_overrides[get_current_user_id] = _fake_user_id
+        yield _fake_user_id
+        app.dependency_overrides.pop(get_current_user_id, None)
 
     @pytest.fixture
     def mock_db_session(self):
@@ -171,24 +181,29 @@ class TestGroupRouterWithAuth:
     def test_delete_group_owner_only(self, mock_auth):
         """delete_group only allows owner"""
         from main import app
+        from models.database import get_db
         client = TestClient(app, raise_server_exceptions=False)
 
-        with patch("models.database.get_db") as mock_get_db:
-            mock_db = MagicMock()
-            mock_get_db.return_value = mock_db
+        mock_db = MagicMock()
+        # Group owned by different user
+        mock_group = MagicMock()
+        mock_group.owner_user_id = 999
+        mock_group.deleted_at = None
+        mock_db.query.return_value.filter.return_value.first.return_value = mock_group
 
-            # Group owned by different user
-            mock_group = MagicMock()
-            mock_group.owner_user_id = 999
-            mock_group.deleted_at = None
-            mock_db.query.return_value.filter.return_value.first.return_value = mock_group
+        def _fake_get_db():
+            yield mock_db
 
+        app.dependency_overrides[get_db] = _fake_get_db
+        try:
             response = client.delete(
-                "/api/groups/some-id",
+                "/api/groups/123",
                 headers={"Authorization": "Bearer fake"},
             )
+        finally:
+            app.dependency_overrides.pop(get_db, None)
 
-            assert response.status_code == 403
+        assert response.status_code == 403
 
 
 class TestGroupRouterMessages:
@@ -197,37 +212,45 @@ class TestGroupRouterMessages:
     def test_get_messages_pagination(self):
         """get_messages respects limit parameter"""
         from main import app
+        from utils.auth import get_current_user_id
+        from models.database import get_db
         client = TestClient(app, raise_server_exceptions=False)
 
-        with patch("utils.auth.get_current_user_id") as mock_auth:
-            mock_auth.return_value = 1
+        async def _fake_user_id():
+            return 1
 
-            with patch("models.database.get_db") as mock_get_db:
-                mock_db = MagicMock()
-                mock_get_db.return_value = mock_db
+        mock_db = MagicMock()
+        # Mock group found
+        mock_group = MagicMock()
+        mock_group.owner_user_id = 1
+        mock_group.deleted_at = None
+        mock_db.query.return_value.filter.return_value.first.side_effect = [
+            mock_group,  # _get_group_or_404
+        ]
 
-                # Mock group found
-                mock_group = MagicMock()
-                mock_group.owner_user_id = 1
-                mock_group.deleted_at = None
-                mock_db.query.return_value.filter.return_value.first.side_effect = [
-                    mock_group,  # _get_group_or_404
-                ]
+        def _fake_get_db():
+            yield mock_db
 
-                with patch("routers.group.GroupDispatchService") as MockService:
-                    mock_svc = MagicMock()
-                    mock_svc.get_messages.return_value = []
-                    MockService.return_value = mock_svc
+        app.dependency_overrides[get_current_user_id] = _fake_user_id
+        app.dependency_overrides[get_db] = _fake_get_db
+        try:
+            with patch("routers.group.GroupDispatchService") as MockService:
+                mock_svc = MagicMock()
+                mock_svc.get_messages.return_value = []
+                MockService.return_value = mock_svc
 
-                    response = client.get(
-                        "/api/groups/some-id/messages?limit=100",
-                        headers={"Authorization": "Bearer fake"},
-                    )
+                response = client.get(
+                    "/api/groups/123/messages?limit=100",
+                    headers={"Authorization": "Bearer fake"},
+                )
 
-                    # Verify limit was passed
-                    mock_svc.get_messages.assert_called()
-                    call_args = mock_svc.get_messages.call_args
-                    assert call_args[1]["limit"] == 100
+                # Verify limit was passed
+                mock_svc.get_messages.assert_called()
+                call_args = mock_svc.get_messages.call_args
+                assert call_args[1]["limit"] == 100
+        finally:
+            app.dependency_overrides.pop(get_current_user_id, None)
+            app.dependency_overrides.pop(get_db, None)
 
 
 class TestGroupRouterMoments:

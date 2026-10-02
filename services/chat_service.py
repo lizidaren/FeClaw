@@ -92,7 +92,7 @@ class NoReplyError(Exception):
 
     由 GroupDispatchService 捕获以跳过本轮。
     """
-    def __init__(self, agent_hash: str, group_id: str):
+    def __init__(self, agent_hash: str, group_id: int):
         self.agent_hash = agent_hash
         self.group_id = group_id
         super().__init__(f"Agent {agent_hash} returned NO_REPLY in group {group_id}")
@@ -108,7 +108,7 @@ class ChatService:
         session_id: Optional[str] = None,
         session_reset_at: Optional[datetime] = None,
         pre_process_hook: Optional[Callable[[str, Dict, str], Awaitable[Optional[str]]]] = None,
-        group_id: Optional[str] = None,
+        group_id: Optional[int] = None,
     ):
         """
         初始化聊天服务

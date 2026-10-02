@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>FeClaw 设置</title>
     <script>window.ROOT_DOMAIN = "{{ feclaw_domain }}";</script>
+    <script src="/static/js/token-sync.js"></script>
     <script src="/static/js/auth.js"></script>
     <script>
         (async function() {
@@ -441,10 +442,9 @@
         let wechatDialogOpen = false;
         let sessionsData = [];
 
-        // Parse agent hash from host
+        // Parse agent hash from host（4–8 位 hex，统一走 Auth.parseAgentHash）
         const host = window.location.host;
-        const hashMatch = host.match(/^([a-f0-9]{4})\./);
-        agentHash = hashMatch ? hashMatch[1] : null;
+        agentHash = Auth.parseAgentHash(host);
         document.getElementById('agentHash').textContent = 'Agent: ' + agentHash;
         // 显示登录方式
         if (jwt) {
@@ -495,9 +495,11 @@
                 document.getElementById('statStatus').textContent = data.status === 'initialized' ? '已初始化' : '待初始化';
                 document.getElementById('statCreated').textContent = data.created_at || '-';
                 document.getElementById('agentName').value = data.name || '';
-                document.getElementById('agentDescription').value = '';
-                if (data.user_id) {
-                    document.getElementById('agentDescription').placeholder = 'Agent #' + data.user_id;
+                // 模板里没有 agentDescription 元素（历史遗留）⇒ 空守卫，避免每次进页面抛 TypeError
+                const descEl = document.getElementById('agentDescription');
+                if (descEl) {
+                    descEl.value = '';
+                    if (data.user_id) descEl.placeholder = 'Agent #' + data.user_id;
                 }
                 // Try loading description from settings
                 
@@ -826,8 +828,8 @@
                 // OIDC RP-Initiated Logout：清除本地认证并跳转 Platform end_session
                 Auth.clearAuth({ redirectToLogout: true });
             } else {
-                Auth.clearAuth();
-                window.location.href = '/login';
+                // 等后端吊销完成（jwt_version +1）再跳转，避免请求被跳转取消
+                Auth.clearAuth().then(function() { window.location.href = '/login'; });
             }
         }
 

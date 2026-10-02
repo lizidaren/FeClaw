@@ -37,6 +37,10 @@ PROVIDER_META = {
         "api_key_attr": "KIMI_API_KEY",
         "base_url": None  # 使用 settings.KIMI_BASE_URL
     },
+    "injection_proxy": {
+        "api_key_attr": "DEEPSEEK_API_KEY",
+        "base_url": "http://127.0.0.1:58081/v1"
+    },
     "qwen": {
         "api_key_attr": "QWEN_API_KEY",
         "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1"
@@ -44,6 +48,10 @@ PROVIDER_META = {
     "mimo": {
         "api_key_attr": "MIMO_API_KEY",
         "base_url": "https://api.xiaomimimo.com/v1"
+    },
+    "aliyun": {
+        "api_key_attr": "ALIYUN_DASHSCOPE_API_KEY",
+        "base_url": "https://dashscope.aliyuncs.com"
     },
 }
 
@@ -92,6 +100,13 @@ MODEL_REGISTRY = {
         "provider": "qwen",
         "supports_thinking": False,
         "supports_vision": True,
+    },
+    # ─── 专用 OCR（非通用 VLM） ───
+    "qwen3.5-ocr": {
+        "provider": "qwen",
+        "supports_thinking": False,
+        "supports_vision": True,
+        "is_ocr": True,  # 专用 OCR 模型，比通用 VLM 更便宜更快
     },
     # ─── 智谱 GLM ───
     "glm-4.7": {
@@ -197,6 +212,23 @@ MODEL_REGISTRY = {
         "supports_vision": False,
         "rerank_url": "https://dashscope.aliyuncs.com/compatible-api/v1/reranks",
     },
+    # ─── ASR（语音识别） ───
+    "fun-asr": {
+        "provider": "aliyun",
+        "supports_asr": True,
+        "asr_mode": "async",
+        "supports_diarization": True,
+        "max_duration_seconds": 43200,  # 12h
+        "asr_endpoint": "/api/v1/services/audio/asr/transcription",
+    },
+    "fun-asr-flash": {
+        "provider": "aliyun",
+        "supports_asr": True,
+        "asr_mode": "sync",
+        "supports_diarization": False,
+        "max_duration_seconds": 300,    # 5min
+        "asr_endpoint": "/api/v1/services/aigc/multimodal-generation/generation",
+    },
 }
 
 
@@ -275,21 +307,29 @@ def resolve_provider(provider_name: str) -> Optional[dict]:
 
 
 def find_by_capability(*, supports_vision: Optional[bool] = None,
-                       supports_thinking: Optional[bool] = None) -> Optional[str]:
+                       supports_thinking: Optional[bool] = None,
+                       supports_asr: Optional[bool] = None,
+                       supports_diarization: Optional[bool] = None) -> Optional[str]:
     """
     按能力查找第一个匹配的模型名。
 
     Args:
         supports_vision: 是否需要多模态能力
         supports_thinking: 是否需要深度思考能力
+        supports_asr: 是否需要语音识别能力
+        supports_diarization: 是否需要说话人分离能力
 
     Returns:
         匹配的模型名，找不到则返回 None
     """
     for name, info in MODEL_REGISTRY.items():
-        if supports_vision is not None and info["supports_vision"] != supports_vision:
+        if supports_vision is not None and info.get("supports_vision") != supports_vision:
             continue
-        if supports_thinking is not None and info["supports_thinking"] != supports_thinking:
+        if supports_thinking is not None and info.get("supports_thinking") != supports_thinking:
+            continue
+        if supports_asr is not None and info.get("supports_asr") != supports_asr:
+            continue
+        if supports_diarization is not None and info.get("supports_diarization") != supports_diarization:
             continue
         return name
     return None

@@ -35,6 +35,8 @@ async def _render_console_page(request: Request):
     html = """<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
+    <script src="/static/js/token-sync.js"></script>
+
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>FeClaw Console - Agent 管理</title>
@@ -344,7 +346,7 @@ async def _render_console_page(request: Request):
                 if (!response.ok) throw new Error('Failed to issue token');
 
                 const data = await response.json();
-                alert('Token 已签发:\n' + data.token + '\n\n有效期: ' + data.expires_in + ' 秒');
+                alert('Token 已签发:\\n' + data.token + '\\n\\n有效期: ' + data.expires_in + ' 秒');
             } catch (error) {
                 alert('签发失败: ' + error.message);
             }
@@ -384,6 +386,8 @@ async def _render_new_agent_page(request: Request):
     html = """<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
+    <script src="/static/js/token-sync.js"></script>
+
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>FeClaw Console - 创建 Agent</title>
@@ -829,6 +833,8 @@ async def _render_agent_config_page(request: Request, agent_id: int):
     html = """<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
+    <script src="/static/js/token-sync.js"></script>
+
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>FeClaw Console - Agent 配置</title>

@@ -31,6 +31,11 @@ from sqlalchemy.orm import Session
 
 from config import settings
 from models.database import User, UserLink
+from utils.auth import (
+    attach_jwt_version,
+    is_token_revoked,
+    user_id_from_payload,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +82,8 @@ def sign_access_token(
         "iat": now,
         "exp": now + timedelta(hours=expire_hours),
     }
+    # 登出吊销版本号：缺失会被 is_token_revoked 误判为已吊销，必须写
+    attach_jwt_version(payload)
     return _encode_token(payload), expire_hours * 3600
 
 
@@ -95,6 +102,8 @@ def sign_refresh_token(user_id: int) -> Tuple[str, int]:
         "iat": now,
         "exp": now + timedelta(hours=expire_hours),
     }
+    # 同上：refresh token 也必须携带吊销版本号，登出后不能再换新 access token
+    attach_jwt_version(payload)
     return _encode_token(payload), expire_hours * 3600
 
 
@@ -102,7 +111,7 @@ def decode_refresh_token(token: str) -> Optional[int]:
     """
     解码 refresh token，返回 user_id。
 
-    校验失败（签名错 / 过期 / type 不对） -> 返回 None。
+    校验失败（签名错 / 过期 / type 不对 / 已登出吊销） -> 返回 None。
     调用方应自行决定是否 raise 401。
     """
     payload = _decode_token(token)
@@ -111,11 +120,10 @@ def decode_refresh_token(token: str) -> Optional[int]:
     if payload.get("type") != "refresh":
         logger.warning("[oauth_helpers] token type != 'refresh'")
         return None
-    raw = payload.get("sub") or payload.get("user_id")
-    try:
-        return int(raw)
-    except (TypeError, ValueError):
+    if is_token_revoked(payload):
+        logger.info("[oauth_helpers] refresh token 已被登出吊销")
         return None
+    return user_id_from_payload(payload)
 
 
 # ────────────────────────────────────────────────────────────

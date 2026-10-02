@@ -98,7 +98,7 @@ class SessionToolsMixin(AgentToolsServiceBase):
         try:
             if messages_json is None:
                 try:
-                    binding = WeChatService().get_binding_by_user(int(self.user_id))
+                    binding = WeChatService().get_binding_by_user(int(self.user_id), agent_hash=self.agent_hash)
                     if not binding:
                         return "Error: 未找到微信绑定，且未提供 messages_json 参数。Web/API 用户请使用 end_conversation(messages_json=...) 传入消息。"
                 except Exception:
@@ -149,7 +149,7 @@ class SessionToolsMixin(AgentToolsServiceBase):
                 # 仍清理微信消息记录，不创建 ConversationSession
                 db = SessionLocal()
                 try:
-                    binding = WeChatService().get_binding_by_user(int(self.user_id))
+                    binding = WeChatService().get_binding_by_user(int(self.user_id), agent_hash=self.agent_hash)
                     if binding:
                         db_binding = db.query(WeChatBinding).filter(WeChatBinding.id == binding.id).first()
                         if db_binding:
@@ -196,7 +196,7 @@ class SessionToolsMixin(AgentToolsServiceBase):
                 )
                 db.add(session)
 
-                binding = WeChatService().get_binding_by_user(int(self.user_id))
+                binding = WeChatService().get_binding_by_user(int(self.user_id), agent_hash=self.agent_hash)
                 if binding:
                     db_binding = db.query(WeChatBinding).filter(WeChatBinding.id == binding.id).first()
                     if db_binding:

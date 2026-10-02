@@ -321,7 +321,7 @@ class TodoToolsMixin(AgentToolsServiceBase):
     )
     async def get_group_history(
         self,
-        group_id: str,
+        group_id: int,
         limit: int = 20,
     ) -> str:
         """

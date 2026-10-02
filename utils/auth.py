@@ -11,6 +11,7 @@ import hashlib
 import uuid
 import json
 import calendar
+import logging
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any
 from fastapi import Depends, HTTPException, status
@@ -19,6 +20,8 @@ from jose import JWTError, jwt
 
 from config import settings
 from models.database import get_db, User
+
+logger = logging.getLogger(__name__)
 
 # 保持向后兼容：所有 `from utils.auth import get_current_user*` 仍然可用
 # 用 __getattr__ 懒加载避免 utils.auth <-> utils.auth_dependencies 循环导入
@@ -117,7 +120,11 @@ def needs_rehash(password_hash: str) -> bool:
 # ==========================================
 
 def create_jwt_token(data: Dict[str, Any], expires_delta: Optional[timedelta] = None) -> str:
-    """创建JWT Token"""
+    """创建JWT Token
+
+    自动写入 `jwt_version`（当前用户登出吊销版本号）—— 配套
+    :func:`is_token_revoked` 校验，保证登出后旧 token 立即失效。
+    """
     to_encode = data.copy()
 
     if expires_delta:
@@ -125,18 +132,166 @@ def create_jwt_token(data: Dict[str, Any], expires_delta: Optional[timedelta] = 
     else:
         expire = datetime.utcnow() + timedelta(hours=settings.JWT_EXPIRE_HOURS)
 
+    attach_jwt_version(to_encode)
     to_encode.update({"exp": expire})
     encoded_jwt = jwt.encode(to_encode, settings.JWT_SECRET, algorithm=settings.JWT_ALGORITHM)
     return encoded_jwt
 
 
 def decode_jwt_token(token: str) -> Optional[Dict[str, Any]]:
-    """解码JWT Token"""
+    """解码JWT Token（纯密码学校验：签名 + 过期，**不**查吊销）
+
+    吊销（jwt_version）检查请调用 :func:`is_token_revoked` —— 需要 DB，
+    由调用方（鉴权依赖 / SSO 校验）负责。
+    """
     try:
         payload = jwt.decode(token, settings.JWT_SECRET, algorithms=[settings.JWT_ALGORITHM])
         return payload
     except JWTError:
         return None
+
+
+# ==========================================
+# JWT 吊销（登出立即失效）
+# ==========================================
+#
+# 设计：`users.jwt_version` 整数版本号。
+#   - 签发时把当前版本写进 payload（`jwt_version` claim）
+#   - 校验时比对 payload 与库中版本，不一致 ⇒ 已吊销
+#   - 登出时 +1 ⇒ 该用户此前签发的**全部** local JWT 立刻失效
+#   - 默认 0 ⇒ 老 token（无 claim，按 0 处理）对老用户仍然有效，不会强制登出
+#
+# 只覆盖 FeClaw 自己签发的 HS256 local JWT（Platform 签发的 RS256 JWT 不经过这里）。
+
+JWT_VERSION_CLAIM = "jwt_version"
+
+
+def user_id_from_payload(payload: Optional[Dict[str, Any]]) -> Optional[int]:
+    """从 JWT payload 取 user_id，兼容 `user_id` 与 `sub` 两种字段。"""
+    if not payload:
+        return None
+    raw = payload.get("user_id")
+    if raw is None:
+        raw = payload.get("sub")
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except (ValueError, TypeError):
+        return None
+
+
+def get_user_jwt_version(user_id, db=None) -> Optional[int]:
+    """查库取用户当前 `jwt_version`。
+
+    返回 ``None`` 表示**无法判定**（用户不存在 / 查询失败 / 非 ORM 对象），
+    调用方应据此放行而不是吊销 —— 否则会误伤所有 token。
+
+    ``db`` 可传入调用方已有 session 以复用连接；不传则临时开一个。
+    """
+    if user_id is None:
+        return None
+    # 防御：调用方可能把 FastAPI 的 Depends(...) 占位对象直接传进来
+    # （如 feclaw_domain.py 里未 await 的直接调用），它不是 Session → 退回自建会话
+    if db is not None and not hasattr(db, "query"):
+        db = None
+    own_session = db is None
+    if own_session:
+        try:
+            from models.database import SessionLocal
+            db = SessionLocal()
+        except Exception as e:  # pragma: no cover - 仅导入/连接异常
+            logger.debug(f"[jwt_version] SessionLocal 不可用: {e}")
+            return None
+    try:
+        user = db.query(User).filter(User.id == user_id).first()
+        if user is None:
+            return None
+        value = getattr(user, "jwt_version", None)
+        # 只接受真实整数（bool 除外）；mock 对象等非整数 → 无法判定
+        if isinstance(value, bool) or not isinstance(value, int):
+            return None
+        return value
+    except Exception as e:
+        logger.debug(f"[jwt_version] 查询失败 user_id={user_id}: {e}")
+        return None
+    finally:
+        if own_session:
+            try:
+                db.close()
+            except Exception:
+                pass
+
+
+def is_token_revoked(payload: Optional[Dict[str, Any]], db=None) -> bool:
+    """payload 是否已被登出吊销。
+
+    - payload 为空 → True（不可用）
+    - 取不到 user_id / 用户不存在 / 查不到版本 → False（无法判定，交上层鉴权）
+    - 用户存在且版本不一致 → True
+    """
+    if not payload:
+        return True
+    uid = user_id_from_payload(payload)
+    if uid is None:
+        return False
+    current = get_user_jwt_version(uid, db=db)
+    if current is None:
+        return False
+    try:
+        token_version = int(payload.get(JWT_VERSION_CLAIM, 0) or 0)
+    except (TypeError, ValueError):
+        token_version = 0
+    return token_version != current
+
+
+def attach_jwt_version(payload: Dict[str, Any], version: Optional[int] = None) -> Dict[str, Any]:
+    """把当前 `jwt_version` 写进 payload（原地修改并返回）。
+
+    所有 FeClaw local JWT 签发点都必须调用 —— 否则登出后新签发的 token
+    会被误判为版本 0 而已失效。
+    """
+    if JWT_VERSION_CLAIM in payload:
+        return payload
+    if version is None:
+        version = get_user_jwt_version(user_id_from_payload(payload))
+    payload[JWT_VERSION_CLAIM] = version if version is not None else 0
+    return payload
+
+
+def bump_user_jwt_version(user_id, db=None) -> bool:
+    """登出吊销：把用户 `jwt_version` +1。成功返回 True。"""
+    if user_id is None:
+        return False
+    own_session = db is None
+    if own_session:
+        try:
+            from models.database import SessionLocal
+            db = SessionLocal()
+        except Exception as e:
+            logger.error(f"[jwt_version] 登出吊销失败（无法建连）: {e}")
+            return False
+    try:
+        user = db.query(User).filter(User.id == user_id).first()
+        if user is None:
+            return False
+        user.jwt_version = int(user.jwt_version or 0) + 1
+        db.commit()
+        logger.info(f"[jwt_version] 已吊销 user_id={user_id} 的旧 token（version→{user.jwt_version}）")
+        return True
+    except Exception as e:
+        logger.error(f"[jwt_version] 登出吊销失败 user_id={user_id}: {e}")
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        return False
+    finally:
+        if own_session:
+            try:
+                db.close()
+            except Exception:
+                pass
 
 
 # ==========================================

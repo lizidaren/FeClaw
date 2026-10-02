@@ -139,7 +139,7 @@ def _update_buffer_content(agent_hash: str, new_content: str, new_version: int) 
 def _check_new_messages(
     agent_hash: str,
     channel: str,
-    group_id: Optional[str],
+    group_id: Optional[int],
     since: datetime,
 ) -> List[Dict[str, Any]]:
     """
@@ -178,7 +178,7 @@ def _check_new_messages(
 
 
 async def _send_to_group(
-    group_id: str,
+    group_id: int,
     sender_hash: str,
     content: str,
     attachments: Optional[List[Dict[str, Any]]] = None,
@@ -197,7 +197,7 @@ async def _send_to_group(
 
 
 def _save_group_message_direct(
-    group_id: str,
+    group_id: int,
     sender_hash: str,
     content: str,
     attachments: Optional[List[Dict[str, Any]]] = None,
@@ -266,6 +266,7 @@ async def _push_direct_response(
                 ok = await _wxs.send_message(
                     to_user_id=to_user_id,
                     text=content,
+                    agent_hash=agent_hash,
                 )
                 logger.info(
                     f"[PushResponse] wechat ok={ok} agent={agent_hash} to={to_user_id[:20]} "
@@ -354,7 +355,7 @@ async def _push_direct_response(
 
 # ============== 回链触发（flush 到群后异步分发到其他 IM Agent） ==============
 
-def _trigger_re_dispatch(agent_hash: str, group_id: str, content: str) -> None:
+def _trigger_re_dispatch(agent_hash: str, group_id: int, content: str) -> None:
     """flush 成功后异步触发群内其他 IM Agent 的回链（不阻塞 flush 返回）。"""
     import asyncio
     try:
@@ -369,7 +370,7 @@ def _trigger_re_dispatch(agent_hash: str, group_id: str, content: str) -> None:
         ).start()
 
 
-async def _do_re_dispatch(agent_hash: str, group_id: str, content: str) -> None:
+async def _do_re_dispatch(agent_hash: str, group_id: int, content: str) -> None:
     """异步回链分发：找群内其他 IM Agent，触发一个（轮流）。"""
     # 局部导入避免循环依赖（interrupt_controller 可能被 router 反向 import）
     from models.agent_profile import AgentProfile
@@ -488,7 +489,7 @@ class ReplyBufferToolsMixin(AgentToolsServiceBase):
     async def reply_buffer_flush(
         self,
         channel: str,
-        group_id: Optional[str] = None,
+        group_id: Optional[int] = None,
         to_user_id: Optional[str] = None,
         user_id: Optional[int] = None,
         session_id: Optional[str] = None,
@@ -555,7 +556,7 @@ class ReplyBufferToolsMixin(AgentToolsServiceBase):
                 _clear_buffer(self.agent_hash)
                 # ✅ flush 成功后触发回链（异步，不阻塞 flush 返回）
                 _trigger_re_dispatch(self.agent_hash, group_id, buf.content)
-                target = f"群 {group_id[:8]}"
+                target = f"群 #{group_id}"
                 return f"✅ 消息已发送到 {target}（msg_id={msg_id_out}）"
 
             # channel ∈ {web, wechat, desktop}：推回原渠道

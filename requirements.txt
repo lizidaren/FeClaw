@@ -6,6 +6,7 @@ pydantic-settings>=2.0.0
 python-jose[cryptography]>=3.3.0
 httpx[http2]>=0.25.0
 cos-python-sdk-v5>=1.9.30
+qcloud-python-sts>=3.1.0   # COS 临时密钥 STS（前端直传用）
 python-multipart>=0.0.6
 pymysql>=1.1.0  # MySQL driver
 aiohttp>=3.9.0  # Async HTTP client

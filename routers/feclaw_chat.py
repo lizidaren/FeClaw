@@ -49,7 +49,7 @@ class ChatRequest(BaseModel):
     image_url: Optional[str] = None  # 图片 URL（支持 base64 data URL）
     file_path: Optional[str] = None  # 文件 VFS 路径（前端上传后）
     file_name: Optional[str] = None  # 原始文件名
-    group_id: Optional[str] = None  # 群聊 ID（P0-2 fix：非空时走群聊逻辑）
+    group_id: Optional[int] = None  # 群聊 ID（P0-2 fix：非空时走群聊逻辑）
     channel: str = Field(..., min_length=1)  # 白名单 {web, mobile}
     agent_hash: str = Field(..., min_length=1)  # body 优先于同名 query 参数
 

@@ -32,10 +32,23 @@ from models.database import SessionLocal, ConversationSession, User, get_db
 import jwt as pyjwt
 from models.agent_profile import AgentProfile
 from models.database import WeChatBinding
-from utils.auth import get_current_user, decode_jwt_token
+from utils.auth import (
+    get_current_user,
+    decode_jwt_token,
+    bump_user_jwt_version,
+    user_id_from_payload,
+)
+from utils.auth_cookies import clear_auth_cookies
 from models.database import User as DbUser
 from utils.qr import generate_qr_data_url
 from services.file_storage import create_file_storage as s
+# Q12: agent 访问控制单点判定（归属校验 / 域名 hash 解析）—— 唯一实现，勿在别处复制
+from utils.agent_access import (
+    extract_hash_from_host,
+    get_request_domain as _get_domain,
+    user_owns_agent,
+    get_authorized_agent_hash,
+)
 
 router = APIRouter(tags=["FeClaw 域名路由"])
 
@@ -51,47 +64,11 @@ templates = Jinja2Templates(env=_env)
 
 
 # ==================== 辅助函数 ====================
-
-def extract_hash_from_host(host: str) -> Optional[str]:
-    """从域名提取 agent hash，如 b92d.feclaw.chat → b92d"""
-    if not host:
-        return None
-    parts = host.split(".")
-    if len(parts) >= 3 and 4 <= len(parts[0]) <= 8:
-        try:
-            int(parts[0], 16)
-            return parts[0]
-        except ValueError:
-            pass
-    return None
-
-
-# 允许的域名后缀（防止 X-Forwarded-Host 头注入）
-# 从 FECLAW_PUBLIC_URL 动态推导
-# 如果 FECLAW_PUBLIC_URL=example.com，则允许 .example.com 和 example.com
-def _build_allowed_suffixes():
-    from config import settings
-    domain = settings.FECLAW_PUBLIC_URL
-    if domain:
-        return [f".{domain}", domain]
-    return []  # 无 PUBLIC_URL 时不进行子域名匹配
-
-_ALLOWED_DOMAIN_SUFFIXES = _build_allowed_suffixes()
-
-
-def _get_domain(request: Request) -> str:
-    """获取请求域名，优先 X-Forwarded-Host（CDN 代理），回退 Host
-
-    对 X-Forwarded-Host 做白名单校验，防止头注入攻击。
-    """
-    forwarded = request.headers.get("X-Forwarded-Host", "")
-    if forwarded:
-        domain = forwarded.split(",")[0].strip()
-        # 白名单校验：域名必须以允许的后缀结尾
-        if any(domain == suffix or domain.endswith(suffix) for suffix in _ALLOWED_DOMAIN_SUFFIXES):
-            return domain
-        return request.headers.get("host", "")
-    return request.headers.get("host", "")
+#
+# `extract_hash_from_host` / `_get_domain` 已收敛到 `utils/agent_access.py`
+# （Q12 单点判定），此处仅 re-export —— 其它模块（feclaw_chat / wechat /
+# static_site_public / apps_gateway）仍按旧路径 `from routers.feclaw_domain import ...`
+# 导入，保持向后兼容。
 
 
 def get_agent_info(agent_hash: str) -> Optional[dict]:
@@ -164,7 +141,6 @@ async def get_user_from_jwt(request: Request) -> str:
         host = _get_domain(request)
         sub_hash = extract_hash_from_host(host)
         if result["agent_hash"] != sub_hash:
-            from fastapi import HTTPException
             raise HTTPException(status_code=401, detail="Token scoped to agent subdomain only")
 
     return result["user_id"]
@@ -182,16 +158,36 @@ async def get_user_for_page(request: Request) -> Optional[str]:
 
 @router.post("/api/auth/logout")
 async def logout_api(request: Request):
-    """退出登录：多重策略清除所有认证 cookie"""
-    resp = JSONResponse(content={"status": "ok", "message": "已退出登录"})
-    # Starlette delete_cookie（Max-Age=0 + 过期时间）
-    resp.delete_cookie("feclaw_jwt", path="/")
-    resp.delete_cookie("id_token", path="/")
-    resp.delete_cookie("platform_token", path="/")
-    # 额外显式覆盖（某些浏览器对 Max-Age=0 的 httponly cookie 处理不一致）
-    resp.set_cookie("feclaw_jwt", value="", max_age=0, path="/", httponly=True, samesite="lax")
-    resp.set_cookie("id_token", value="", max_age=0, path="/", httponly=True, samesite="lax")
-    resp.set_cookie("platform_token", value="", max_age=0, path="/", httponly=True, samesite="lax")
+    """退出登录：服务端吊销 + 清除全部认证 cookie。
+
+    Q1 修复的两个缺陷：
+      1. **假退出** —— 现在把该用户的 `jwt_version` +1，此前签发的所有 local JWT
+         立刻失效（校验见 utils.auth.is_token_revoked）；
+      2. **cookie 删不掉** —— 清除逻辑统一走 utils.auth_cookies.clear_auth_cookies，
+         带上前缀 domain（与 routers/oauth.py 写入时同一个推导函数），
+         名字也对齐为 feclaw_jwt / feclaw_id_token / platform_token（不再是 id_token）。
+
+    token 已过期也照样清 cookie；吊销是尽力而为（解不出 user_id 则跳过）。
+    """
+    revoked = False
+    token = _get_token_from_request(request)
+    if token:
+        payload = decode_jwt_token(token)
+        if payload is None:
+            # 已过期/签名异常仍尝试解出 user_id，保证「过期后点退出」也能吊销
+            try:
+                payload = pyjwt.decode(
+                    token, settings.JWT_SECRET,
+                    algorithms=[settings.JWT_ALGORITHM],
+                    options={"verify_exp": False},
+                )
+            except Exception:
+                payload = None
+        if payload:
+            revoked = bump_user_jwt_version(user_id_from_payload(payload))
+
+    resp = JSONResponse(content={"status": "ok", "message": "已退出登录", "revoked": revoked})
+    clear_auth_cookies(resp)
     return resp
 
 
@@ -268,12 +264,15 @@ async def auth_sync(
     token = _get_token_from_request(request)
     if token:
         from services.oauth_service import oauth_service
+        from utils.auth import is_token_revoked
         result = oauth_service.verify_local_jwt(token)
         if not result:
-            # 可能是 Platform 格式的 JWT（sub 是 int），尝试转换
+            # 可能是 Platform 格式的 JWT（sub 是 int），尝试转换。
+            # ⚠️ 必须先过吊销检查：否则拿一个已登出的旧 token 走这条 fallback
+            #    会被重新签发成新 token，直接绕过 Q1 的登出吊销。
             try:
                 raw = pyjwt.decode(token, settings.JWT_SECRET, algorithms=[settings.JWT_ALGORITHM], options={"verify_sub": False})
-                if "sub" in raw:
+                if "sub" in raw and not is_token_revoked(raw):
                     # 重新签发为 FeClaw 兼容格式
                     result = {"sub": str(raw["sub"]), "user_id": raw["sub"]}
                     token = oauth_service.create_local_jwt(result)
@@ -466,14 +465,8 @@ def _read_config_value(agent_hash: str, vpath: str) -> Optional[str]:
 
 
 @router.get("/api/files", response_model=FileListResponse)
-async def list_files(request: Request, path: str = "", agent_hash: str = Query(""), user: User = Depends(get_current_user)):
-    """列出 VFS 文件"""
-    from fastapi.responses import Response as APIResponse
-    if not agent_hash:
-        agent_hash = extract_hash_from_host(_get_domain(request))
-    if not agent_hash:
-        raise HTTPException(status_code=400, detail="Invalid agent hash from domain")
-
+async def list_files(request: Request, path: str = "", agent_hash: str = Depends(get_authorized_agent_hash)):
+    """列出 VFS 文件（Q12：归属校验由 get_authorized_agent_hash 统一把关）"""
     # VFS 路径映射
     cos_prefix_base = f"feclaw/agents/{agent_hash}"
     public_prefix_base = "feclaw/public"
@@ -600,17 +593,12 @@ class FileUpdateRequest(PydanticModel):
 
 
 @router.get("/api/file", response_model=FileContentResponse)
-async def get_file(path: str, request: Request, agent_hash: str = Query(""), user: User = Depends(get_current_user)):
-    """获取文件内容"""
+async def get_file(path: str, request: Request, agent_hash: str = Depends(get_authorized_agent_hash)):
+    """获取文件内容（Q12：归属校验由 get_authorized_agent_hash 统一把关）"""
     # Validate path (prevent path traversal)
     import os as _os
     if _os.path.isabs(path) or ".." in path:
         raise HTTPException(status_code=400, detail="Invalid path")
-    from fastapi import HTTPException
-    if not agent_hash:
-        agent_hash = extract_hash_from_host(_get_domain(request))
-    if not agent_hash:
-        raise HTTPException(status_code=400, detail="Invalid agent hash from domain")
 
     # 处理 /config/ 虚拟配置目录
     if path == "config" or path.startswith("config/"):
@@ -651,18 +639,14 @@ async def get_file(path: str, request: Request, agent_hash: str = Query(""), use
 
 
 @router.put("/api/file")
-async def update_file(path: str, body: FileUpdateRequest, req: Request, agent_hash: str = Query(""), user: User = Depends(get_current_user)) -> dict:
-    """更新文件内容"""
+async def update_file(path: str, body: FileUpdateRequest, req: Request, agent_hash: str = Depends(get_authorized_agent_hash)) -> dict:
+    """更新文件内容（Q12：归属校验由 get_authorized_agent_hash 统一把关）"""
     # Validate path (prevent path traversal)
     import os as _os
     if _os.path.isabs(path) or ".." in path:
         raise HTTPException(status_code=400, detail="Invalid path")
     if path == "public" or path.startswith("public/"):
         raise HTTPException(status_code=403, detail="公共空间为只读，不允许修改")
-    if not agent_hash:
-        agent_hash = extract_hash_from_host(_get_domain(request))
-    if not agent_hash:
-        raise HTTPException(status_code=400, detail="Invalid agent hash from domain")
 
     # 处理 /config/ 虚拟配置目录写入
     if path == "config" or path.startswith("config/"):
@@ -721,18 +705,14 @@ async def update_file(path: str, body: FileUpdateRequest, req: Request, agent_ha
 
 
 @router.delete("/api/file")
-async def delete_file(path: str, request: Request, agent_hash: str = Query(""), user: User = Depends(get_current_user)) -> dict:
-    """删除文件"""
+async def delete_file(path: str, request: Request, agent_hash: str = Depends(get_authorized_agent_hash)) -> dict:
+    """删除文件（Q12：归属校验由 get_authorized_agent_hash 统一把关）"""
     # Validate path (prevent path traversal)
     import os as _os
     if _os.path.isabs(path) or ".." in path:
         raise HTTPException(status_code=400, detail="Invalid path")
     if path == "public" or path.startswith("public/") or path == "config" or path.startswith("config/"):
         raise HTTPException(status_code=403, detail=f"{'公共空间' if path.startswith('public') else '配置目录'}为只读，不允许删除")
-    if not agent_hash:
-        agent_hash = extract_hash_from_host(_get_domain(request))
-    if not agent_hash:
-        raise HTTPException(status_code=400, detail="Invalid agent hash from domain")
     # 构建完整路径
     full_path = _vfs_path(agent_hash, path)
 
@@ -754,22 +734,19 @@ from fastapi.responses import Response as FastAPIResponse
 async def get_file_raw(
     path: str,
     request: Request,
-    agent_hash: str = Query(""),
-    user: User = Depends(get_current_user),
+    agent_hash: str = Depends(get_authorized_agent_hash),
 ):
     """直接流式返回文件原始字节（用于本地存储模式下的图片/视频/音频预览）。
 
     行为：
     - config/ 虚拟目录：返回 JSON 文本（与 /api/file?path=config/... 一致）
     - 其他路径：返回原始字节，带上 Content-Type
+
+    Q12：归属校验由 get_authorized_agent_hash 统一把关。
     """
     import os as _os
     if _os.path.isabs(path) or ".." in path:
         raise HTTPException(status_code=400, detail="Invalid path")
-    if not agent_hash:
-        agent_hash = extract_hash_from_host(_get_domain(request))
-    if not agent_hash:
-        raise HTTPException(status_code=400, detail="Invalid agent hash from domain")
 
     # config/ 走 DB
     if path == "config" or path.startswith("config/"):
@@ -807,9 +784,12 @@ class SignedUrlResponse(PydanticModel):
     method: str  # "PUT" | "GET"
 
 @router.post("/api/file/signed-url", response_model=SignedUrlResponse)
-async def get_signed_url(body: SignedUrlRequest, req: Request, user: User = Depends(get_current_user)):
+async def get_signed_url(body: SignedUrlRequest, req: Request, agent_hash: str = Depends(get_authorized_agent_hash)):
     """
     生成签名 URL（前端直接操作 COS）
+
+    Q12：agent hash 由 `get_authorized_agent_hash` 解析并校验归属后返回，
+    签名 URL 只可能签发到**当前用户自己的** agent 前缀。
 
     Args:
         body: {path, operation, expires}
@@ -818,10 +798,6 @@ async def get_signed_url(body: SignedUrlRequest, req: Request, user: User = Depe
     Returns:
         {url, path, expires_at, method}
     """
-    agent_hash = extract_hash_from_host(_get_domain(request))
-    if not agent_hash:
-        raise HTTPException(status_code=400, detail="Invalid agent hash from domain")
-
     # 构建完整路径（agent 工作区路径）
     full_path = _vfs_path(agent_hash, body.path)
 
@@ -873,22 +849,31 @@ class StsCredentialResponse(PydanticModel):
     base_url: str
 
 @router.get("/api/file/sts-credential", response_model=StsCredentialResponse)
-async def get_sts_credential(request: Request, user: User = Depends(get_current_user)):
+async def get_sts_credential(request: Request, agent_hash: str = Depends(get_authorized_agent_hash), user: User = Depends(get_current_user)):
     """
     获取 STS 临时凭证（前端直接操作 COS）
+
+    Q12：agent hash 由 `get_authorized_agent_hash` 解析并校验归属后返回，
+    临时凭证只可能授权**当前用户自己的** agent 前缀。
 
     返回临时 SecretId、SecretKey、SessionToken
     前端可使用这些凭证直接操作 COS SDK
     """
-    agent_hash = extract_hash_from_host(_get_domain(request))
-    if not agent_hash:
-        raise HTTPException(status_code=400, detail="Invalid agent hash from domain")
+    storage = s()
+    # Q3：本地存储后端没有 STS 概念，直接对 LocalStorage 调 generate_sts_credential
+    # 会抛 AttributeError → 裸 500（Q9 §5.4 traceback）。这里显式区分“该后端不支持”，
+    # 返回 501（Not Implemented）；前端 initBackend() 只认 200+credentials，
+    # 任何非 200 都会正确回退到本地模式。
+    if not hasattr(storage, "generate_sts_credential"):
+        raise HTTPException(
+            status_code=501,
+            detail="STS 临时凭证仅在 COS 存储模式下可用（当前为本地存储）",
+        )
 
     # 使用 agent 工作区路径前缀
     agent_prefix = f"feclaw/agents/{agent_hash}/"
-    result = s().generate_sts_credential(str(user.id), prefix=agent_prefix)
+    result = storage.generate_sts_credential(str(user.id), prefix=agent_prefix)
     if not result:
-        pass  # HTTPException already imported at module level
         raise HTTPException(status_code=500, detail="Failed to generate STS credential")
 
     return StsCredentialResponse(**result)
@@ -902,7 +887,7 @@ async def home(request: Request):
     """主页 - 根据域名返回不同页面"""
     host = _get_domain(request)
     logger.info(f"Home page request: host={host}")
-    logger.warning(f"[DOMAIN_DEBUG] X-Forwarded-Host={request.headers.get('X-Forwarded-Host', 'N/A')}")
+    logger.debug(f"[DOMAIN_DEBUG] X-Forwarded-Host={request.headers.get('X-Forwarded-Host', 'N/A')}")
 
     # 判断是否为 Agent 子域名（如 5178.feclaw.chat）
     agent_hash = extract_hash_from_host(host)
@@ -914,7 +899,7 @@ async def home(request: Request):
             return RedirectResponse(url=f"/login?redirect_to=/{agent_hash}", status_code=302)
         return templates.TemplateResponse(request, "agent_dashboard.html", {"request": request, "agent_hash": agent_hash})
     else:
-        # 检查是否为无效子域名（非 4 位 hex 的子域名）→ 302 回主域名
+        # 检查是否为无效子域名（非 4–8 位 hex 的子域名）→ 302 回主域名
         feclaw_domain = settings.FECLAW_PUBLIC_URL
         if feclaw_domain and host and host.endswith(f".{feclaw_domain}") and host != feclaw_domain:
             logger.info(f"Invalid subdomain detected: {host}, redirecting to {feclaw_domain}")
@@ -923,6 +908,24 @@ async def home(request: Request):
         user_id = await get_user_for_page(request)
         is_logged_in = user_id is not None
         return templates.TemplateResponse(request, "index.html", {"request": request, "is_logged_in": is_logged_in})
+
+
+# 内联 SVG favicon：避免浏览器默认探测 /favicon.ico 404（纯装饰，无 HTML 引用）
+_FAVICON_SVG = (
+    b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">'
+    b'<defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1">'
+    b'<stop offset="0" stop-color="#667eea"/><stop offset="1" stop-color="#764ba2"/>'
+    b'</linearGradient></defs>'
+    b'<rect width="32" height="32" rx="7" fill="url(#g)"/>'
+    b'<text x="16" y="22" font-family="Arial,sans-serif" font-size="18" font-weight="bold" fill="#fff" text-anchor="middle">F</text>'
+    b'</svg>'
+)
+
+
+@router.get("/favicon.ico", include_in_schema=False)
+async def favicon():
+    """返回 favicon（Q5：消除 /favicon.ico 404）"""
+    return FastAPIResponse(content=_FAVICON_SVG, media_type="image/svg+xml")
 
 
 @router.get("/login", response_class=HTMLResponse)
@@ -1107,14 +1110,50 @@ async def settings_page(request: Request):
     return templates.TemplateResponse(request, "settings.html", {"request": request, "is_admin": is_admin})
 
 
+@router.get("/configure", response_class=HTMLResponse)
+@router.get("/configure/", response_class=HTMLResponse)
+async def configure_page(request: Request):
+    """Agent 配置页面（子域名 {hash}.feclaw.chat/configure）
+
+    Q5 补齐：此前 {hash}/configure 404（而 {hash}/settings 正常）。
+    hash 从子域名解析，逻辑与 /agent/{agent_hash}/configure 对齐。
+    """
+    user_id = await get_user_for_page(request)
+    if not user_id:
+        return RedirectResponse(url="/login", status_code=302)
+    host = _get_domain(request)
+    agent_hash = extract_hash_from_host(host)
+    if not agent_hash:
+        # 根域名没有独立的 /configure 页面，回控制台
+        return RedirectResponse(url="/dashboard", status_code=302)
+    if not _verify_agent_ownership(agent_hash, user_id):
+        raise HTTPException(status_code=403, detail="无权访问")
+    # 有域名用子域名，无域名 fallback 到当前请求 host（与 /agent/{hash}/configure 一致）
+    if settings.FECLAW_PUBLIC_URL and settings.FECLAW_SUBDOMAIN_ENABLED:
+        agent_base_url = f"https://{agent_hash}.{settings.FECLAW_PUBLIC_URL}"
+    else:
+        request_host = request.headers.get("host", "localhost:8080")
+        agent_base_url = f"http://{request_host}/agent/{agent_hash}"
+    return templates.TemplateResponse(request, "agent_configure.html", {
+        "request": request,
+        "agent_hash": agent_hash,
+        "feclaw_domain": settings.FECLAW_PUBLIC_URL,
+        "subdomain_enabled": settings.FECLAW_SUBDOMAIN_ENABLED,
+        "agent_base_url": agent_base_url,
+    })
+
+
 # ==================== Agent 路径 fallback 路由 ====================
 
 def _verify_agent_ownership(agent_hash: str, user_id: str) -> bool:
-    """验证 Agent 所有权"""
+    """验证 Agent 所有权（页面路由用）。
+
+    Q12：委托给 `utils.agent_access.user_owns_agent` —— 单点判定的唯一实现，
+    本函数只是保留旧签名给页面路由调用，不再自己写查询。
+    """
     db = SessionLocal()
     try:
-        agent = db.query(AgentProfile).filter(AgentProfile.hash == agent_hash).first()
-        return agent is not None and str(agent.user_id) == str(user_id)
+        return user_owns_agent(db, agent_hash, user_id)
     finally:
         db.close()
 
@@ -1250,11 +1289,9 @@ async def get_agent_status_api(request: Request, user: User = Depends(get_curren
     try:
         agent = db.query(AgentProfile).filter(AgentProfile.hash == agent_hash).first()
         if not agent:
-            from fastapi import HTTPException
             raise HTTPException(status_code=404, detail="Agent not found")
 
         if str(agent.user_id) != str(user.id):
-            from fastapi import HTTPException
             raise HTTPException(status_code=403, detail="无权访问")
 
         from services.agent_init_service import agent_init_service
@@ -1303,15 +1340,12 @@ async def initialize_agent_api(request: Request, body: InitializeRequest, user: 
     try:
         agent = db.query(AgentProfile).filter(AgentProfile.hash == agent_hash).first()
         if not agent:
-            from fastapi import HTTPException
             raise HTTPException(status_code=404, detail="Agent not found")
 
         if str(agent.user_id) != str(user.id):
-            from fastapi import HTTPException
             raise HTTPException(status_code=403, detail="无权访问")
 
         if agent.status == "initialized":
-            from fastapi import HTTPException
             raise HTTPException(status_code=400, detail="Agent already initialized")
 
         from services.agent_init_service import agent_init_service
@@ -1353,10 +1387,8 @@ async def get_settings_api(request: Request, user: User = Depends(get_current_us
     try:
         agent = db.query(AgentProfile).filter(AgentProfile.hash == agent_hash).first()
         if not agent:
-            from fastapi import HTTPException
             raise HTTPException(status_code=404, detail="Agent not found")
         if str(agent.user_id) != str(user.id):
-            from fastapi import HTTPException
             raise HTTPException(status_code=403, detail="无权访问")
         _sr_enabled = agent.sr_enabled
     finally:
@@ -1401,10 +1433,8 @@ async def update_settings_api(request: Request, body: SettingsUpdateRequest, use
     try:
         agent = db.query(AgentProfile).filter(AgentProfile.hash == agent_hash).first()
         if not agent:
-            from fastapi import HTTPException
             raise HTTPException(status_code=404, detail="Agent not found")
         if str(agent.user_id) != str(user.id):
-            from fastapi import HTTPException
             raise HTTPException(status_code=403, detail="无权访问")
 
         # sr_enabled 是 AgentProfile 字段，直接更新
@@ -1452,17 +1482,14 @@ async def upload_file_vfs(
     path: str,
     request: Request,
     file: UploadFile = File(...),
-    user: User = Depends(get_current_user)
+    agent_hash: str = Depends(get_authorized_agent_hash),
 ):
-    """Upload file to agent VFS"""
+    """Upload file to agent VFS（Q12：归属校验由 get_authorized_agent_hash 统一把关）"""
     import os as _os
     if _os.path.isabs(path) or ".." in path:
         raise HTTPException(status_code=400, detail="Invalid path")
     if path == "public" or path.startswith("public/") or path == "config" or path.startswith("config/"):
         raise HTTPException(status_code=403, detail=f"{'公共空间' if path.startswith('public') else '配置目录'}为只读，不允许上传")
-    agent_hash = extract_hash_from_host(_get_domain(request))
-    if not agent_hash:
-        raise HTTPException(status_code=400, detail="Invalid agent hash from domain")
     content = await file.read()
     full_path = _vfs_path(agent_hash, path)
     s().upload_file(content, full_path)
