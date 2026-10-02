@@ -145,6 +145,40 @@ def _dummy_bcrypt_hash() -> str:
     return bcrypt.hashpw(secrets.token_hex(32).encode(), bcrypt.gensalt(rounds=10)).decode()
 
 
+def resolve_user_from_platform(db: Session, platform_user_id: str) -> Optional[User]:
+    """按 (provider='platform', provider_user_id) 解析 FeClaw 本地 User（**只查不建**）。
+
+    Q28/F3：消费「Platform 格式 token」的路径（platform_session cookie / Platform 签发的
+    feclaw_jwt）必须走这里把 Platform 的 user_id 映射成 FeClaw 的 user_id ——
+    **绝不**把 token 里的数字当本地 id（两侧 id 命名空间不同，Platform alice=2 vs FeClaw alice=38）。
+    解析不到返回 None，调用方必须拒绝（401 / 302→login），不得回退。
+    """
+    link = (
+        db.query(UserLink)
+        .filter(UserLink.provider == "platform", UserLink.provider_user_id == str(platform_user_id))
+        .first()
+    )
+    if not link:
+        return None
+    return db.query(User).filter(User.id == link.user_id).first()
+
+
+def is_platform_format_token(payload: Optional[Dict[str, Any]]) -> bool:
+    """判断 payload 是否为「Platform 签发」的 access token 格式（跨系统 SSO）。
+
+    Platform 登录/注册签发的 HS256 token 形如 {user_id, username, type='access'}，
+    无 FeClaw 本地会话的 `typ`（Q22）或 `sub` 标记。
+    FeClaw 本地 token 一律带 `typ`（Q22）或 `sub`（legacy access）。
+    """
+    if not payload:
+        return False
+    if payload.get("typ"):
+        return False
+    if payload.get("sub"):
+        return False
+    return payload.get("type") == "access"
+
+
 def find_or_create_user_from_platform(
     db: Session,
     *,
@@ -164,23 +198,24 @@ def find_or_create_user_from_platform(
 
     副作用：commit + refresh；调用方不要再 commit 同一行。
     """
-    # 1. UserLink 精确匹配 —— 唯一复用路径
-    existing_link = (
-        db.query(UserLink)
-        .filter(UserLink.provider == "platform", UserLink.provider_user_id == platform_user_id)
-        .first()
-    )
-    if existing_link:
-        user = db.query(User).filter(User.id == existing_link.user_id).first()
-        if user:
-            if email and email != user.email:
-                user.email = email
+    # 1. UserLink 精确匹配 —— 唯一复用路径（Q28/F3：与消费 Platform token 的路径
+    #    共用 resolve_user_from_platform，单一判定点，不允许两份实现）
+    user = resolve_user_from_platform(db, platform_user_id)
+    if user:
+        if email and email != user.email:
+            user.email = email
+        link = (
+            db.query(UserLink)
+            .filter(UserLink.provider == "platform", UserLink.provider_user_id == str(platform_user_id))
+            .first()
+        )
+        if link:
             # Q20/H16：不覆盖 is_admin（管理员身份只来自本地 DB）
-            existing_link.provider_username = username
-            db.commit()
-            db.refresh(user)
-            logger.info(f"[oauth_helpers] updated existing user via UserLink platform_user_id={platform_user_id}")
-            return user
+            link.provider_username = username
+        db.commit()
+        db.refresh(user)
+        logger.info(f"[oauth_helpers] updated existing user via UserLink platform_user_id={platform_user_id}")
+        return user
 
     # 2. 全新用户。username 可能已被本地账号占用（如 "admin"），冲突时追加 platform_user_id
     final_username = username

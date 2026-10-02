@@ -38,6 +38,7 @@ from utils.auth import (
     decode_jwt_token,
     bump_user_jwt_version,
     user_id_from_payload,
+    is_token_revoked,
 )
 from utils.auth_cookies import clear_auth_cookies
 from models.database import User as DbUser
@@ -144,7 +145,44 @@ async def get_user_from_jwt(request: Request) -> str:
         if result["agent_hash"] != sub_hash:
             raise HTTPException(status_code=401, detail="Token scoped to agent subdomain only")
 
-    return result["user_id"]
+    # Q28/F2 + F3：统一解析成真正的 FeClaw 本地 user_id（登出吊销 + 跨系统 UserLink 映射）。
+    # Platform 格式 token 解析不到 ⇒ 拒绝；FeClaw 本地 token 已吊销 ⇒ 拒绝。
+    user_id = _resolve_local_user_id(token)
+    if user_id is None:
+        raise HTTPException(status_code=401, detail="Invalid, revoked or unmapped token")
+
+    return user_id
+
+
+def _resolve_local_user_id(token: str) -> Optional[int]:
+    """把请求里的 token 解析成真正的 FeClaw 本地 user_id（Q28/F2+F3 单点判定）。
+
+    - Platform 格式 token（platform_session cookie / Platform 签发的 feclaw_jwt，
+      特征 type=access 且无 typ/sub）→ 走 UserLink 解析出 FeClaw user_id；
+      解析不到 → None（调用方拒绝，**绝不**把 token 里的数字当本地 id）。
+    - FeClaw 本地 token → 校验登出吊销（jwt_version，F2）。
+    """
+    raw = decode_jwt_token(token)
+    if raw is None:
+        return None
+
+    from utils.oauth_helpers import is_platform_format_token, resolve_user_from_platform
+    if is_platform_format_token(raw):
+        provider_uid = raw.get("user_id")
+        if provider_uid is None:
+            provider_uid = raw.get("sub")
+        if provider_uid is None:
+            return None
+        db = SessionLocal()
+        try:
+            user = resolve_user_from_platform(db, str(provider_uid))
+            return user.id if user else None
+        finally:
+            db.close()
+
+    if is_token_revoked(raw):
+        return None
+    return user_id_from_payload(raw)
 
 
 async def get_user_for_page(request: Request) -> Optional[str]:
@@ -222,12 +260,13 @@ async def auth_options(host: str = Query(None), request: Request = None):
     agent_hash = extract_hash_from_host(host) if host else None
 
     # 检查当前是否有有效的 token
+    # Q28/F2 + F3：session 有效 = 类型合法 且 未吊销 且（若为 Platform token）UserLink 映射成功。
     has_session = False
     if request:
         token = _get_token_from_request(request)
         if token:
             result = TOTPService.verify_jwt(token)
-            has_session = result is not None
+            has_session = result is not None and _resolve_local_user_id(token) is not None
 
     return {
         "host": host,
