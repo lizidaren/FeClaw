@@ -1777,7 +1777,12 @@ class WeChatService:
                 logger.warning("[WeChat] _send_single_message: JSON parse error, body={}".format(api_response_text[:200]))
 
             # 成功：ret == 0，或响应为空但状态码 200，或空 JSON body {}
-            if data.get("ret") == 0 or (resp.status == 200 and not api_response_text.strip()) or (resp.status == 200 and data == {}):
+            # 2026-10-02 修（Q24）：iLink 发送成功时回 {"message_id": N}（**无 ret 字段**）
+            # ⇒ 此前被判成失败（日志写 "failed"，实际消息已投递 ✓ —— 李子实测收到 ✓）
+            if (data.get("ret") == 0
+                    or (resp.status == 200 and not api_response_text.strip())
+                    or (resp.status == 200 and data == {})
+                    or (resp.status == 200 and isinstance(data, dict) and data.get("message_id"))):
                 # 从响应中提取新的 context_token 并更新缓存
                 # iLink API 在响应中返回新的 context_token，用于下一次发送
                 new_context_token = data.get("context_token", "")
