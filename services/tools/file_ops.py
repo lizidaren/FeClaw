@@ -144,7 +144,7 @@ class FileOpsMixin(AgentToolsServiceBase):
             - 路径格式错误：(None, "Error: ...")
         """
         import re
-        m = re.match(r"^/mnt/group/(\d+)/\.ref/_organization(?:/(.*))?$", path.rstrip("/"))
+        m = re.match(r"^/mnt/group/([^/]+)/\.ref/_organization(?:/(.*))?$", path.rstrip("/"))
         if not m:
             return (None, "Error: /_organization/ 路径格式错误，应为 /mnt/group/{id}/.ref/_organization/{filename}")
         gid = m.group(1)
@@ -157,7 +157,7 @@ class FileOpsMixin(AgentToolsServiceBase):
             from models.group import Group as _Group
             db = SessionLocal()
             try:
-                group = db.query(_Group).filter(_Group.id == int(gid)).first()
+                group = db.query(_Group).filter(_Group.id == gid).first()
                 if not group or group.organization_id is None:
                     # 群未绑定组织 → 哨兵
                     return (None, ORG_NOT_BOUND)
@@ -171,7 +171,7 @@ class FileOpsMixin(AgentToolsServiceBase):
             return (f"feclaw/organizations/{org_id}/.ref/{rest}", None)
         return (f"feclaw/organizations/{org_id}/.ref/", None)
 
-    def _check_group_access(self, group_id: int) -> Optional[str]:
+    def _check_group_access(self, group_id: str) -> Optional[str]:
         """检查当前 Agent 是否是指定群的成员
 
         Returns:

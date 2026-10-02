@@ -64,7 +64,7 @@ DEFAULT_CONFIG = {
 class AgentToolsServiceBase:
     """Agent 工具服务基类 — 通用属性和方法"""
 
-    def __init__(self, agent_hash: str, group_id: int = None):
+    def __init__(self, agent_hash: str, group_id: str = None):
         """
         初始化 Agent 工具服务
 

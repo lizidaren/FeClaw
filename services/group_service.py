@@ -93,7 +93,7 @@ class GroupDispatchService:
 
     async def on_message(
         self,
-        group_id: int,
+        group_id: str,
         sender_type: str,
         sender_hash: str,
         content: str,
@@ -141,7 +141,7 @@ class GroupDispatchService:
 
     # ========== Dispatch ==========
 
-    async def _dispatch_after_message(self, group_id: int, sender_hash: str):
+    async def _dispatch_after_message(self, group_id: str, sender_hash: str):
         """消息入队后分发成员。IM Agent await 回复 (create_task bug workaround)。
         - Classic Agent -> dispatch_to_members (fire-and-forget)
         - IM Agent -> await ChatService 回复
@@ -217,7 +217,7 @@ class GroupDispatchService:
 
     async def dispatch_to_members(
         self,
-        group_id: int,
+        group_id: str,
         round: int = 0,
         exclude: Optional[str] = None,
     ):
@@ -318,7 +318,7 @@ class GroupDispatchService:
     def should_wake(
         self,
         member: GroupMember,
-        group_id: int,
+        group_id: str,
         round: int,
         mentions: Optional[List[str]] = None,
     ) -> bool:
@@ -342,7 +342,7 @@ class GroupDispatchService:
 
     # ========== Agent Reply ==========
 
-    async def agent_reply(self, agent_hash: str, group_id: int, round: int):
+    async def agent_reply(self, agent_hash: str, group_id: str, round: int):
         """V2 重构：GroupDispatch 不做回复逻辑，只做调度编排。
 
         每个 Agent 的回复走 ChatService.chat_to_completion(group_id=...)：
@@ -443,7 +443,7 @@ class GroupDispatchService:
 
     # ========== Context Building ==========
 
-    def build_context(self, agent_hash: str, group_id: int) -> tuple:
+    def build_context(self, agent_hash: str, group_id: str) -> tuple:
         """
         Build chronological group history + agent personality for LLM prompt.
 
@@ -507,7 +507,7 @@ class GroupDispatchService:
     def _build_group_prompt(
         self,
         agent_hash: str,
-        group_id: int,
+        group_id: str,
         context_messages: List[Dict[str, Any]],
         persona: str,
     ) -> str:
@@ -605,7 +605,7 @@ class GroupDispatchService:
     async def _call_llm_with_tools(
         self,
         agent_hash: str,
-        group_id: int,
+        group_id: str,
         context_messages: List[Dict[str, Any]],
         persona: str,
     ) -> Tuple[Optional[str], bool]:
@@ -763,7 +763,7 @@ class GroupDispatchService:
     def _build_system_prompt_with_memory(
         self,
         agent_hash: str,
-        group_id: int,
+        group_id: str,
         context_messages: List[Dict[str, Any]],
         persona: str,
     ) -> str:
@@ -833,7 +833,7 @@ class GroupDispatchService:
     async def _execute_group_tool(
         self,
         agent_hash: str,
-        group_id: int,
+        group_id: str,
         tool_name: str,
         args: Dict[str, Any],
         timeout: float,
@@ -904,7 +904,7 @@ class GroupDispatchService:
                 valid_args,
             )
 
-    async def _get_or_create_tools(self, agent_hash: str, group_id: int):
+    async def _get_or_create_tools(self, agent_hash: str, group_id: str):
         """懒加载 AgentToolsService（群聊作用域）。"""
         # 简单缓存：避免每次 reply 都重建
         cache_key = (agent_hash, group_id)
@@ -921,7 +921,7 @@ class GroupDispatchService:
 
     def _get_session_items(
         self,
-        group_id: int,
+        group_id: str,
         agent_hash: str,
     ) -> List[Dict[str, Any]]:
         """获取 session memory 中的工具调用/结果项。"""
@@ -939,7 +939,7 @@ class GroupDispatchService:
 
     def _append_session_item(
         self,
-        group_id: int,
+        group_id: str,
         agent_hash: str,
         item: Dict[str, Any],
     ) -> None:
@@ -959,7 +959,7 @@ class GroupDispatchService:
     def _build_session_summary(
         self,
         agent_hash: str,
-        group_id: int,
+        group_id: str,
     ) -> str:
         """构造 session memory 的摘要文本（注入到 system prompt）。"""
         entry = self._session_memory.get((group_id, agent_hash))
@@ -1002,7 +1002,7 @@ class GroupDispatchService:
 
     async def _push_to_clients(
         self,
-        group_id: int,
+        group_id: str,
         msg_id: str,
         agent_hash: str,
         content: str,
@@ -1072,7 +1072,7 @@ class GroupDispatchService:
     def add_member(
         self,
         db: Session,
-        group_id: int,
+        group_id: str,
         agent_hash: str,
         role: str = "member",
         job_description: Optional[str] = None,
@@ -1107,7 +1107,7 @@ class GroupDispatchService:
         )
         return member
 
-    def remove_member(self, db: Session, group_id: int, agent_hash: str) -> bool:
+    def remove_member(self, db: Session, group_id: str, agent_hash: str) -> bool:
         """Remove an agent from a group."""
         member = (
             db.query(GroupMember)
@@ -1124,7 +1124,7 @@ class GroupDispatchService:
     def get_messages(
         self,
         db: Session,
-        group_id: int,
+        group_id: str,
         before: Optional[datetime] = None,
         limit: int = 50,
     ) -> List[GroupMessage]:
@@ -1141,7 +1141,7 @@ class GroupDispatchService:
     def get_new_messages_since(
         self,
         db: Session,
-        group_id: int,
+        group_id: str,
         after_message_id: Optional[str] = None,
         limit: int = 50,
     ) -> List[GroupMessage]:
@@ -1181,7 +1181,7 @@ class GroupDispatchService:
     def is_member_or_owner(
         self,
         db: Session,
-        group_id: int,
+        group_id: str,
         user_id: int,
     ) -> bool:
         """
@@ -1212,13 +1212,13 @@ class GroupDispatchService:
         )
         return has_member is not None
 
-    def get_group(self, db: Session, group_id: int) -> Optional[Group]:
+    def get_group(self, db: Session, group_id: str) -> Optional[Group]:
         return db.query(Group).filter(Group.id == group_id).first()
 
     def get_member(
         self,
         db: Session,
-        group_id: int,
+        group_id: str,
         agent_hash: str,
     ) -> Optional[GroupMember]:
         return (

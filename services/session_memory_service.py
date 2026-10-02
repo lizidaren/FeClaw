@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 def build_session_memory_path(
     agent_hash: str,
     channel: Optional[str] = None,
-    group_id: Optional[int] = None,
+    group_id: Optional[str] = None,
 ) -> str:
     """
     V2 渠道隔离：构造 session_memory.md 路径。

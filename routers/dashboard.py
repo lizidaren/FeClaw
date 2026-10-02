@@ -63,7 +63,7 @@ async def group_dashboard(request: Request):
 @router.get("/dashboard/group/api/messages")
 async def get_group_messages(
     request: Request,
-    group_id: int = Query(default=1, description="群组 ID（Integer 自增，详见 phase1-group-shared-space）"),
+    group_id: Optional[str] = Query(default=None, description="群组 ID（Q18 回退为 UUID 字符串）"),
     since: Optional[str] = Query(default=None, description="UTC timestamp ISO format"),
     limit: int = Query(default=200, ge=1, le=500),
     db: Session = Depends(get_db),
@@ -467,8 +467,8 @@ PAGE_HTML = """<!DOCTYPE html>
 
     <script src="/static/marked.min.js"></script>
     <script>
-        // P1.x: group_id 改为 Integer 自增；前端默认从 query string 拿
-        const GROUP_ID = (new URLSearchParams(window.location.search)).get("group_id") || "1";
+        // Q18: group_id 回退为 UUID 字符串；无 query string 时不发请求（不再默认假群 "1"）
+        const GROUP_ID = (new URLSearchParams(window.location.search)).get("group_id") || "";
         let lastTimestamp = "";
         let knownIds = new Set();
         let isLoading = false;

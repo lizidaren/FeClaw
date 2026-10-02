@@ -70,7 +70,7 @@ def _user_can_decide(req, user_id: int, db: Session) -> None:
     - target='user:{id}'   → 必须是该 user
     """
     if req.target.startswith("group:"):
-        gid = int(req.target.split(":", 1)[1])
+        gid = req.target.split(":", 1)[1]
         group = (
             db.query(Group)
             .filter(Group.id == gid, Group.deleted_at.is_(None))

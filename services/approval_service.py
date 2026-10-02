@@ -445,14 +445,12 @@ class ApprovalService:
 
 # ========== 工具函数 ==========
 
-def parse_group_target(target: str) -> Optional[int]:
-    """从 'group:123' 解析出 123（group_id）。"""
+def parse_group_target(target: str) -> Optional[str]:
+    """从 'group:{uuid}' 解析出 uuid（group_id）。Q18：群 id 为 UUID 字符串。"""
     if not target or not target.startswith("group:"):
         return None
-    try:
-        return int(target.split(":", 1)[1])
-    except (ValueError, IndexError):
-        return None
+    gid = target.split(":", 1)[1] if ":" in target else ""
+    return gid if gid else None
 
 
 def parse_user_target(target: str) -> Optional[int]:

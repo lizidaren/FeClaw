@@ -90,7 +90,7 @@ class WorkSession:
     id: str
     agent_hash: str
     channel: Optional[str] = None      # 触发渠道
-    group_id: Optional[int] = None
+    group_id: Optional[str] = None
     started_at: datetime = field(default_factory=datetime.utcnow)
     last_activity: datetime = field(default_factory=datetime.utcnow)
     interrupted_count: int = 0
@@ -119,7 +119,7 @@ class WorkSessionManager:
         return cls._instance
 
     def get_or_create(self, agent_hash: str, channel: Optional[str] = None,
-                      group_id: Optional[int] = None) -> WorkSession:
+                      group_id: Optional[str] = None) -> WorkSession:
         if agent_hash not in self._sessions:
             self._sessions[agent_hash] = WorkSession(
                 id=uuid.uuid4().hex[:8],

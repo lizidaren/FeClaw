@@ -63,7 +63,7 @@ class SendMessageRequest(BaseModel):
 
 
 class GroupResponse(BaseModel):
-    id: int
+    id: str
     name: str
     announcement: str
     announcement_updated_at: Optional[int] = None
@@ -88,7 +88,7 @@ class MemberResponse(BaseModel):
 
 class MessageResponse(BaseModel):
     id: str
-    group_id: int
+    group_id: str
     sender_type: str
     sender_hash: Optional[str]
     content: str
@@ -103,7 +103,7 @@ class MessageResponse(BaseModel):
 # Helpers
 # ==========================================
 
-def _get_group_or_404(db: Session, group_id: int, user_id: int) -> Group:
+def _get_group_or_404(db: Session, group_id: str, user_id: int) -> Group:
     """Verify group exists and user owns it (or is member via agent)."""
     group = db.query(Group).filter(Group.id == group_id).first()
     if not group or group.deleted_at:
@@ -213,7 +213,7 @@ async def list_groups(
 
 @router.get("/{group_id}", response_model=GroupResponse)
 async def get_group(
-    group_id: int,
+    group_id: str,
     user_id: int = Depends(get_current_user_id),
     db: Session = Depends(get_db),
 ):
@@ -224,7 +224,7 @@ async def get_group(
 
 @router.patch("/{group_id}", response_model=GroupResponse)
 async def update_group(
-    group_id: int,
+    group_id: str,
     body: UpdateGroupRequest,
     user_id: int = Depends(get_current_user_id),
     db: Session = Depends(get_db),
@@ -255,7 +255,7 @@ async def update_group(
 
 @router.delete("/{group_id}")
 async def delete_group(
-    group_id: int,
+    group_id: str,
     user_id: int = Depends(get_current_user_id),
     db: Session = Depends(get_db),
 ):
@@ -276,7 +276,7 @@ async def delete_group(
 
 @router.get("/{group_id}/members", response_model=List[MemberResponse])
 async def list_members(
-    group_id: int,
+    group_id: str,
     user_id: int = Depends(get_current_user_id),
     db: Session = Depends(get_db),
 ):
@@ -289,7 +289,7 @@ async def list_members(
 
 @router.post("/{group_id}/members", response_model=MemberResponse)
 async def add_member(
-    group_id: int,
+    group_id: str,
     body: AddMemberRequest,
     user_id: int = Depends(get_current_user_id),
     db: Session = Depends(get_db),
@@ -318,7 +318,7 @@ async def add_member(
 
 @router.delete("/{group_id}/members/{agent_hash}")
 async def remove_member(
-    group_id: int,
+    group_id: str,
     agent_hash: str,
     user_id: int = Depends(get_current_user_id),
     db: Session = Depends(get_db),
@@ -342,7 +342,7 @@ async def remove_member(
 
 @router.get("/{group_id}/messages", response_model=List[MessageResponse])
 async def get_messages(
-    group_id: int,
+    group_id: str,
     before: Optional[int] = Query(None, description="Unix timestamp — return messages before this time"),
     limit: int = Query(50, ge=1, le=200),
     user_id: int = Depends(get_current_user_id),
@@ -360,7 +360,7 @@ async def get_messages(
 
 @router.post("/{group_id}/messages", response_model=dict)
 async def send_message(
-    group_id: int,
+    group_id: str,
     body: SendMessageRequest,
     user_id: int = Depends(get_current_user_id),
     db: Session = Depends(get_db),
@@ -432,7 +432,7 @@ async def send_message(
 
 @router.get("/{group_id}/stream")
 async def stream_group_messages(
-    group_id: int,
+    group_id: str,
     after: Optional[str] = Query(None, description="仅返严格晚于此 message_id 的新消息；缺省=该群最新 limit 条"),
     user_id: int = Depends(get_current_user_id),
     db: Session = Depends(get_db),
@@ -518,7 +518,7 @@ async def stream_group_messages(
 
 @router.get("/{group_id}/files")
 async def list_group_files(
-    group_id: int,
+    group_id: str,
     scope: str = Query("share", pattern="^(share|ref|attach)$"),
     tag: Optional[str] = Query(None, description="按标签过滤（后续实现，当前可返回所有）"),
     user_id: int = Depends(get_current_user_id),
@@ -590,7 +590,7 @@ async def list_group_files(
 
 @router.get("/{group_id}/files/download")
 async def download_group_file(
-    group_id: int,
+    group_id: str,
     key: str = Query(..., description="COS 对象 key，如 feclaw/groups/1/.share/foo.md"),
     user_id: int = Depends(get_current_user_id),
     db: Session = Depends(get_db),
@@ -653,7 +653,7 @@ async def download_group_file(
 
 class MomentResponse(BaseModel):
     id: str
-    group_id: int
+    group_id: str
     agent_hash: Optional[str]
     kind: str
     title: Optional[str]
@@ -677,7 +677,7 @@ def _format_moment(moment) -> MomentResponse:
 
 @router.get("/{group_id}/moments", response_model=List[MomentResponse])
 async def list_group_moments(
-    group_id: int,
+    group_id: str,
     before: Optional[int] = Query(None, description="Unix timestamp — return moments before this time"),
     limit: int = Query(50, ge=1, le=200),
     user_id: int = Depends(get_current_user_id),
@@ -694,7 +694,7 @@ async def list_group_moments(
 
 @router.delete("/{group_id}/moments/{moment_id}")
 async def delete_group_moment(
-    group_id: int,
+    group_id: str,
     moment_id: str,
     user_id: int = Depends(get_current_user_id),
     db: Session = Depends(get_db),

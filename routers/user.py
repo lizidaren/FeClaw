@@ -965,7 +965,7 @@ async def get_agent_by_hash(
 # ==========================================
 
 class CreateMomentRequest(BaseModel):
-    group_id: int
+    group_id: str
     kind: str = "manual"
     title: Optional[str] = None
     content: Optional[str] = None
@@ -974,7 +974,7 @@ class CreateMomentRequest(BaseModel):
 
 @router.get("/moments", response_model=List[dict])
 async def list_user_moments(
-    group_id: Optional[int] = Query(None, description="Filter to a specific group"),
+    group_id: Optional[str] = Query(None, description="Filter to a specific group"),
     before: Optional[int] = Query(None, description="Unix timestamp — return moments before this time"),
     limit: int = Query(50, ge=1, le=200),
     user_id: int = Depends(get_current_user_id),

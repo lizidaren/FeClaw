@@ -54,7 +54,7 @@ class BindOrgRequest(BaseModel):
 
 
 class BindOrgResponse(BaseModel):
-    group_id: int
+    group_id: str
     organization_id: int
 
 
@@ -157,7 +157,7 @@ async def delete_organization(
 
 @router.put("/api/groups/{group_id}/bind-org", response_model=BindOrgResponse)
 async def bind_group_to_org(
-    group_id: int,
+    group_id: str,
     body: BindOrgRequest,
     user_id: int = Depends(get_current_user_id),
     db: Session = Depends(get_db),
@@ -193,7 +193,7 @@ async def bind_group_to_org(
 
 @router.put("/api/groups/{group_id}/unbind-org", response_model=BindOrgResponse)
 async def unbind_group_from_org(
-    group_id: int,
+    group_id: str,
     user_id: int = Depends(get_current_user_id),
     db: Session = Depends(get_db),
 ):

@@ -11,8 +11,8 @@ from datetime import datetime
 class Group(Base):
     __tablename__ = "groups"
 
-    # P1.x: id 改为 Integer autoincrement（UUID 丑陋且 LLM 易幻觉）
-    id = Column(Integer, primary_key=True, autoincrement=True)
+    # Q18: 回退为 UUID String(36)。生产库 groups.id 本就是 varchar(36)（P4 改 Integer 无迁移导致建群 500）
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     name = Column(String(100), nullable=False)
     announcement = Column(Text, default="")
     announcement_updated_at = Column(DateTime, nullable=True)
@@ -41,8 +41,8 @@ class GroupMember(Base):
     __tablename__ = "group_members"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    # P1.x: group_id 从 String(36) 改为 Integer
-    group_id = Column(Integer, nullable=False, index=True)
+    # Q18: group_id 回退为 String(36) UUID（对齐生产 varchar(36)）
+    group_id = Column(String(36), nullable=False, index=True)
     agent_hash = Column(String(8), nullable=False)
     role = Column(String(16), default="member")
     is_silent = Column(Boolean, default=False)
@@ -65,8 +65,8 @@ class GroupMessage(Base):
     __tablename__ = "group_messages"
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
-    # P1.x: group_id 从 String(36) 改为 Integer
-    group_id = Column(Integer, nullable=False, index=True)
+    # Q18: group_id 回退为 String(36) UUID（对齐生产 varchar(36)）
+    group_id = Column(String(36), nullable=False, index=True)
     sender_type = Column(String(8), nullable=False)
     sender_hash = Column(String(4), nullable=True)
     content = Column(Text)
@@ -86,8 +86,8 @@ class GroupMoments(Base):
     __tablename__ = "group_moments"
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
-    # P1.x: group_id 从 String(36) 改为 Integer
-    group_id = Column(Integer, nullable=False, index=True)
+    # Q18: group_id 回退为 String(36) UUID（对齐生产 varchar(36)）
+    group_id = Column(String(36), nullable=False, index=True)
     agent_hash = Column(String(8), nullable=True)
     kind = Column(String(32), nullable=False)
     title = Column(String(200))
