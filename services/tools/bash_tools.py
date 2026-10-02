@@ -62,7 +62,12 @@ class BashToolsMixin(AgentToolsServiceBase):
                 # 风险等级：危险命令高风险，其他中风险
                 risk_level = 2 if command in ("rm", "dd", "mkfs", ":(){:|:&};:", "shutdown", "reboot") else 1
                 from services.desktop_relay import relay
-                consent = await relay.request_consent(command, args, cwd, risk_level)
+                # Q20/H9：授权请求绑定发起者身份，按 (user_id, agent_hash) 精确路由
+                consent = await relay.request_consent(
+                    command, args, cwd, risk_level,
+                    user_id=getattr(self, "user_id", None),
+                    agent_hash=getattr(self, "agent_hash", None),
+                )
                 if consent.get("decision") != "allow":
                     return f"Error: Desktop 拒绝执行命令 '{stripped}' ({consent.get('reason', 'unknown')})"
                 # 授权通过，继续执行

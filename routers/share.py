@@ -4,7 +4,7 @@
 from fastapi import APIRouter, HTTPException, Depends, Request
 from fastapi.responses import RedirectResponse, FileResponse, Response
 from sqlalchemy.orm import Session
-from services.share_service import decode_share_token
+from services.share_service import decode_share_token, verify_share_password
 from models.database import get_db
 from config import settings
 import os, logging
@@ -164,6 +164,16 @@ async def resolve_share_by_slug(slug: str, request: Request, db: Session = Depen
     if mapping.expires_at and datetime.utcnow() > mapping.expires_at:
         raise HTTPException(status_code=410, detail="分享链接已过期")
 
+    # Q20/H18：密码保护必须真生效 —— 缺失/错误密码一律拒绝
+    if mapping.password:
+        supplied = request.query_params.get("password") or ""
+        if not supplied or not verify_share_password(supplied, mapping.password):
+            return _share_error_page(
+                401,
+                "需要密码",
+                "此分享链接受密码保护，请在链接后追加 ?password=访问密码。",
+            )
+
     try:
         from services.file_storage import create_file_storage
         storage = create_file_storage(mode=getattr(settings, "STORAGE_MODE", "auto"))
@@ -258,7 +268,7 @@ mermaid.run({{nodes:document.querySelectorAll('.mermaid')}});
 
 
 @router.get("/share/{token}")
-async def resolve_share(token: str, db: Session = Depends(get_db)):
+async def resolve_share(token: str, request: Request, db: Session = Depends(get_db)):
     """
     解析分享链接 token，返回文件或重定向
     """
@@ -280,6 +290,7 @@ async def resolve_share(token: str, db: Session = Depends(get_db)):
         share_hash = None
 
     agent_hash = None
+    mapping = None
     if share_hash:
         from models.database import ShareMapping
         mapping = db.query(ShareMapping).filter(
@@ -287,6 +298,20 @@ async def resolve_share(token: str, db: Session = Depends(get_db)):
         ).first()
         if mapping:
             agent_hash = mapping.agent_hash
+
+    # Q20/H18：token 路径同样校验 DB 过期时间 + 密码保护（此前只验 token 内嵌过期）
+    if mapping:
+        from datetime import datetime as _dt
+        if mapping.expires_at and _dt.utcnow() > mapping.expires_at:
+            raise HTTPException(status_code=410, detail="分享链接已过期")
+        if mapping.password:
+            supplied = request.query_params.get("password") or ""
+            if not supplied or not verify_share_password(supplied, mapping.password):
+                return _share_error_page(
+                    401,
+                    "需要密码",
+                    "此分享链接受密码保护，请在链接后追加 ?password=访问密码。",
+                )
 
     # 通过存储后端获取文件（感知 STORAGE_MODE，构造失败给可读错误页，不再裸 500）
     try:

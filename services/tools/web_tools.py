@@ -1036,6 +1036,11 @@ class WebToolsMixin(AgentToolsServiceBase):
         if not url or not url.startswith(("http://", "https://")):
             return f"Error: URL 必须以 http:// 或 https:// 开头，收到: {url!r}"
 
+        # Q20/H7：SSRF 防护 —— 复用 Q19 单点 URL 校验（拒绝回环/私网/云元数据地址）
+        from utils.url_validation import validate_public_http_url
+        if not validate_public_http_url(url):
+            return f"Error: URL 校验失败（禁止访问内网/回环/云元数据地址）: {url!r}"
+
         # llm-* 模式必须提供 prompt，否则降级
         if mode.startswith("llm-") and not prompt.strip():
             logger.warning(f"web_fetch: mode={mode} 但 prompt 为空，自动降级到 {mode.replace('llm-', '')}")
@@ -1232,18 +1237,37 @@ class WebToolsMixin(AgentToolsServiceBase):
     # ── httpx 降级 ─────────────────────────────────────────
 
     async def _httpx_fetch_text(self, url: str) -> str:
-        """curl/httpx 降级：抓 HTML → 去标签 → 纯文本。"""
+        """curl/httpx 降级：抓 HTML → 去标签 → 纯文本。
+
+        Q20/H7：follow_redirects=False + 逐跳重新校验 URL，杜绝「先跳外部、再 302 到内网」绕过。
+        """
+        from utils.url_validation import validate_public_http_url
+        from urllib.parse import urljoin
         try:
             async with httpx.AsyncClient(
                 timeout=15.0,
-                follow_redirects=True,
+                follow_redirects=False,
                 headers={
                     "User-Agent": self._WEB_FETCH_USER_AGENT,
                     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                     "Accept-Language": "en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7",
                 },
             ) as client:
-                resp = await client.get(url)
+                current = url
+                resp = None
+                for _hop in range(10):
+                    if not validate_public_http_url(current):
+                        return f"Error: URL 校验失败（重定向指向内网/回环地址，已阻断）: {current!r}"
+                    resp = await client.get(current)
+                    if resp.status_code in (301, 302, 303, 307, 308):
+                        loc = resp.headers.get("location")
+                        if not loc:
+                            break
+                        current = urljoin(current, loc)
+                        continue
+                    break
+                else:
+                    return f"Error: 重定向次数过多: {url!r}"
                 resp.raise_for_status()
                 html = resp.text
         except httpx.HTTPError as e:

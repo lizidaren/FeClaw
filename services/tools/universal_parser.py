@@ -1576,10 +1576,29 @@ class ParseFileMixin(AgentToolsServiceBase):
     # ── URL Handler ────────────────────────────────────────
 
     async def _handle_url(self, path: str, prompt: str) -> str:
-        """网页 → httpx 抓取 → 去标签 → LLM 回答"""
+        """网页 → httpx 抓取 → 去标签 → LLM 回答
+
+        Q20/H7：SSRF 防护 —— 复用 Q19 单点 URL 校验，且逐跳校验重定向。
+        """
         import httpx
+        from urllib.parse import urljoin
+        from utils.url_validation import validate_public_http_url
         try:
-            resp = httpx.get(path, timeout=15, follow_redirects=True)
+            current = path
+            resp = None
+            for _hop in range(10):
+                if not validate_public_http_url(current):
+                    return f"（URL 校验失败：禁止访问内网/回环/云元数据地址：{current}）"
+                resp = httpx.get(current, timeout=15, follow_redirects=False)
+                if resp.status_code in (301, 302, 303, 307, 308):
+                    loc = resp.headers.get("location")
+                    if not loc:
+                        break
+                    current = urljoin(current, loc)
+                    continue
+                break
+            else:
+                return "（重定向次数过多，已阻断）"
             resp.raise_for_status()
         except Exception as e:
             return f"（抓取网页失败：{e}）"

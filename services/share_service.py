@@ -8,6 +8,7 @@ import json
 import time
 import base64
 import logging
+import secrets
 from datetime import datetime
 from typing import Optional
 from config import settings
@@ -54,12 +55,16 @@ _SHARE_WORDS_COUNT = len(_SHARE_WORDS)
 
 
 def _generate_slug() -> str:
-    """生成 3 词英文友好短链，如 'sunset-ocean-river'"""
-    import random
-    w1 = _SHARE_WORDS[random.randint(0, _SHARE_WORDS_COUNT - 1)]
-    w2 = _SHARE_WORDS[random.randint(0, _SHARE_WORDS_COUNT - 1)]
-    w3 = _SHARE_WORDS[random.randint(0, _SHARE_WORDS_COUNT - 1)]
-    return f"{w1}-{w2}-{w3}"
+    """生成 3 词英文友好短链 + CSPRNG 随机后缀（如 'sunset-ocean-river-Ab3x...'）。
+
+    Q20/H19：`random.randint` 是 MT19937（可由观测恢复状态），3 词仅 ~23 bit。
+    改为 `secrets` CSPRNG，并追加 128 bit 随机后缀，总熵 ≥128 bit，杜绝枚举。
+    """
+    import secrets
+    w1 = _SHARE_WORDS[secrets.randbelow(_SHARE_WORDS_COUNT)]
+    w2 = _SHARE_WORDS[secrets.randbelow(_SHARE_WORDS_COUNT)]
+    w3 = _SHARE_WORDS[secrets.randbelow(_SHARE_WORDS_COUNT)]
+    return f"{w1}-{w2}-{w3}-{secrets.token_urlsafe(16)}"
 
 
 def _slug_exists(db, slug: str) -> bool:
@@ -101,10 +106,29 @@ def _compute_share_hash(vfs_path: str) -> str:
     return hmac.new(_SHARE_SECRET, vfs_path.encode(), hashlib.sha256).hexdigest()[:16]
 
 
+def _hash_share_password(password: Optional[str]) -> Optional[str]:
+    """Q20/H18：分享密码不再明文落库，存 bcrypt 哈希（None/空串表示无密码）。"""
+    if not password:
+        return None
+    from utils.auth import hash_password
+    return hash_password(password)
+
+
+def verify_share_password(password: str, password_hash: str) -> bool:
+    """Q20/H18：校验分享密码（bcrypt，兼容 legacy SHA-256）。"""
+    if not password or not password_hash:
+        return False
+    from utils.auth import verify_password
+    return verify_password(password, password_hash)
+
+
 def _encode_share_token(share_hash: str, expires_at: int) -> str:
-    """编码分享 token：base64(expires_at|share_hash|signature)"""
+    """编码分享 token：base64(expires_at|share_hash|signature)
+
+    Q20/H19：签名不再截断到 16 hex（64 bit），改用完整 SHA-256 HMAC hex（256 bit）。
+    """
     payload = f"{expires_at}|{share_hash}"
-    sig = hmac.new(_SHARE_SECRET, payload.encode(), hashlib.sha256).hexdigest()[:16]
+    sig = hmac.new(_SHARE_SECRET, payload.encode(), hashlib.sha256).hexdigest()
     token = f"{expires_at}|{share_hash}|{sig}"
     return base64.urlsafe_b64encode(token.encode()).decode().rstrip("=")
 
@@ -129,9 +153,9 @@ def decode_share_token(token: str, db=None) -> Optional[str]:
         if time.time() > expires_at:
             return None
 
-        # 校验签名
+        # 校验签名（Q20/H19：与 _encode_share_token 一致，用完整 SHA-256 HMAC hex）
         payload = f"{expires_at}|{share_hash}"
-        expected_sig = hmac.new(_SHARE_SECRET, payload.encode(), hashlib.sha256).hexdigest()[:16]
+        expected_sig = hmac.new(_SHARE_SECRET, payload.encode(), hashlib.sha256).hexdigest()
         if not hmac.compare_digest(sig, expected_sig):
             return None
 
@@ -216,7 +240,9 @@ def create_share_link(
 
         # share 模式：用 share_hash 引用 vfs_path，不暴露路径明文
         expires_at = int(time.time()) + expires_hours * 3600 if expires_hours else int(time.time()) + 100 * 365 * 24 * 3600  # 0 = 100年不过期
-        share_hash = _compute_share_hash(vfs_path)
+        # Q20/H19：share_hash 改为每分享随机唯一值（CSPRNG），不再用 vfs_path 的确定性
+        # HMAC。原实现让「同一 vfs_path 的不同分享」共用一个 share_hash，跨租户解析串味。
+        share_hash = secrets.token_hex(8)  # 16 hex = 64 bit CSPRNG，配合 unique 约束
         token = _encode_share_token(share_hash, expires_at)
 
         # 持久化到 DB
@@ -237,7 +263,8 @@ def create_share_link(
                 share_hash=share_hash,
                 slug=slug,
                 mode=mode,
-                password=password,
+                # Q20/H18：密码不再明文落库，存 bcrypt 哈希
+                password=_hash_share_password(password),
                 created_at=datetime.utcnow(),
                 expires_at=datetime.utcfromtimestamp(expires_at),
             )

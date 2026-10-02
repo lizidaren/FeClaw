@@ -148,15 +148,14 @@ def find_or_create_user_from_platform(
     按 Platform 维度匹配或创建 FeClaw User。
     使用 UserLink 表代替旧的 User.platform_user_id 字段。
 
-    匹配优先级：
-    1. UserLink(provider="platform", provider_user_id=...) 精确匹配 -> 复用
-    2. username 匹配且无任何 UserLink -> 绑定为 platform 用户
-    3. username 匹配但已绑别的 Platform ID -> 强制创建独立账号
-    4. 全新 -> 创建 + UserLink
+    Q20/H16：只按 (provider, provider_user_id) 匹配/关联本地账号 ——
+      * 不再按 username 匹配（杜绝「IdP 显示名=admin 预劫持本地 admin 账号」）；
+      * `is_admin` 不来自 IdP 声明（参数保留仅为兼容，实际不再使用）——
+        新建恒 False，匹配到已有用户时不改其 is_admin。
 
     副作用：commit + refresh；调用方不要再 commit 同一行。
     """
-    # 1. UserLink 精确匹配
+    # 1. UserLink 精确匹配 —— 唯一复用路径
     existing_link = (
         db.query(UserLink)
         .filter(UserLink.provider == "platform", UserLink.provider_user_id == platform_user_id)
@@ -167,62 +166,25 @@ def find_or_create_user_from_platform(
         if user:
             if email and email != user.email:
                 user.email = email
-            user.is_admin = bool(is_admin) or user.username == "admin"
+            # Q20/H16：不覆盖 is_admin（管理员身份只来自本地 DB）
             existing_link.provider_username = username
             db.commit()
             db.refresh(user)
             logger.info(f"[oauth_helpers] updated existing user via UserLink platform_user_id={platform_user_id}")
             return user
 
-    # 2. 按 username 查找
-    by_username = db.query(User).filter(User.username == username).first()
-    if by_username:
-        existing_links = db.query(UserLink).filter(UserLink.user_id == by_username.id).count()
-        if existing_links == 0:
-            # username 存在但无任何外部绑定 -> 绑定为 platform 用户
-            by_username.email = email or by_username.email
-            by_username.is_admin = bool(is_admin) or username == "admin"
-            link = UserLink(
-                user_id=by_username.id,
-                provider="platform",
-                provider_user_id=platform_user_id,
-                provider_username=username,
-            )
-            db.add(link)
-            db.commit()
-            db.refresh(by_username)
-            logger.info(f"[oauth_helpers] linked local user {username} -> platform via UserLink")
-            return by_username
-        else:
-            # username 存在且已绑其他 Provider -> 强制独立账号，避免账户劫持
-            logger.warning(f"[oauth_helpers] username collision: {username}")
-            new_user = User(
-                username=f"{username}_{platform_user_id}",
-                password_hash=_dummy_bcrypt_hash(),
-                salt=None,
-                password_version=2,
-                is_admin=False,
-            )
-            db.add(new_user)
-            db.flush()
-            link = UserLink(
-                user_id=new_user.id,
-                provider="platform",
-                provider_user_id=platform_user_id,
-                provider_username=username,
-            )
-            db.add(link)
-            db.commit()
-            db.refresh(new_user)
-            return new_user
+    # 2. 全新用户。username 可能已被本地账号占用（如 "admin"），冲突时追加 platform_user_id
+    final_username = username
+    if db.query(User).filter(User.username == username).first() is not None:
+        final_username = f"{username}_{platform_user_id}"
+        logger.warning(f"[oauth_helpers] username collision with local account, using {final_username}")
 
-    # 3. 全新用户
     new_user = User(
-        username=username,
+        username=final_username,
         password_hash=_dummy_bcrypt_hash(),
         salt=None,
         password_version=2,
-        is_admin=bool(is_admin) or username == "admin",
+        is_admin=False,
     )
     if email:
         new_user.email = email
@@ -237,7 +199,7 @@ def find_or_create_user_from_platform(
     db.add(link)
     db.commit()
     db.refresh(new_user)
-    logger.info(f"[oauth_helpers] created new user {username} (platform via UserLink)")
+    logger.info(f"[oauth_helpers] created new user {final_username} (platform via UserLink)")
     return new_user
 
 
@@ -271,14 +233,13 @@ def issue_token_pair_for_platform_user(
 
     username = user_info.get("username") or user_info.get("name") or f"platform_{platform_user_id}"
     email = user_info.get("email")
-    is_admin = bool(user_info.get("is_admin", False))
 
+    # Q20/H16：is_admin 不来自 IdP 声明（不再读 user_info["is_admin"]）
     user = find_or_create_user_from_platform(
         db,
         platform_user_id=platform_user_id,
         username=username,
         email=email,
-        is_admin=is_admin,
     )
 
     access_token, access_expires = sign_access_token(

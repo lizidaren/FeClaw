@@ -123,11 +123,17 @@ class DesktopRelay:
         args: list[str],
         cwd: str,
         risk_level: int,
+        user_id: Optional[int] = None,
+        agent_hash: Optional[str] = None,
+        session_id: Optional[str] = None,
     ) -> dict:
         """
         向 Desktop 请求命令执行授权。
         发送 command_exec_request 消息给 Desktop WS 客户端，
         等待 consent_response 后返回。
+
+        Q20/H9：授权请求必须与发起者身份绑定 —— user_id/agent_hash/session_id
+        用于精确路由，删除单 socket 兜底后无身份信息的请求会 fail-closed（deny）。
 
         Returns:
             {"decision": "allow" | "deny", "reason": str}
@@ -149,7 +155,9 @@ class DesktopRelay:
             }
         }
 
-        sent = await send_to_client(msg)
+        sent = await send_to_client(
+            msg, user_id=user_id, session_id=session_id, agent_hash=agent_hash
+        )
         if not sent:
             self.pending.pop(request_id, None)
             return {"decision": "deny", "reason": "Desktop not connected"}
@@ -167,14 +175,16 @@ class DesktopRelay:
     # ─────────────────────────────────────────────────────────────
     # 文件桥接 (file_read / file_write / file_delete)
     # ─────────────────────────────────────────────────────────────
-    async def request_file_read(self, path: str) -> dict:
+    async def request_file_read(self, path: str, user_id: Optional[int] = None,
+                                agent_hash: Optional[str] = None,
+                                session_id: Optional[str] = None) -> dict:
         """请求 Desktop 读取文件；Desktop 通过 file_read_response 返回。"""
         request_id = str(uuid.uuid4())
         future = asyncio.get_event_loop().create_future()
         self.pending[request_id] = future
         from routers.client_ws import send_to_client
         msg = {"type": "file_read_request", "id": request_id, "payload": {"path": path}}
-        sent = await send_to_client(msg)
+        sent = await send_to_client(msg, user_id=user_id, session_id=session_id, agent_hash=agent_hash)
         if not sent:
             self.pending.pop(request_id, None)
             return {"status": "error", "error": "Desktop not connected"}
@@ -185,7 +195,10 @@ class DesktopRelay:
         finally:
             self.pending.pop(request_id, None)
 
-    async def request_file_write(self, path: str, content: str) -> dict:
+    async def request_file_write(self, path: str, content: str,
+                                 user_id: Optional[int] = None,
+                                 agent_hash: Optional[str] = None,
+                                 session_id: Optional[str] = None) -> dict:
         """请求 Desktop 写入文件；Desktop 通过 file_write_response 返回。"""
         request_id = str(uuid.uuid4())
         future = asyncio.get_event_loop().create_future()
@@ -196,7 +209,7 @@ class DesktopRelay:
             "id": request_id,
             "payload": {"path": path, "content": content},
         }
-        sent = await send_to_client(msg)
+        sent = await send_to_client(msg, user_id=user_id, session_id=session_id, agent_hash=agent_hash)
         if not sent:
             self.pending.pop(request_id, None)
             return {"status": "error", "error": "Desktop not connected"}
@@ -207,7 +220,9 @@ class DesktopRelay:
         finally:
             self.pending.pop(request_id, None)
 
-    async def request_file_delete(self, path: str) -> dict:
+    async def request_file_delete(self, path: str, user_id: Optional[int] = None,
+                                  agent_hash: Optional[str] = None,
+                                  session_id: Optional[str] = None) -> dict:
         """请求 Desktop 删除文件；Desktop 通过 file_delete_response 返回。"""
         request_id = str(uuid.uuid4())
         future = asyncio.get_event_loop().create_future()
@@ -218,7 +233,7 @@ class DesktopRelay:
             "id": request_id,
             "payload": {"path": path},
         }
-        sent = await send_to_client(msg)
+        sent = await send_to_client(msg, user_id=user_id, session_id=session_id, agent_hash=agent_hash)
         if not sent:
             self.pending.pop(request_id, None)
             return {"status": "error", "error": "Desktop not connected"}

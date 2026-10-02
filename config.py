@@ -4,7 +4,7 @@ FeClaw 智能体网关平台配置文件
 """
 
 from pydantic_settings import BaseSettings
-from typing import List
+from typing import List, Optional
 import os
 
 
@@ -151,7 +151,7 @@ class Settings(BaseSettings):
     # 豆包 / 火山引擎配置
     DOUBAO_BASE_URL: str = "https://ark.cn-beijing.volces.com/api/v3"
     DOUBAO_SEEDREAM_MODEL: str = "doubao-seedream-5-0-260128"
-    COOKIE_SECURE: bool = False  # JWT cookie secure 标志；为空时自动检测（推荐）
+    COOKIE_SECURE: Optional[bool] = None  # JWT cookie secure 标志；None=自动检测 HTTPS（推荐），显式 True/False 可覆盖
 
     # Session Memory 配置
     SESSION_MEMORY_ENABLED: bool = True

@@ -3,10 +3,12 @@
 提供系统健康状态的 REST API 端点
 """
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, Depends, HTTPException
 from typing import Optional
 
 from services.heartbeat_service import HeartbeatService
+from utils.auth_dependencies import get_admin_user
+from models.database import User
 
 router = APIRouter(prefix="/api", tags=["Health"])
 
@@ -19,7 +21,8 @@ _heartbeat_service = HeartbeatService()
 async def get_backend_health(
     backend_url: Optional[str] = Query(None, description="自定义后端 URL"),
     include_details: bool = Query(False, description="是否包含详细检查项"),
-    timeout_seconds: int = Query(5, description="检查超时时间（秒）")
+    timeout_seconds: int = Query(5, description="检查超时时间（秒）"),
+    user: User = Depends(get_admin_user),
 ):
     """
     后端健康检查
@@ -35,6 +38,12 @@ async def get_backend_health(
     - degraded: 部分组件异常但仍可用
     - error: 检查过程出错
     """
+    # Q20/H15：即使加了管理员鉴权，仍校验自定义 backend_url（防 SSRF + curl 参数注入）
+    if backend_url:
+        from utils.url_validation import validate_public_http_url
+        if not validate_public_http_url(backend_url):
+            raise HTTPException(status_code=400, detail="backend_url 非法（仅允许公网 http/https）")
+
     report = _heartbeat_service.check_backend_health(
         backend_url=backend_url,
         timeout_seconds=timeout_seconds,

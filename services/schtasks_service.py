@@ -285,7 +285,8 @@ class SchtasksService:
             try:
                 check_start = time.time()
                 response = subprocess.run(
-                    ["curl", "-s", "--max-time", str(timeout_seconds), url],
+                    # Q20/H15：`--` 终止符，防 url 以 `-` 开头被 curl 当作选项解析
+                    ["curl", "-s", "--max-time", str(timeout_seconds), "--", url],
                     capture_output=True,
                     text=True,
                     timeout=timeout_seconds + 1

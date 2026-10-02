@@ -142,8 +142,9 @@ class WSRoom:
                         if meta.get("agent_hash") == str(agent_hash)
                     }
                 else:
-                    all_sockets = set(self._metadata)
-                    sockets = all_sockets if len(all_sockets) == 1 else set()
+                    # Q20/H9：删除「单 socket 兜底」—— 无路由信息时绝不到处广播，
+                    # 防止 consent / 文件桥接请求被任意单个连接截获。
+                    sockets = set()
         if not sockets:
             logger.warning("Skipped unroutable client WS event type=%s", message.get("type"))
             return False
@@ -226,6 +227,17 @@ async def client_websocket(
       * 4003 — token 有效但无权访问该 agent（仅 agent_hash 非空时校验）
       * 4004 — agent 不存在（仅 agent_hash 非空时校验）
     """
+    # 0. channel 白名单（Q20/H9）：拒绝未知 channel，避免攻击者伪装成 desktop 截获授权请求
+    if channel not in ("desktop", "mobile", "web"):
+        await _reject_ws(
+            ws,
+            close_code=4004,
+            code="invalid_channel",
+            message="invalid_channel",
+        )
+        logger.warning(f"Client WS rejected: invalid channel ({channel!r})")
+        return
+
     # 1. JWT 校验。Mobile 依赖 error frame + close code 4001 触发统一登出。
     if not token:
         await _reject_ws(

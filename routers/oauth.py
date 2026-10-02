@@ -155,15 +155,15 @@ async def oauth_callback(
 
     access_token = token_data.get("access_token")
 
-    # 验证 id_token
+    # 验证 id_token（Q20/H16：id_token 存在时必须验签成功才继续，失败不再静默跳过）
     id_token = token_data.get("id_token")
     t2 = _time.time()
     if id_token:
         id_payload = await oauth_service.verify_platform_jwt(id_token)
         if not id_payload:
-            logger.warning(f"[PERF] verify_platform_jwt failed after {(_time.time()-t2)*1000:.0f}ms (skipped)")
-        else:
-            logger.info(f"[PERF] verify_platform_jwt: {(_time.time()-t2)*1000:.0f}ms")
+            logger.warning(f"[PERF] verify_platform_jwt failed after {(_time.time()-t2)*1000:.0f}ms")
+            raise HTTPException(status_code=401, detail="Platform id_token 验签失败，拒绝登录")
+        logger.info(f"[PERF] verify_platform_jwt: {(_time.time()-t2)*1000:.0f}ms")
 
     # 获取用户信息
     t3 = _time.time()
@@ -177,102 +177,21 @@ async def oauth_callback(
         raise HTTPException(status_code=400, detail="Failed to get user info")
 
     # 创建或更新本地用户
+    # Q20/H16：只按 (provider, provider_user_id) 匹配/关联本地账号；
+    # is_admin 不来自 IdP 声明；username=admin 不再触发提权或预劫持。
     db = SessionLocal()
     try:
         platform_user_id = user_info.get("sub") or user_info.get("user_id")
+        if not platform_user_id:
+            raise HTTPException(status_code=400, detail="Platform userinfo 缺少用户标识")
         username = user_info.get("username") or user_info.get("name") or f"platform_{platform_user_id}"
 
-        # 安全匹配：先按 UserLink(provider=platform) 精准查（P0-1 修复：禁止 or_ 条件）
-        existing_link = db.query(UserLink).filter(
-            UserLink.provider == "platform",
-            UserLink.provider_user_id == platform_user_id,
-        ).first()
-        existing = db.query(User).filter(User.id == existing_link.user_id).first() if existing_link else None
-
-        if existing:
-            # 按 platform_user_id 精准匹配 -> 更新
-            existing.email = user_info.get("email", existing.email)
-            existing.is_admin = user_info.get("is_admin", False) or username == "admin"
-            if existing_link:
-                existing_link.provider_username = username
-            db.commit()
-            db.refresh(existing)
-            user = existing
-            logger.info(f"Updated existing user from OAuth: {username}")
-        else:
-            # 按 username 查找（兼容本地注册后被 Platform 绑定的场景）
-            by_username = db.query(User).filter(User.username == username).first()
-            existing_links_count = (
-                db.query(UserLink).filter(UserLink.user_id == by_username.id).count()
-                if by_username else 0
-            )
-            if by_username and existing_links_count == 0:
-                # username 存在但无任何外部绑定 -> 绑定为当前 Platform 用户
-                link = UserLink(
-                    user_id=by_username.id,
-                    provider="platform",
-                    provider_user_id=platform_user_id,
-                    provider_username=username,
-                )
-                db.add(link)
-                by_username.email = user_info.get("email", by_username.email)
-                by_username.is_admin = user_info.get("is_admin", False) or username == "admin"
-                db.commit()
-                db.refresh(by_username)
-                user = by_username
-                logger.info(f"Linked local user to Platform: {username} (platform_user_id={platform_user_id})")
-            elif by_username and existing_links_count > 0:
-                # username 被占用且已绑其他 Provider 账号 -> 强制创建新用户，避免账户劫持
-                logger.warning(
-                    f"Username collision: {username} is already linked to other provider(s), "
-                    f"but login attempt from platform_user_id={platform_user_id}. Creating separate account."
-                )
-                from utils.auth import hash_password
-                dummy_password = hash_password(secrets.token_hex(32))
-                is_admin = user_info.get("is_admin", False) or username == "admin"
-                user = User(
-                    username=f"{username}_{platform_user_id}",
-                    password_hash=dummy_password,
-                    salt=None,
-                    password_version=2,
-                    is_admin=is_admin
-                )
-                db.add(user)
-                db.flush()
-                link = UserLink(
-                    user_id=user.id,
-                    provider="platform",
-                    provider_user_id=platform_user_id,
-                    provider_username=username,
-                )
-                db.add(link)
-                db.commit()
-                db.refresh(user)
-                logger.info(f"Created new user from OAuth (username collision): {username}_{platform_user_id}")
-            else:
-                # 全新用户 -> 创建
-                from utils.auth import hash_password
-                dummy_password = hash_password(secrets.token_hex(32))
-                is_admin = user_info.get("is_admin", False) or username == "admin"
-                user = User(
-                    username=username,
-                    password_hash=dummy_password,
-                    salt=None,
-                    password_version=2,
-                    is_admin=is_admin
-                )
-                db.add(user)
-                db.flush()
-                link = UserLink(
-                    user_id=user.id,
-                    provider="platform",
-                    provider_user_id=platform_user_id,
-                    provider_username=username,
-                )
-                db.add(link)
-                db.commit()
-                db.refresh(user)
-                logger.info(f"Created new user from OAuth: {username}")
+        user = find_or_create_user_from_platform(
+            db,
+            platform_user_id=str(platform_user_id),
+            username=username,
+            email=user_info.get("email"),
+        )
     finally:
         db.close()
 
@@ -293,7 +212,7 @@ async def oauth_callback(
 
     set_auth_cookie(
         response, AUTH_COOKIE_JWT, local_jwt,
-        secure=True, max_age=settings.JWT_EXPIRE_HOURS * 3600,
+        httponly=True, secure=True, max_age=settings.JWT_EXPIRE_HOURS * 3600,
     )
 
     # P1-4 修复：保存 id_token 到 cookie，供 logout 时传递 id_token_hint

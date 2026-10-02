@@ -294,7 +294,7 @@ class ShareMapping(Base):
     user_id = Column(String(32), nullable=False)  # 所属用户（从 AgentProfile 获取）
     agent_hash = Column(String(8), nullable=False, index=True)  # Agent hash
     vfs_path = Column(String(512), nullable=False)
-    share_hash = Column(String(16), nullable=False, index=True)
+    share_hash = Column(String(16), nullable=False, index=True, unique=True)  # Q20/H19：唯一约束，防跨租户令牌解析串味
     slug = Column(String(64), nullable=True, index=True)  # 友好短链（如"春风-明月-星辰"），代码层保证唯一
     mode = Column(String(16), nullable=False)
     password = Column(String(128), nullable=True)

@@ -291,7 +291,9 @@ def _create_seccomp_bpf() -> Optional[bytes]:
         SYS_GETTIMEOFDAY, SYS_CLOCK_GETTIME, SYS_CLOCK_GETRES,
         SYS_TIMES, SYS_TIME,
         SYS_CAPGET, SYS_CAPSET,
-        # Unix Domain Socket — --unshare-net 已阻止 AF_INET，无需 seccomp 参数检查
+        # Socket syscalls（VFS 回环 API 需要）。注意：沙箱并不保证网络隔离 ——
+        # 网络隔离依赖外置 setuid helper + feclaw-sandbox netns；helper 缺失时
+        # 沙箱与宿主共享网络命名空间（见 sandbox_manager 的 H5 诚实文案）。
         SYS_SOCKET, SYS_CONNECT, SYS_ACCEPT, SYS_ACCEPT4,
         SYS_BIND, SYS_LISTEN, SYS_GETSOCKNAME, SYS_GETPEERNAME,
         SYS_SENDMSG, SYS_RECVMSG, SYS_SENDTO, SYS_RECVFROM,

@@ -183,11 +183,16 @@ async def bind_wechat(request: BindRequest, user: User = Depends(get_current_use
                 detail="Agent not found or does not belong to the current user"
             )
 
+        # Q20/H8：base_url 由服务端固定，不接受客户端指定。
+        # 此前客户端可提交任意 base_url，服务端带着 bot token 去请求它（盲 SSRF + 凭据外带）。
+        # 现在一律用服务端配置（空则 SDK 回退到 ILINK_API_BASE 官方端点）。
+        server_base_url = (settings.WECHAT_ILINK_BASE_URL or "").strip()
+
         login_data = {
             "bot_token": request.bot_token or "",
             "ilink_bot_id": request.ilink_bot_id or "",
             "ilink_user_id": request.ilink_user_id or "",
-            "base_url": request.base_url or "",
+            "base_url": server_base_url,
             "agent_hash": request.agent_hash,
         }
 
@@ -213,7 +218,7 @@ async def bind_wechat(request: BindRequest, user: User = Depends(get_current_use
             bot_token=request.bot_token or "",
             ilink_bot_id=request.ilink_bot_id or "",
             ilink_user_id=request.ilink_user_id or "",
-            base_url=request.base_url or "",
+            base_url=server_base_url,
             agent_hash=request.agent_hash
         )
 

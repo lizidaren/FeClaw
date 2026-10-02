@@ -27,6 +27,33 @@ router = APIRouter(prefix="/api/user", tags=["User"])
 
 
 # ==========================================
+# Q20/H17：登录限流（IP + username 双维度，防在线爆破）
+# ==========================================
+
+from collections import defaultdict as _defaultdict
+_login_attempts: dict = _defaultdict(list)
+_LOGIN_MAX = 10           # 每窗口最多尝试次数
+_LOGIN_WINDOW = 300       # 窗口 5 分钟
+_LOGIN_CLEAN_THRESHOLD = 10000
+
+
+def _login_rate_limited(key: str) -> bool:
+    now = time.time()
+    bucket = [t for t in _login_attempts.get(key, []) if now - t < _LOGIN_WINDOW]
+    if len(bucket) >= _LOGIN_MAX:
+        _login_attempts[key] = bucket
+        return True
+    bucket.append(now)
+    _login_attempts[key] = bucket
+    if len(_login_attempts) > _LOGIN_CLEAN_THRESHOLD:
+        _stale = [k for k, v in list(_login_attempts.items())
+                  if all(now - t >= _LOGIN_WINDOW for t in v)]
+        for k in _stale:
+            _login_attempts.pop(k, None)
+    return False
+
+
+# ==========================================
 # VFS File Manager API (Phase 2A)
 # ==========================================
 
@@ -699,6 +726,11 @@ async def login_user(
 
         if not username or not password:
             raise HTTPException(status_code=400, detail={"status": "error", "message": "用户名和密码不能为空"})
+
+        # Q20/H17：登录限流（IP + username），失败尝试过多返回 429
+        client_ip = request.client.host if request.client else "unknown"
+        if _login_rate_limited(f"{client_ip}:{username}"):
+            raise HTTPException(status_code=429, detail={"status": "error", "message": "尝试次数过多，请稍后再试"})
 
         # 查找用户
         user = db.query(User).filter(User.username == username).first()

@@ -397,7 +397,12 @@ def _totp_verify_rate_limited(key: str) -> bool:
 
 @router.post("/api/totp/verify", response_model=TOTPVerifyResponse)
 async def verify_totp(request: TOTPVerifyRequest, req: Request):
-    """验证 TOTP 并签发 JWT（Q19/C2：加 IP+agent_hash 限流）"""
+    """验证 TOTP 并签发 JWT（Q19/C2：加 IP+agent_hash 限流）
+
+    Q20/H10：TOTP 登录成功后由服务端下发 HttpOnly 会话 cookie（此前靠前端
+    `document.cookie` 写同名 cookie，令 HttpOnly 失效）。前端仍从响应体拿 token
+    存 localStorage 用于 Authorization 头。
+    """
     client_ip = req.client.host if req.client else "unknown"
     if _totp_verify_rate_limited(f"{client_ip}:{request.agent_hash}"):
         raise HTTPException(status_code=429, detail="尝试次数过多，请稍后再试")
@@ -405,7 +410,27 @@ async def verify_totp(request: TOTPVerifyRequest, req: Request):
     if not result:
         pass  # HTTPException already imported at module level
         raise HTTPException(status_code=401, detail="Invalid or expired TOTP code")
-    return TOTPVerifyResponse(**result)
+
+    # 与 /api/user/login 相同的 secure 自动探测
+    _cookie_secure = getattr(settings, "COOKIE_SECURE", None)
+    if _cookie_secure is not None:
+        _is_secure = bool(_cookie_secure)
+    else:
+        _is_secure = (
+            str(req.url.scheme) == "https"
+            or req.headers.get("x-forwarded-proto", "").lower() == "https"
+        )
+    resp = JSONResponse(content=TOTPVerifyResponse(**result).model_dump())
+    resp.set_cookie(
+        key="feclaw_jwt",
+        value=result["token"],
+        httponly=True,
+        secure=_is_secure,
+        max_age=86400 * 30,
+        samesite="lax",
+        path="/",
+    )
+    return resp
 
 
 @router.post("/api/totp/generate", response_model=TOTPGenerateResponse)
@@ -971,6 +996,9 @@ async def home(request: Request):
         user_id = await get_user_for_page(request)
         if not user_id:
             return RedirectResponse(url=f"/login?redirect_to=/{agent_hash}", status_code=302)
+        # Q20/H2：子域名页面只验登录不验归属 —— 必须校验该子域对应的 agent 属于当前用户
+        if not _verify_agent_ownership(agent_hash, user_id):
+            raise HTTPException(status_code=403, detail="无权访问")
         return templates.TemplateResponse(request, "agent_dashboard.html", {"request": request, "agent_hash": agent_hash})
     else:
         # 检查是否为无效子域名（非 4–8 位 hex 的子域名）→ 302 回主域名
@@ -1071,7 +1099,8 @@ async def dashboard_page(request: Request, agent: Optional[int] = Query(None)):
             return RedirectResponse(url=f"/agent/{agent_profile.hash}", status_code=302)
         finally:
             db.close()
-    if not await get_user_for_page(request):
+    user_id = await get_user_for_page(request)
+    if not user_id:
         return RedirectResponse(url="/login", status_code=302)
     host = _get_domain(request)
     agent_hash = extract_hash_from_host(host)
@@ -1094,6 +1123,9 @@ async def dashboard_page(request: Request, agent: Optional[int] = Query(None)):
     except Exception:
         is_admin = False
     if agent_hash:
+        # Q20/H2：子域名页面只验登录不验归属 —— 必须校验该子域对应的 agent 属于当前用户
+        if not _verify_agent_ownership(agent_hash, user_id):
+            raise HTTPException(status_code=403, detail="无权访问")
         return templates.TemplateResponse(
             request, "agent_dashboard.html",
             {"request": request, "agent_hash": agent_hash, "is_admin": is_admin},
@@ -1113,8 +1145,12 @@ async def files_page(request: Request, path: str = ""):
     host = _get_domain(request)
     agent_hash = extract_hash_from_host(host)
     if agent_hash:
-        if not await get_user_for_page(request):
+        user_id = await get_user_for_page(request)
+        if not user_id:
             return RedirectResponse(url="/login", status_code=302)
+        # Q20/H2：子域名页面只验登录不验归属 —— 必须校验该子域对应的 agent 属于当前用户
+        if not _verify_agent_ownership(agent_hash, user_id):
+            raise HTTPException(status_code=403, detail="无权访问")
         rendered = templates.TemplateResponse(request, "agent_files.html", {
             "request": request,
             "agent_hash": agent_hash,
@@ -1145,8 +1181,12 @@ async def chat_page(request: Request, agent: Optional[int] = Query(None)):
     host = _get_domain(request)
     agent_hash = extract_hash_from_host(host)
     if agent_hash:
-        if not await get_user_for_page(request):
+        user_id = await get_user_for_page(request)
+        if not user_id:
             return RedirectResponse(url="/login", status_code=302)
+        # Q20/H2：子域名页面只验登录不验归属 —— 必须校验该子域对应的 agent 属于当前用户
+        if not _verify_agent_ownership(agent_hash, user_id):
+            raise HTTPException(status_code=403, detail="无权访问")
         return templates.TemplateResponse(request, "agent_chat.html", {
             "request": request,
             "agent_hash": agent_hash
@@ -1158,28 +1198,31 @@ async def chat_page(request: Request, agent: Optional[int] = Query(None)):
 @router.get("/settings/", response_class=HTMLResponse)
 async def settings_page(request: Request):
     """设置页面（新 UI，需登录）"""
-    if not await get_user_for_page(request):
+    user_id = await get_user_for_page(request)
+    if not user_id:
         return RedirectResponse(url="/login", status_code=302)
     host = _get_domain(request)
     agent_hash = extract_hash_from_host(host)
 
     # 解析 is_admin（用于在导航栏显示「管理后台」入口）
+    # Q20/H2 附带修复：原 `get_current_user_id(request)` 漏 await（协程恒为真），
+    # 这里直接用上面已解析出的 user_id 查库。
     is_admin = False
     try:
-        from utils.auth import get_current_user_id
-        uid = get_current_user_id(request)
-        if uid:
-            from models.database import SessionLocal, User
-            db = SessionLocal()
-            try:
-                u = db.query(User).filter(User.id == int(uid)).first()
-                is_admin = bool(u and getattr(u, "is_admin", False))
-            finally:
-                db.close()
+        from models.database import SessionLocal, User
+        db = SessionLocal()
+        try:
+            u = db.query(User).filter(User.id == int(user_id)).first()
+            is_admin = bool(u and getattr(u, "is_admin", False))
+        finally:
+            db.close()
     except Exception:
         pass
 
     if agent_hash:
+        # Q20/H2：子域名页面只验登录不验归属 —— 必须校验该子域对应的 agent 属于当前用户
+        if not _verify_agent_ownership(agent_hash, user_id):
+            raise HTTPException(status_code=403, detail="无权访问")
         return templates.TemplateResponse(request, "agent_settings_main.html", {"request": request, "agent_hash": agent_hash, "is_admin": is_admin})
     return templates.TemplateResponse(request, "settings.html", {"request": request, "is_admin": is_admin})
 

@@ -431,8 +431,9 @@ class SandboxManager:
         """构建用于执行 bash 脚本的 bubblewrap 命令（含 netns + seccomp enforcer）"""
         opts = self._build_bwrap_base_opts(script_path)
 
-        # 入口：/seccomp-enforcer → 装 seccomp 白名单 → exec bash
-        entry = ["/seccomp-enforcer", "/bin/bash", script_path]
+        # 入口：env -i（clearenv 白名单）→ /seccomp-enforcer → exec bash
+        entry = ["/usr/bin/env", "-i", *self._build_sandbox_env(),
+                 "/seccomp-enforcer", "/bin/bash", script_path]
 
         if NetworkIsolationManager.check():
             return NetworkIsolationManager.get_netns_prefix() + opts + entry
@@ -466,12 +467,10 @@ class SandboxManager:
 
         if sig == signal.SIGSYS:  # 31 — seccomp 拦截
             friendly = (
-                "Security sandbox blocked: code attempted a forbidden operation.\n"
-                "Common causes:\n"
-                "  - Network access (HTTP requests, socket connections)\n"
-                "  - System command execution (os.system(), subprocess.run())\n"
-                "  - Privilege escalation or kernel resource access\n"
-                "Please remove the offending code and try again."
+                "Security sandbox blocked: code attempted a syscall outside the allowed set.\n"
+                "Note: the sandbox isolates the filesystem namespace and enforces resource "
+                "limits, but does not guarantee network isolation on this host.\n"
+                "Please remove the offending operation and try again."
             )
             return ExecResult(
                 stdout=stdout, stderr=friendly, exit_code=returncode,
@@ -542,7 +541,8 @@ class SandboxManager:
                             sandbox_id: str) -> ExecResult:
         """通过 bubblewrap 安全执行"""
         if not NetworkIsolationManager.check():
-            logger.warning("Netns not available, falling back to --share-net")
+            logger.warning("Netns not available: sandbox will run with the host network namespace "
+                           "(network isolation is NOT enforced on this host)")
         try:
             # 写入临时脚本
             script_path = f"/tmp/sandbox_exec_{sandbox_id}.py"
@@ -640,7 +640,6 @@ class SandboxManager:
 
     def _build_bwrap_base_opts(self, script_path: str) -> List[str]:
         """构建 bwrap 公共挂载选项（两个沙箱执行路径共享）"""
-        host_path = os.environ.get("PATH", "/usr/bin:/bin")
         FECLAW_VENV = settings.FECLAW_VENV_PATH
 
         # Python stdlib 路径: 从 venv 解析
@@ -671,6 +670,9 @@ class SandboxManager:
         opts = [
             "bwrap", "--unshare-pid", "--unshare-ipc", "--unshare-uts",
             "--unshare-cgroup", "--die-with-parent",
+            # Q20/H6：清空继承自服务端的全部环境变量（含 JWT_SECRET / DB 口令 / API Key）。
+            # 注意：--clearenv 需要 bwrap ≥0.5，本机 0.4.0 不支持 —— 改由
+            # `_build_bwrap_command` 用 `env -i` 前缀实现等价 clearenv（见 _build_sandbox_env）。
             "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp",
             # 系统二进制（标准路径，非递归 bind-mount 覆盖不到子挂载点如 /usr/local）
             "--ro-bind", "/usr", "/usr",
@@ -716,7 +718,7 @@ class SandboxManager:
         if self._is_fuse_ready():
             self._ensure_sandbox_fuse()
             opts += ["--bind", self._get_fuse_bind_source(), "/workspace"]
-            opts += ["--setenv", "FECLAW_USE_FUSE", "1"]
+            # FECLAW_USE_FUSE 改由 _build_sandbox_env() 统一注入（env -i 白名单）
 
         # /public 只读挂载（独立于 workspace，只要全局 FUSE 存活即可）
         if _global_fuse_ok:
@@ -732,17 +734,33 @@ class SandboxManager:
                 "--ro-bind", self.BWRAP_BPF_PATH, "/seccomp.bpf",
             ]
 
-        # 环境变量设置
-        venv_path = "/venv/bin:" if os.path.exists(FECLAW_VENV) else ""
+        # 环境变量不再由 --setenv 注入 —— 由 _build_bwrap_command 的 `env -i` 前缀统一处理
         opts += [
-            "--setenv", "PATH", f"{venv_path}{host_path}",
-            "--setenv", "HOME", "/tmp",
-            "--setenv", "PYTHONDONTWRITEBYTECODE", "1",
-            "--setenv", "PYTHONWARNINGS", "ignore",
             "--bind", script_path, script_path,  # 覆写 --tmpfs /tmp
         ]
 
         return opts
+
+    def _build_sandbox_env(self) -> List[str]:
+        """构建沙箱环境变量白名单（`env -i KEY=VAL ...` 形式，等价于 clearenv）。
+
+        Q20/H6：沙箱**绝不继承**服务端 os.environ —— 这里只注入运行必需的最小变量，
+        JWT_SECRET / DATABASE_URL / 各家 API Key 等一律不透传。
+        """
+        host_path = os.environ.get("PATH", "/usr/bin:/bin")
+        FECLAW_VENV = settings.FECLAW_VENV_PATH
+        venv_path = "/venv/bin:" if os.path.exists(FECLAW_VENV) else ""
+        envs = [
+            f"PATH={venv_path}{host_path}",
+            "HOME=/tmp",
+            "PYTHONDONTWRITEBYTECODE=1",
+            "PYTHONWARNINGS=ignore",
+            "LANG=C.UTF-8",
+            "LC_ALL=C.UTF-8",
+        ]
+        if self._is_fuse_ready():
+            envs.append("FECLAW_USE_FUSE=1")
+        return envs
 
     def _build_bwrap_command(self, script_path: str, timeout: int) -> List[str]:
         """构建 bubblewrap 隔离命令（含 netns 网络隔离 + seccomp enforcer）"""
@@ -751,8 +769,9 @@ class SandboxManager:
             os.path.realpath(shutil.which("python3") or "/usr/local/bin/python3.12")
         opts = self._build_bwrap_base_opts(script_path)
 
-        # 入口：/seccomp-enforcer → 装 seccomp 白名单 → exec python
-        entry = ["/seccomp-enforcer", python_bin, script_path]
+        # 入口：env -i（clearenv 白名单）→ /seccomp-enforcer → exec python
+        entry = ["/usr/bin/env", "-i", *self._build_sandbox_env(),
+                 "/seccomp-enforcer", python_bin, script_path]
 
         if NetworkIsolationManager.check():
             return NetworkIsolationManager.get_netns_prefix() + opts + entry
@@ -827,7 +846,14 @@ class SandboxManager:
 
     def start_background(self, code: str, name: str = None,
                          port: int = None) -> str:
-        """后台任务（长期运行，不受 12h 限制但受 max_concurrent 限制）"""
+        """后台任务（长期运行，不受 12h 限制但受 max_concurrent 限制）
+
+        Q20/H4：后台执行必须与前台同构 —— 走同一 bwrap 沙箱（fail-closed）。
+        此前用 `subprocess.Popen(["python3", ...])` 完全绕过 bwrap，无 namespace /
+        无 bind-mount 白名单，等于以服务账号裸跑主机。修复后：
+          - bwrap 不可用 → 拒绝启动（返回错误串）；
+          - 命令与前台 `_build_bwrap_command` 完全一致（env -i 白名单 + netns 前缀）。
+        """
         task_id = uuid.uuid4().hex[:12]
         if not name:
             name = f"python_task_{task_id}"
@@ -836,55 +862,69 @@ class SandboxManager:
         if not _global_concurrency_limiter.acquire(task_id):
             return f"Error: 沙箱并发已满"
 
-        sandbox_token = register_sandbox_token(self.agent_hash or "")
-        bootstrap = VFSBootstrap.build(
-            user_id=self.user_id,
-            agent_hash=self.agent_hash,
-            max_file_size=settings.SANDBOX_MAX_FILE_SIZE,
-            sandbox_token=sandbox_token
-        )
-        full_code = bootstrap + "\n\n# === Background Task ===\n" + code
+        # Q20/H4 fail-closed：无 bwrap 时绝不回退到无隔离 subprocess
+        if not self._bwrap_available:
+            _global_concurrency_limiter.release(task_id)
+            return "Error: 沙箱不可用（bwrap 未安装），后台任务拒绝执行"
 
-        script_path = f"/tmp/sandbox_bg_{task_id}.py"
-        os.makedirs(os.path.dirname(script_path), exist_ok=True)
-        with open(script_path, "w", encoding="utf-8") as f:
-            f.write(full_code)
+        sandbox_token = None
+        try:
+            # 与前台 exec_code 同构：确保 FUSE、注册 token、构建注入代码
+            self._ensure_sandbox_fuse()
+            sandbox_token = register_sandbox_token(self.agent_hash or "")
+            if self._is_fuse_ready():
+                full_code = SECCOMP_SETUP_CODE_SHORT + "\n\n# === Background Task ===\n" + code
+            else:
+                bootstrap = VFSBootstrap.build(
+                    user_id=self.user_id,
+                    agent_hash=self.agent_hash,
+                    max_file_size=settings.SANDBOX_MAX_FILE_SIZE,
+                    sandbox_token=sandbox_token
+                )
+                full_code = bootstrap + "\n\n" + SECCOMP_SETUP_CODE_SHORT + "\n\n# === Background Task ===\n" + code
 
-        env = os.environ.copy()
-        env["PYTHONDONTWRITEBYTECODE"] = "1"
-        env["PYTHONWARNINGS"] = "ignore"
+            script_path = f"/tmp/sandbox_bg_{task_id}.py"
+            os.makedirs(os.path.dirname(script_path), exist_ok=True)
+            with open(script_path, "w", encoding="utf-8") as f:
+                f.write(full_code)
 
-        process = subprocess.Popen(
-            ["python3", script_path],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            env=env,
-            preexec_fn=self._make_preexec_fn(),
-        )
+            # Q20/H4：与前台同构 —— 走 bwrap（含 env -i 白名单 + netns 前缀）
+            bwrap_cmd = self._build_bwrap_command(script_path, None)
+            process = subprocess.Popen(
+                bwrap_cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
 
-        task = BackgroundTask(id=task_id, name=name, process=process, port=port, sandbox_token=sandbox_token)
+            task = BackgroundTask(id=task_id, name=name, process=process, port=port, sandbox_token=sandbox_token)
 
-        # 启动输出读取线程
-        def _read_output(stream, buffer, prefix=""):
-            try:
-                for line in stream:
-                    buffer.append(f"{prefix}{line.rstrip()}")
-            except Exception:
-                pass
+            # 启动输出读取线程
+            def _read_output(stream, buffer, prefix=""):
+                try:
+                    for line in stream:
+                        buffer.append(f"{prefix}{line.rstrip()}")
+                except Exception:
+                    pass
 
-        threading.Thread(
-            target=_read_output, args=(process.stdout, task.output_buffer),
-            daemon=True
-        ).start()
-        threading.Thread(
-            target=_read_output, args=(process.stderr, task.output_buffer, "[stderr] "),
-            daemon=True
-        ).start()
+            threading.Thread(
+                target=_read_output, args=(process.stdout, task.output_buffer),
+                daemon=True
+            ).start()
+            threading.Thread(
+                target=_read_output, args=(process.stderr, task.output_buffer, "[stderr] "),
+                daemon=True
+            ).start()
 
-        self._background_tasks[task_id] = task
-        logger.info(f"[Sandbox] Started background task {task_id}: {name}")
-        return task_id
+            self._background_tasks[task_id] = task
+            logger.info(f"[Sandbox] Started background task {task_id}: {name}")
+            return task_id
+        except Exception as e:
+            _global_concurrency_limiter.release(task_id)
+            if sandbox_token:
+                unregister_sandbox_token(sandbox_token)
+            logger.error(f"[Sandbox] Failed to start background task {task_id}: {e}")
+            return f"Error: 后台任务启动失败: {e}"
 
     def stop_background(self, task_id: str) -> bool:
         """停止后台任务"""
@@ -1018,6 +1058,9 @@ class SandboxManager:
         if mode == "upload" and "content" in data:
             if is_tool_log_cos_key(cos_key):
                 return {"error": "/.logs/ is a read-only system directory"}
+            # Q20/H20：内部 VFS 写接口必须与 virtual_filesystem 一样尊重 /public 只读
+            if getattr(self.vfs, "_is_public_path", lambda _k: False)(cos_key):
+                return {"error": "/public/ is a read-only directory"}
             content = base64.b64decode(data["content"])
             self.vfs.storage.put_object(cos_key, content)
             self.meta_cache.invalidate_dir(
@@ -1088,6 +1131,8 @@ class SandboxManager:
             return {"error": err}
         if is_tool_log_cos_key(cos_key):
             return {"error": "/.logs/ is a read-only system directory"}
+        if getattr(self.vfs, "_is_public_path", lambda _k: False)(cos_key):
+            return {"error": "/public/ is a read-only directory"}
 
         dir_key = cos_key.rstrip("/") + "/.directory"
         
@@ -1117,6 +1162,9 @@ class SandboxManager:
             return {"error": err}
         if is_tool_log_cos_key(cos_key):
             return {"error": "/.logs/ is a read-only system directory"}
+        # Q20/H20：内部 VFS 删目录接口同样尊重 /public 只读
+        if getattr(self.vfs, "_is_public_path", lambda _k: False)(cos_key):
+            return {"error": "/public/ is a read-only directory"}
 
         if recursive:
             objects = self.vfs.storage.list_objects(cos_key.rstrip("/") + "/")
@@ -1138,6 +1186,9 @@ class SandboxManager:
             return {"error": err}
         if is_tool_log_cos_key(src_key) or is_tool_log_cos_key(dst_key):
             return {"error": "/.logs/ is a read-only system directory"}
+        # Q20/H20：禁止把内容 rename 进 /public 只读空间
+        if getattr(self.vfs, "_is_public_path", lambda _k: False)(dst_key):
+            return {"error": "/public/ is a read-only directory"}
 
         content = self.vfs.storage.get_file_content(src_key)
         if content is not None:

@@ -608,8 +608,8 @@ const Auth = {
 
   setToken(token) {
     localStorage.setItem(this.JWT_KEY, token);
-    // 同时设置 cookie，供服务端页面路由认证使用
-    document.cookie = `feclaw_jwt=${token}; path=/; SameSite=Lax; max-age=${60*60*24*7}`;
+    // Q20/H10：不再用 document.cookie 写同名 cookie —— 那会让服务端的 HttpOnly 失效，
+    // 使任意子域 XSS 可读走会话 JWT。页面路由的 cookie 由服务端（HttpOnly）统一下发。
   },
 
   clearToken() {
