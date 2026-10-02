@@ -317,7 +317,13 @@ class OAuthService:
             "iat": datetime.utcnow(),
             "exp": datetime.utcnow() + timedelta(hours=settings.JWT_EXPIRE_HOURS)
         }
-        from utils.auth import attach_jwt_version
+        from utils.auth import (
+            attach_jwt_version,
+            TYP_CLAIM,
+            TOKEN_TYPE_SESSION,
+        )
+        # Q22 令牌分级：OAuth 本地会话令牌声明 typ
+        payload[TYP_CLAIM] = TOKEN_TYPE_SESSION
         attach_jwt_version(payload)
         return jwt.encode(payload, settings.JWT_SECRET, algorithm=settings.JWT_ALGORITHM)
 
@@ -327,7 +333,10 @@ class OAuthService:
             payload = jwt.decode(token, settings.JWT_SECRET, algorithms=[settings.JWT_ALGORITHM])
         except Exception:
             return None
-        from utils.auth import is_token_revoked
+        from utils.auth import is_token_revoked, assert_token_type, TOKEN_TYPE_SESSION
+        # Q22 令牌分级：会话入口拒绝非 session 类型
+        if not assert_token_type(payload, {TOKEN_TYPE_SESSION}):
+            return None
         if is_token_revoked(payload):
             return None
         return payload

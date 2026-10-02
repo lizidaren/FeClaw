@@ -120,15 +120,25 @@ class TOTPService:
             # 签发 JWT
             import jwt
             from datetime import timedelta
-            
+
             expires_at = datetime.utcnow() + timedelta(days=TOTPService.JWT_EXPIRE_DAYS)
             payload = {
                 "user_id": agent.user_id,
                 "agent_hash": agent.hash,
-                "auth_method": "totp",
+                "auth_method": "totp",   # 保留：审计 + 页面级子域校验用
                 "exp": expires_at,
                 "iat": datetime.utcnow()
             }
+            # Q22 令牌分级：TOTP 是**认证方式**而非令牌类型 —— 验证通过后签发标准
+            # 会话令牌（typ=session），get_current_user 才认它；同时携带 agent_hash
+            # 供 feclaw_domain.get_user_from_jwt 做页面级子域校验。
+            # 必须写 jwt_version，否则登出过的用户新签发的 token 会被误判为版本 0 而已失效。
+            from utils.auth import (
+                attach_jwt_version, TYP_CLAIM,
+                TOKEN_TYPE_SESSION,
+            )
+            payload[TYP_CLAIM] = TOKEN_TYPE_SESSION
+            attach_jwt_version(payload)
             token = jwt.encode(payload, settings.JWT_SECRET, algorithm="HS256")
             
             return {
@@ -153,14 +163,21 @@ class TOTPService:
         
         try:
             payload = jwt.decode(token, settings.JWT_SECRET, algorithms=["HS256"])
-            return {
-                "user_id": payload["user_id"],
-                "agent_hash": payload.get("agent_hash"),
-            }
         except jwt.ExpiredSignatureError:
             return None
         except jwt.InvalidTokenError:
             return None
+
+        # Q22 令牌分级：本入口是「页面/Agent 上下文」校验（SSO 会话 + TOTP 会话都合法），
+        # 只放行 session / totp，拒绝 agent / refresh 令牌。
+        from utils.auth import token_type, TOKEN_TYPE_SESSION, TOKEN_TYPE_TOTP
+        if token_type(payload) not in (TOKEN_TYPE_SESSION, TOKEN_TYPE_TOTP):
+            return None
+
+        return {
+            "user_id": payload["user_id"],
+            "agent_hash": payload.get("agent_hash"),
+        }
     
     @staticmethod
     def create_agent(user_id: int, name: str = "") -> AgentProfile:

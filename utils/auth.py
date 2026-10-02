@@ -120,6 +120,70 @@ def needs_rehash(password_hash: str) -> bool:
 
 
 # ==========================================
+# 令牌分级（Q22）
+# ==========================================
+#
+# 背景（审计 §7.13）：会话 / TOTP / Agent / 分享令牌曾共用同一个 JWT_SECRET、同为
+# HS256、且无 `typ`/`aud` 区分 —— `get_current_user*` 会接受**任何**带 `user_id`/`sub`
+# 的 HS256 token，导致 TOTP 令牌、Agent 令牌都能冒充会话令牌（审计 C2 的载体）。
+#
+# 方案：`typ` 声明 + 每个验证入口显式白名单（改动小、可回退），
+# 每种令牌只能通过它自己的验证入口：
+#   - 会话入口（utils.auth_dependencies._decode_or_none / oauth_service.verify_local_jwt）
+#       只放行 `session` 类型；
+#   - Agent 入口（agent_jwt_service.verify_agent_jwt）只放行 `agent`；
+#   - refresh 入口（oauth_helpers.decode_refresh_token）只放行 `refresh`；
+#   - 分享令牌不是 JWT（HMAC + 独立密钥 `share:{JWT_SECRET}`），天然隔离。
+#
+# 说明：本批只落地 `typ`，**未加 `aud`**。原因是 python-jose / PyJWT 在 decode 时
+# 一旦 payload 含 `aud` 就会自动校验 audience（未传 `audience=` 即报 "Invalid
+# audience"），需要在每个 decode 点补齐 `audience=` 管线；而四类令牌本就用同一把
+# JWT_SECRET 签名，`aud` 无法提供跨服务隔离收益，收益/风险不成比例，故省略。
+#
+# 兼容：旧令牌无 `typ`。`token_type()` 依据既有标记（`type` claim / `auth_method` /
+# `agent_hash`）回推旧令牌类型，保证老会话令牌不掉线、老 TOTP 令牌仍走 TOTP 语义。
+
+TOKEN_TYPE_SESSION = "session"
+TOKEN_TYPE_TOTP = "totp"
+TOKEN_TYPE_AGENT = "agent"
+TOKEN_TYPE_REFRESH = "refresh"
+
+TYP_CLAIM = "typ"
+
+
+def token_type(payload: Optional[Dict[str, Any]]) -> Optional[str]:
+    """判定令牌类型（Q22 唯一分类入口）。
+
+    新令牌直接读 `typ`；旧令牌（无 `typ`）按既有标记回推：
+      - `type == "agent_jwt"` → agent（旧 Agent 令牌）
+      - `type == "refresh"`   → refresh（旧 refresh 令牌）
+      - `type == "access"`    → session（OAuth access 令牌即会话令牌）
+      - `auth_method == "totp"` 或存在 `agent_hash` → totp（旧 TOTP 令牌）
+      - 其余（无任何标记）→ session（旧本地登录 / OAuth 会话令牌）
+    """
+    if not payload:
+        return None
+    typ = payload.get(TYP_CLAIM)
+    if typ in (TOKEN_TYPE_SESSION, TOKEN_TYPE_TOTP, TOKEN_TYPE_AGENT, TOKEN_TYPE_REFRESH):
+        return typ
+    legacy_type = payload.get("type")
+    if legacy_type == "agent_jwt":
+        return TOKEN_TYPE_AGENT
+    if legacy_type == "refresh":
+        return TOKEN_TYPE_REFRESH
+    if legacy_type == "access":
+        return TOKEN_TYPE_SESSION
+    if payload.get("auth_method") == "totp" or payload.get("agent_hash"):
+        return TOKEN_TYPE_TOTP
+    return TOKEN_TYPE_SESSION
+
+
+def assert_token_type(payload: Optional[Dict[str, Any]], allowed_types) -> bool:
+    """令牌类型是否落在白名单内（验证入口据此拒绝错误类型）。"""
+    return token_type(payload) in allowed_types
+
+
+# ==========================================
 # JWT处理
 # ==========================================
 
@@ -128,8 +192,12 @@ def create_jwt_token(data: Dict[str, Any], expires_delta: Optional[timedelta] = 
 
     自动写入 `jwt_version`（当前用户登出吊销版本号）—— 配套
     :func:`is_token_revoked` 校验，保证登出后旧 token 立即失效。
+
+    Q22：会话令牌强制声明 `typ=session`，杜绝被误当作其它类型。
     """
     to_encode = data.copy()
+    # Q22 令牌分级：会话令牌显式声明类型
+    to_encode[TYP_CLAIM] = TOKEN_TYPE_SESSION
 
     if expires_delta:
         expire = datetime.utcnow() + expires_delta

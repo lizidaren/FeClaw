@@ -19,7 +19,13 @@ from sqlalchemy.orm import Session
 
 from config import settings
 from models.database import User, get_db
-from utils.auth import decode_jwt_token, is_token_revoked, user_id_from_payload  # 低层原语，保持单点维护
+from utils.auth import (
+    decode_jwt_token,
+    is_token_revoked,
+    user_id_from_payload,  # 低层原语，保持单点维护
+    assert_token_type,
+    TOKEN_TYPE_SESSION,
+)
 
 
 _UNAUTHORIZED = HTTPException(
@@ -56,6 +62,10 @@ def _decode_or_none(token: str, db: Optional[Session] = None) -> Optional[dict]:
     """
     payload = decode_jwt_token(token)
     if payload is None:
+        return None
+    # Q22 令牌分级：会话入口只放行 session 类型，拒绝 TOTP/Agent/refresh 令牌。
+    # （旧令牌由 assert_token_type 按既有标记回推类型，老会话令牌不掉线。）
+    if not assert_token_type(payload, {TOKEN_TYPE_SESSION}):
         return None
     if is_token_revoked(payload, db=db):
         return None

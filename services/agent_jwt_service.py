@@ -51,7 +51,7 @@ class AgentJWTService:
         expire_time = datetime.utcnow() + timedelta(hours=expire_hours)
 
         payload = {
-            "type": "agent_jwt",
+            "type": "agent_jwt",   # 兼容旧字段（verify_agent_jwt 与旧调用方仍读它）
             "user_id": user_id,
             "agent_id": agent_id,
             "agent_hash": agent_hash,
@@ -60,6 +60,9 @@ class AgentJWTService:
             "exp": expire_time,
             "jti": secrets.token_hex(16)  # JWT ID，用于唯一标识
         }
+        # Q22 令牌分级：Agent 令牌是独立类型，声明 typ，会话入口据此拒绝它
+        from utils.auth import TYP_CLAIM, TOKEN_TYPE_AGENT
+        payload[TYP_CLAIM] = TOKEN_TYPE_AGENT
 
         return jwt.encode(payload, self.jwt_secret, algorithm=self.jwt_algorithm)
 
@@ -76,8 +79,9 @@ class AgentJWTService:
         try:
             payload = jwt.decode(token, self.jwt_secret, algorithms=[self.jwt_algorithm])
 
-            # 验证 token 类型
-            if payload.get("type") != "agent_jwt":
+            # Q22 令牌分级：Agent 入口只放行 agent 类型（兼容旧 `type=agent_jwt`）
+            from utils.auth import token_type, TOKEN_TYPE_AGENT
+            if token_type(payload) != TOKEN_TYPE_AGENT:
                 logger.warning("Token is not an agent JWT")
                 return None
 

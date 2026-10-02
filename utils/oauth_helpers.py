@@ -35,6 +35,10 @@ from utils.auth import (
     attach_jwt_version,
     is_token_revoked,
     user_id_from_payload,
+    token_type,
+    TYP_CLAIM,
+    TOKEN_TYPE_SESSION,
+    TOKEN_TYPE_REFRESH,
 )
 
 logger = logging.getLogger(__name__)
@@ -82,6 +86,8 @@ def sign_access_token(
         "iat": now,
         "exp": now + timedelta(hours=expire_hours),
     }
+    # Q22 令牌分级：OAuth access 即会话令牌
+    payload[TYP_CLAIM] = TOKEN_TYPE_SESSION
     # 登出吊销版本号：缺失会被 is_token_revoked 误判为已吊销，必须写
     attach_jwt_version(payload)
     return _encode_token(payload), expire_hours * 3600
@@ -102,6 +108,8 @@ def sign_refresh_token(user_id: int) -> Tuple[str, int]:
         "iat": now,
         "exp": now + timedelta(hours=expire_hours),
     }
+    # Q22 令牌分级：refresh 是独立类型，绝不能被会话入口接受
+    payload[TYP_CLAIM] = TOKEN_TYPE_REFRESH
     # 同上：refresh token 也必须携带吊销版本号，登出后不能再换新 access token
     attach_jwt_version(payload)
     return _encode_token(payload), expire_hours * 3600
@@ -117,7 +125,8 @@ def decode_refresh_token(token: str) -> Optional[int]:
     payload = _decode_token(token)
     if not payload:
         return None
-    if payload.get("type") != "refresh":
+    # Q22 令牌分级：refresh 入口只放行 refresh 类型（兼容旧 `type=refresh`）
+    if token_type(payload) != TOKEN_TYPE_REFRESH:
         logger.warning("[oauth_helpers] token type != 'refresh'")
         return None
     if is_token_revoked(payload):
