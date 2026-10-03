@@ -247,7 +247,7 @@
             '<div style="font-size:12px;color:#888;margin-bottom:6px;">\u5F15\u7528\u6807\u8BB0\uFF08\u5DF2\u81EA\u52A8\u590D\u5236\uFF09</div>' +
             '<div style="background:#1e1e1e;border:1px solid #555;border-radius:8px;padding:10px 14px;' +
             'font-family:monospace;font-size:14px;color:#7ecfff;word-break:break-all;cursor:pointer;" ' +
-            'id="feclaw-ref-token" onclick="navigator.clipboard.writeText(this.textContent).catch(()=>{})">' +
+            'id="feclaw-ref-token">' +
             refToken +
             '</div></div>' +
             // Instruction
@@ -283,6 +283,16 @@
 
         overlay.appendChild(modal);
         document.body.appendChild(overlay);
+
+        // 点击引用标记可再次复制（走统一 copyToClipboard，带降级 + 可见反馈）
+        var tokenEl = modal.querySelector("#feclaw-ref-token");
+        if (tokenEl) {
+            tokenEl.addEventListener("click", function () {
+                copyToClipboard(refToken).then(function (ok) {
+                    showErrorToast(ok ? "✅ 已复制" : "❌ 复制失败，请手动复制");
+                });
+            });
+        }
 
         // Click outside to close
         overlay.addEventListener("click", function (e) {

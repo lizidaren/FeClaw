@@ -224,7 +224,7 @@ async def _render_console_page(request: Request):
         <div class="header">
             <h1>🤖 Agent 管理</h1>
             <div class="header-actions">
-                <button class="btn btn-secondary" onclick="window.location.href='/chat'">💬 聊天</button>
+                <button class="btn btn-secondary" onclick="window.location.href='/dashboard'">📊 仪表盘</button>
                 <button class="btn btn-primary" onclick="window.location.href='/console/agents/new'">➕ 创建 Agent</button>
             </div>
         </div>

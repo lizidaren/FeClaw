@@ -207,7 +207,7 @@ async def setup_page(
     )
 
 
-INVALID_TOKEN_HTML = """<!DOCTYPE html><html lang=zh-CN><head><meta charset=utf-8><title>无效令牌</title><style>body{background:#050510;color:#e0e0e0;display:flex;align-items:center;justify-content:center;min-height:100vh;font-family:sans-serif;text-align:center;margin:0}h1{color:#f87171;font-size:2em}p{color:#888;margin-top:12px}.hint{color:#666;font-size:0.9em;margin-top:8px}a{color:#667eea}</style></head><body><div><h1>🔒 无效的配置令牌</h1><p>请使用控制台打印的完整 URL 访问</p><p class=hint>首次启动时管理地址会打印在终端中</p></div></body></html>"""
+INVALID_TOKEN_HTML = """<!DOCTYPE html><html lang=zh-CN><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>无效令牌</title><style>body{background:#050510;color:#e0e0e0;display:flex;align-items:center;justify-content:center;min-height:100vh;font-family:sans-serif;text-align:center;margin:0}h1{color:#f87171;font-size:2em}p{color:#888;margin-top:12px}.hint{color:#666;font-size:0.9em;margin-top:8px}a{color:#667eea}</style></head><body><div><h1>🔒 无效的配置令牌</h1><p>请使用控制台打印的完整 URL 访问</p><p class=hint>首次启动时管理地址会打印在终端中</p></div></body></html>"""
 
 
 def _get_templates():

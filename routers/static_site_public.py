@@ -95,7 +95,7 @@ NOT_FOUND_TEMPLATE = """<!DOCTYPE html>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>404 - 页面未找到</title>
     <style>
-        body {{
+        body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
             display: flex;
             align-items: center;
@@ -104,24 +104,24 @@ NOT_FOUND_TEMPLATE = """<!DOCTYPE html>
             margin: 0;
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             color: white;
-        }}
-        .container {{
+        }
+        .container {
             text-align: center;
             padding: 40px;
-        }}
-        h1 {{
+        }
+        h1 {
             font-size: 120px;
             margin: 0;
             text-shadow: 2px 2px 4px rgba(0,0,0,0.2);
-        }}
-        p {{
+        }
+        p {
             font-size: 24px;
             margin: 20px 0;
-        }}
-        a {{
+        }
+        a {
             color: white;
             text-decoration: underline;
-        }}
+        }
     </style>
 </head>
 <body>
@@ -142,7 +142,7 @@ FECLAW_NOT_FOUND_TEMPLATE = """<!DOCTYPE html>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>404 - 页面未找到 - FeClaw</title>
     <style>
-        body {{
+        body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
             display: flex;
             align-items: center;
@@ -151,33 +151,33 @@ FECLAW_NOT_FOUND_TEMPLATE = """<!DOCTYPE html>
             margin: 0;
             background: linear-gradient(135deg, #0f0f23 0%, #1a1a2e 100%);
             color: #e0e0e0;
-        }}
-        .container {{
+        }
+        .container {
             text-align: center;
             padding: 40px;
-        }}
-        .logo-icon {{
+        }
+        .logo-icon {
             width: 80px; height: 80px;
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             border-radius: 20px;
             display: inline-flex; align-items: center; justify-content: center;
             font-size: 36px;
             margin-bottom: 24px;
-        }}
-        h1 {{
+        }
+        h1 {
             font-size: 72px;
             margin: 0;
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
             background-clip: text;
-        }}
-        p {{
+        }
+        p {
             font-size: 18px;
             margin: 16px 0 32px;
             color: #888;
-        }}
-        a {{
+        }
+        a {
             display: inline-block;
             padding: 12px 32px;
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
@@ -186,8 +186,8 @@ FECLAW_NOT_FOUND_TEMPLATE = """<!DOCTYPE html>
             border-radius: 8px;
             font-size: 15px;
             transition: opacity 0.2s;
-        }}
-        a:hover {{ opacity: 0.9; }}
+        }
+        a:hover { opacity: 0.9; }
     </style>
 </head>
 <body>
@@ -209,7 +209,7 @@ SUSPENDED_TEMPLATE = """<!DOCTYPE html>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>站点已暂停</title>
     <style>
-        body {{
+        body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
             display: flex;
             align-items: center;
@@ -218,19 +218,19 @@ SUSPENDED_TEMPLATE = """<!DOCTYPE html>
             margin: 0;
             background: linear-gradient(135deg, #f5af19 0%, #f12711 100%);
             color: white;
-        }}
-        .container {{
+        }
+        .container {
             text-align: center;
             padding: 40px;
-        }}
-        h1 {{
+        }
+        h1 {
             font-size: 48px;
             margin: 0;
-        }}
-        p {{
+        }
+        p {
             font-size: 20px;
             margin: 20px 0;
-        }}
+        }
     </style>
 </head>
 <body>

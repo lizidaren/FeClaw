@@ -126,7 +126,7 @@ class FeHubService:
                     {"path": "/", "type": "static", "file": "index.html"}
                 ]
             }, ensure_ascii=False, indent=2),
-            "index.html": f"<!DOCTYPE html>\n<html lang=\"zh\">\n<head>\n<meta charset=\"UTF-8\">\n<title>{app_name}</title>\n</head>\n<body>\n<h1>{app_name}</h1>\n<p>Hello from FeHub!</p>\n</body>\n</html>",
+            "index.html": f"<!DOCTYPE html>\n<html lang=\"zh\">\n<head>\n<meta charset=\"UTF-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n<title>{app_name}</title>\n</head>\n<body>\n<h1>{app_name}</h1>\n<p>Hello from FeHub!</p>\n</body>\n</html>",
         }
 
     async def _copy_template(self, target: str, template_path: str) -> str:

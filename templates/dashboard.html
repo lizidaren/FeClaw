@@ -647,51 +647,7 @@
             }
         }
 
-        async function loadConversations() {
-            const token = localStorage.getItem('feclaw_jwt');
-            const container = document.getElementById('recent-conversations');
-            // 该容器在模板中不存在（历史遗留）⇒ 无落脚点直接跳过，避免每次进页面抛未捕获 TypeError
-            if (!container) return;
-            try {
-                const resp = await fetch('/api/chat/sessions', {
-                    headers: { 'Authorization': `Bearer ${token}` }
-                });
-                const sessions = await resp.json();
-                container.innerHTML = '';
-                if (!sessions || sessions.length === 0) {
-                    container.innerHTML = '<p class="text-muted" style="text-align:center;padding:2rem;">暂无对话记录</p>';
-                    return;
-                }
-                sessions.slice(0, 5).forEach(s => {
-                    const item = document.createElement('a');
-                    item.href = `/chat?session=${s.session_id}`;
-                    item.className = 'glass-card glass-card-sm hover-lift flex justify-between items-center';
-                    const initials = (s.topic || 'CH').substring(0, 2).toUpperCase();
-                    const updated = s.updated_at ? new Date(s.updated_at).toLocaleDateString('zh-CN') : '';
-                    item.innerHTML = `
-                        <div class="flex items-center gap-md">
-                            <div class="avatar avatar-sm">${initials}</div>
-                            <div>
-                                <p class="text-primary">${escapeHtml((s.last_message || s.topic || '对话').substring(0, 30))}</p>
-                                <p class="text-muted" style="font-size: var(--text-xs);">${updated}</p>
-                            </div>
-                        </div>
-                        <span class="glass-badge glass-badge-blue">${s.message_count || 0} 条</span>`;
-                    container.appendChild(item);
-                });
-            } catch(e) {
-                container.innerHTML = '<p class="text-muted" style="text-align:center;padding:2rem;">对话数据加载失败</p>';
-            }
-        }
-
-        function escapeHtml(text) {
-            const div = document.createElement('div');
-            div.textContent = text;
-            return div.innerHTML;
-        }
-
         loadAgents();
-        loadConversations();
     </script>
 </body>
 </html>

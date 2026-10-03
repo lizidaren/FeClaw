@@ -354,7 +354,7 @@
                     <div id="shareLinkResult" style="display:none;margin-top:10px;padding:12px;background:#0f0f1a;border-radius:8px;">
                         <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
                             <input type="text" id="shareLinkInput" readonly aria-label="分享链接" style="flex:1;padding:8px 10px;background:#1a1a2e;border:1px solid #2a2a4a;border-radius:6px;color:#667eea;font-size:13px;">
-                            <button class="btn btn-sm btn-outline" onclick="navigator.clipboard.writeText(document.getElementById('shareLinkInput').value).then(()=>showToast('已复制'))" style="white-space:nowrap;">复制</button>
+                            <button class="btn btn-sm btn-outline" onclick="copyShareLink()" style="white-space:nowrap;">复制</button>
                         </div>
                         <p style="color:#888;font-size:12px;">扫码登录 <span id="shareCode" style="color:#e0e0e0;font-weight:600;"></span> · 5 分钟内有效</p>
                     </div>
@@ -498,14 +498,6 @@
                 document.getElementById('statStatus').textContent = data.status === 'initialized' ? '已初始化' : '待初始化';
                 document.getElementById('statCreated').textContent = data.created_at || '-';
                 document.getElementById('agentName').value = data.name || '';
-                // 模板里没有 agentDescription 元素（历史遗留）⇒ 空守卫，避免每次进页面抛 TypeError
-                const descEl = document.getElementById('agentDescription');
-                if (descEl) {
-                    descEl.value = '';
-                    if (data.user_id) descEl.placeholder = 'Agent #' + data.user_id;
-                }
-                // Try loading description from settings
-                
             } catch (e) {
                 console.error('Failed to load profile:', e);
             }
@@ -736,6 +728,40 @@
                     }
                 }
             } catch(e) { console.error('Failed to load TOTP info:', e); }
+        }
+
+        // F5：复制分享链接 —— clipboard API 不可用/失败时降级 execCommand('copy')，并给出可见反馈
+        function copyShareLink() {
+            const input = document.getElementById('shareLinkInput');
+            const text = input ? (input.value || '').trim() : '';
+            if (!text) { showToast('没有可复制的链接', true); return; }
+
+            function fallbackCopy() {
+                try {
+                    const ta = document.createElement('textarea');
+                    ta.value = text;
+                    ta.setAttribute('readonly', '');
+                    ta.style.position = 'fixed';
+                    ta.style.left = '-9999px';
+                    document.body.appendChild(ta);
+                    ta.select();
+                    ta.setSelectionRange(0, ta.value.length);
+                    const ok = document.execCommand('copy');
+                    document.body.removeChild(ta);
+                    if (ok) { showToast('已复制'); } else { showToast('复制失败，请手动复制', true); }
+                } catch (e) {
+                    showToast('复制失败，请手动复制', true);
+                }
+            }
+
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(text).then(
+                    function () { showToast('已复制'); },
+                    function () { fallbackCopy(); }
+                );
+            } else {
+                fallbackCopy();
+            }
         }
 
         async function generateShareLink() {
