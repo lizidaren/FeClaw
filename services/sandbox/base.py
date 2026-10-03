@@ -204,6 +204,12 @@ SECCOMP_RET_TRAP = 0x00030000
 # Errno for denied syscalls
 EPERM = 1
 
+# socket(2) 第一个参数：地址家族。G3 只放行 AF_UNIX（VFS 回环 API 用），
+# 阻断 AF_INET(2)/AF_INET6(10) 等真实网络套接字。
+AF_UNIX = 1
+AF_INET = 2
+AF_INET6 = 10
+
 # AUDIT_ARCH_X86_64
 AUDIT_ARCH_X86_64 = 0xC000003E
 
@@ -291,10 +297,12 @@ def _create_seccomp_bpf() -> Optional[bytes]:
         SYS_GETTIMEOFDAY, SYS_CLOCK_GETTIME, SYS_CLOCK_GETRES,
         SYS_TIMES, SYS_TIME,
         SYS_CAPGET, SYS_CAPSET,
-        # Socket syscalls（VFS 回环 API 需要）。注意：沙箱并不保证网络隔离 ——
+        # Socket syscalls（VFS 回环 API 需要）。SYS_SOCKET 单独处理（G3）：只放行
+        # AF_UNIX，阻断 AF_INET/AF_INET6 等真实网络套接字；其余 socket 操作保持
+        # 白名单（它们只能作用于已创建的 AF_UNIX fd）。注意：沙箱仍不保证网络隔离 ——
         # 网络隔离依赖外置 setuid helper + feclaw-sandbox netns；helper 缺失时
         # 沙箱与宿主共享网络命名空间（见 sandbox_manager 的 H5 诚实文案）。
-        SYS_SOCKET, SYS_CONNECT, SYS_ACCEPT, SYS_ACCEPT4,
+        SYS_CONNECT, SYS_ACCEPT, SYS_ACCEPT4,
         SYS_BIND, SYS_LISTEN, SYS_GETSOCKNAME, SYS_GETPEERNAME,
         SYS_SENDMSG, SYS_RECVMSG, SYS_SENDTO, SYS_RECVFROM,
         SYS_SENDMMSG, SYS_RECVMMSG,
@@ -326,18 +334,31 @@ def _create_seccomp_bpf() -> Optional[bytes]:
     insns.append(_build_bpf(BPF_LD | BPF_W | BPF_ABS, 0, 0, 0))
 
     # [4..N+3] 白名单 JEQ 链
-    #   ALLOW 在索引 N+5，当前索引 4+k
-    #   jt = (N+5) - (4+k) - 1 = N - k
+    #   ALLOW 在索引 N+9，当前索引 4+k
+    #   jt = (N+9) - (4+k) - 1 = N + 4 - k
     for k, nr in enumerate(allowed_list):
-        insns.append(_build_bpf(BPF_JMP | BPF_JEQ, N - k, 0, nr))
+        insns.append(_build_bpf(BPF_JMP | BPF_JEQ, N + 4 - k, 0, nr))
 
-    # [N+4] 默认 ERRNO(EPERM)
+    # [N+4] SYS_SOCKET 特殊分支（G3）：命中 socket() → 跳到 [N+6] 检查 domain；
+    #   否则落到 [N+5] 默认拒绝
+    insns.append(_build_bpf(BPF_JMP | BPF_JEQ, 1, 0, SYS_SOCKET))
+
+    # [N+5] 默认 ERRNO(EPERM)
     insns.append(_build_bpf(BPF_RET, 0, 0, SECCOMP_RET_ERRNO | EPERM))
 
-    # [N+5] ALLOW
+    # [N+6] LD socket domain（seccomp_data.arg0 @ offset 16）
+    insns.append(_build_bpf(BPF_LD | BPF_W | BPF_ABS, 0, 0, 16))
+
+    # [N+7] JEQ AF_UNIX → 跳到 [N+9] ALLOW；否则落到 [N+8] 拒绝
+    insns.append(_build_bpf(BPF_JMP | BPF_JEQ, 1, 0, AF_UNIX))
+
+    # [N+8] 非 AF_UNIX socket → ERRNO(EPERM)
+    insns.append(_build_bpf(BPF_RET, 0, 0, SECCOMP_RET_ERRNO | EPERM))
+
+    # [N+9] ALLOW
     insns.append(_build_bpf(BPF_RET, 0, 0, SECCOMP_RET_ALLOW))
 
-    assert len(insns) == N + 6, f"BPF instruction count mismatch: {len(insns)} != {N + 6}"
+    assert len(insns) == N + 10, f"BPF instruction count mismatch: {len(insns)} != {N + 10}"
     assert len(insns) < 4096, f"BPF too large: {len(insns)} instructions"
 
     return b"".join(insns)

@@ -26,12 +26,12 @@ from services.web_channel_service import (
     SessionNotFoundError,
     WebChannelService,
 )
-from utils.auth import decode_jwt_token
 from utils.agent_access import (
     get_agent_scoped_user_id,
     require_totp_scope,
     extract_agent_token,
     totp_scoped_agent_hash,
+    resolve_user_id_from_token,
 )
 
 
@@ -540,33 +540,49 @@ async def chat_websocket(websocket: WebSocket):
         await websocket.close(code=4001)
         return
 
-    payload = decode_jwt_token(token)
-    if not payload or not payload.get("user_id"):
-        await websocket.send_json({"type": "error", "code": "AUTH_ERROR", "message": "令牌无效或已过期"})
-        await websocket.close(code=4001)
-        return
-
-    user_id: int = payload["user_id"]
     # 从 Host header 提取子域名 agent_hash（必须显式指定）
     host = websocket.headers.get("host", "")
     agent_hash = extract_hash_from_host(host) if host else None
     # 主域名 / 纯 IP 下从 query param 获取 agent_hash
     if not agent_hash:
         agent_hash = websocket.query_params.get("agent_hash") or None
-    db = SessionLocal()
 
     # 🔒 安全校验：验证 user 是否拥有该 agent（防止 subdomain 劫持）
     if not agent_hash:
         await websocket.send_json({"type": "error", "code": "AGENT_REQUIRED", "message": "必须通过 Agent 子域名访问 WebSocket"})
         await websocket.close(code=4004)
         return
+
+    db = SessionLocal()
+
+    # FIX-F B1：与 HTTP 会话入口对齐的三重校验（此前只 decode + 判 user_id，导致
+    # ① typ=agent 的 Agent JWT 被当会话令牌放行 ② TOTP 令牌能越界连到该用户任意
+    # Agent ③ 登出后旧令牌可用到过期）。现复用 utils/agent_access 现成实现：
+    # ① typ 判定（session/totp 放行，agent/refresh 拒绝）+ ② 登出吊销（jwt_version）。
+    user_id: int = resolve_user_id_from_token(token, db=db)
+    if user_id is None:
+        db.close()
+        await websocket.send_json({"type": "error", "code": "AUTH_ERROR", "message": "令牌无效或已过期"})
+        await websocket.close(code=4001)
+        return
+
+    # ③ TOTP 令牌的 Agent 作用域：只授权某 Agent 的 totp 令牌不能连到其他 Agent。
+    scope = totp_scoped_agent_hash(token)
+    if scope is not None and scope != agent_hash:
+        db.close()
+        await websocket.send_json({"type": "error", "code": "FORBIDDEN", "message": "Token scoped to a different agent"})
+        await websocket.close(code=4003)
+        return
+
     from models.agent_profile import AgentProfile
     agent = db.query(AgentProfile).filter(AgentProfile.hash == agent_hash).first()
     if not agent:
+        db.close()
         await websocket.send_json({"type": "error", "code": "AGENT_NOT_FOUND", "message": "Agent 不存在"})
         await websocket.close(code=4004)
         return
-    if agent.user_id != user_id:
+    if str(agent.user_id) != str(user_id):
+        db.close()
         await websocket.send_json({"type": "error", "code": "FORBIDDEN", "message": "无权访问此 Agent"})
         await websocket.close(code=4003)
         return

@@ -1889,7 +1889,9 @@ class WeChatService:
                 raise Exception("Blocked media URL (SSRF policy): {!r}".format(media_url[:120]))
 
         session = await self._get_session()
-        async with session.get(media_url) as resp:
+        # FIX-F G2：aiohttp 默认跟随重定向（max_redirects=10），公网 URL 302 到内网
+        # 即可绕过上面的校验器。改为不跟随，把「非 200」当作失败（fail-closed）。
+        async with session.get(media_url, allow_redirects=False) as resp:
             if resp.status != 200:
                 raise Exception("Failed to download media: {}".format(resp.status))
             return await resp.read()
@@ -1917,9 +1919,15 @@ class WeChatService:
         else:
             raise ValueError("No download URL or encrypt_query_param")
 
+        # FIX-F G2：出站前统一过公网 URL 校验（防 SSRF）。`media.download_url` 来自
+        # 微信入站媒体对象（可被影响），此前直接请求，可打到内网/云元数据。
+        from utils.url_validation import validate_public_http_url
+        if not validate_public_http_url(download_url):
+            raise RuntimeError("Blocked CDN media URL (SSRF policy)")
+
         timeout = aiohttp.ClientTimeout(total=30)
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(download_url) as resp:
+            async with session.get(download_url, allow_redirects=False) as resp:
                 if resp.status >= 400:
                     raise RuntimeError(f"CDN download failed: HTTP {resp.status}")
                 ciphertext = await resp.read()

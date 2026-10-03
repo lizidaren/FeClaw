@@ -51,8 +51,14 @@ async def download_wechat_image_from_media(media, aes_key_override: str | None =
 
     timeout = aiohttp.ClientTimeout(total=30)
 
+    # FIX-F G2：出站前统一过公网 URL 校验（防 SSRF）+ 不跟随重定向。`media.download_url`
+    # 来自微信入站媒体对象（可被影响），此前直接请求，可打到内网/云元数据。
+    from utils.url_validation import validate_public_http_url
+    if not validate_public_http_url(download_url):
+        raise RuntimeError("Blocked CDN media URL (SSRF policy)")
+
     async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.get(download_url) as resp:
+        async with session.get(download_url, allow_redirects=False) as resp:
             if resp.status >= 400:
                 raise RuntimeError(f"CDN download failed: HTTP {resp.status}")
             ciphertext = await resp.read()

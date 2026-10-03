@@ -155,7 +155,7 @@ class Settings(BaseSettings):
     # 豆包 / 火山引擎配置
     DOUBAO_BASE_URL: str = "https://ark.cn-beijing.volces.com/api/v3"
     DOUBAO_SEEDREAM_MODEL: str = "doubao-seedream-5-0-260128"
-    COOKIE_SECURE: Optional[bool] = None  # JWT cookie secure 标志；None=自动检测 HTTPS（推荐），显式 True/False 可覆盖
+    COOKIE_SECURE: Optional[bool] = None  # JWT cookie secure 标志；None=自动检测 HTTPS（推荐）；True=强制；False=仅非 HTTPS 时不设（HTTPS 仍 secure，G7）
 
     # Session Memory 配置
     SESSION_MEMORY_ENABLED: bool = True

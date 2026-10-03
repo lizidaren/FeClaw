@@ -20,6 +20,23 @@ from services.tools.base import AgentToolsServiceBase, tool
 
 logger = logging.getLogger(__name__)
 
+
+def _build_node_env(chrome: str) -> dict:
+    """构建 Node 子进程最小环境白名单（FIX-F G4：绝不透传完整 os.environ）。
+
+    对齐 FIX-C bwrap `env -i` 的做法：只给 node + Playwright Chromium 运行必需的
+    PATH/HOME/LANG/LC_ALL 与 CHROME 路径，JWT_SECRET / DATABASE_URL / 各家 API Key
+    一律不进入子进程。此前 `os.environ.copy()` 会把全部服务端密钥泄露给处理用户
+    HTML 的 node 进程。
+    """
+    return {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "HOME": os.environ.get("HOME", "/tmp"),
+        "LANG": os.environ.get("LANG", "C.UTF-8"),
+        "LC_ALL": os.environ.get("LC_ALL", "C.UTF-8"),
+        "CHROME": chrome,
+    }
+
 # html2pptx 脚本路径
 _SCRIPT_DIR = Path(__file__).resolve().parent.parent.parent / "scripts"
 _HTML2PPTX_SCRIPT = _SCRIPT_DIR / "html2pptx" / "html2pptx.py"
@@ -183,8 +200,7 @@ class PptxToolsMixin(AgentToolsServiceBase):
         os.makedirs(slides_dir, exist_ok=True)
 
         # 截图
-        env = os.environ.copy()
-        env["CHROME"] = chrome
+        env = _build_node_env(chrome)
         result = subprocess.run(
             ["node", script, "--input", str(html_path), "--output", slides_dir],
             capture_output=True, text=True, timeout=120, env=env,

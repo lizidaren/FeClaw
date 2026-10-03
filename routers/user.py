@@ -781,17 +781,19 @@ async def login_user(
             "redirect": redirect_to,
         })
         # 自动检测是否应设置 secure cookie：
-        # - COOKIE_SECURE 显式配置时直接使用
-        # - 否则自动检测：HTTPS 请求或 CDN 转发 (X-Forwarded-Proto)
-        # - 本地 HTTP 开发 → secure=False
+        # - HTTPS 请求或 CDN 转发 (X-Forwarded-Proto) → 永远 secure
+        # - COOKIE_SECURE 显式 true 时强制 secure（哪怕 HTTP）
+        # - COOKIE_SECURE 显式 false 只对「非 HTTPS」生效：本地 HTTP 开发 → secure=False
+        #   （FIX-F G7：false 不再能把生产 HTTPS 会话降级为明文传输）
+        _is_https = (
+            str(request.url.scheme) == "https"
+            or request.headers.get("x-forwarded-proto", "").lower() == "https"
+        )
         _cookie_secure = getattr(settings, "COOKIE_SECURE", None)
         if _cookie_secure is not None:
-            _is_secure = _cookie_secure
+            _is_secure = bool(_cookie_secure) or _is_https
         else:
-            _is_secure = (
-                str(request.url.scheme) == "https"
-                or request.headers.get("x-forwarded-proto", "").lower() == "https"
-            )
+            _is_secure = _is_https
         resp.set_cookie(
             key="feclaw_jwt",
             value=token,

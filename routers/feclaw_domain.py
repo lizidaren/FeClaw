@@ -423,15 +423,17 @@ async def verify_totp(request: TOTPVerifyRequest, req: Request):
         pass  # HTTPException already imported at module level
         raise HTTPException(status_code=401, detail="Invalid or expired TOTP code")
 
-    # 与 /api/user/login 相同的 secure 自动探测
+    # 与 /api/user/login 相同的 secure 自动探测（FIX-F G7：HTTPS 请求永远 secure，
+    # COOKIE_SECURE=false 只对非 HTTPS 生效，避免把生产 HTTPS 会话降级为明文传输）。
+    _is_https = (
+        str(req.url.scheme) == "https"
+        or req.headers.get("x-forwarded-proto", "").lower() == "https"
+    )
     _cookie_secure = getattr(settings, "COOKIE_SECURE", None)
     if _cookie_secure is not None:
-        _is_secure = bool(_cookie_secure)
+        _is_secure = bool(_cookie_secure) or _is_https
     else:
-        _is_secure = (
-            str(req.url.scheme) == "https"
-            or req.headers.get("x-forwarded-proto", "").lower() == "https"
-        )
+        _is_secure = _is_https
     resp = JSONResponse(content=TOTPVerifyResponse(**result).model_dump())
     resp.set_cookie(
         key="feclaw_jwt",

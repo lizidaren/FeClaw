@@ -209,9 +209,13 @@ class TestWechatBaseUrl:
                 headers={"Authorization": f"Bearer {token}"},
             )
         assert resp.status_code == 200
-        # 客户端提交的 base_url 必须被忽略，改用服务端配置（空 ⇒ SDK 回退官方端点）
+        # 客户端提交的 base_url 必须被忽略，改用服务端配置。
+        # FIX-F G5（测试/代码漂移）：2026-10-02 代码已把空配置回退到官方端点
+        # ILINK_API_BASE（修复 -14 session timeout），安全属性不变（仍忽略客户端提交值）。
+        # 旧断言 `== (settings.WECHAT_ILINK_BASE_URL or "")` 期望落库空串，已过时。
+        from services.wechat.models import ILINK_API_BASE
         assert saved.get("base_url") != "http://attacker.com/evil"
-        assert saved.get("base_url") == (settings.WECHAT_ILINK_BASE_URL or "").strip()
+        assert saved.get("base_url") == (settings.WECHAT_ILINK_BASE_URL or ILINK_API_BASE).strip()
 
 
 # ======================================================================

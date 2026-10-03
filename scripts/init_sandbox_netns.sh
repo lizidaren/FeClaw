@@ -14,7 +14,7 @@ HOST_VETH="fl-host"
 SANDBOX_VETH="fl-sbx"
 CHAIN="FECLAW-SBX-FWD"
 SANDBOX_NET="10.200.0.0/24"
-PRIVATE_NETS=("10.0.0.0/8" "172.16.0.0/12" "192.168.0.0/16" "127.0.0.0/8" "100.64.0.0/10")
+PRIVATE_NETS=("10.0.0.0/8" "172.16.0.0/12" "192.168.0.0/16" "127.0.0.0/8" "100.64.0.0/10" "169.254.0.0/16")
 
 # ── 1. Create netns ──
 if ! ip netns list | grep -q "$NETNS_NAME"; then
