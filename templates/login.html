@@ -355,12 +355,14 @@
             }
         })();
 
-        var oauthConfigured = {{ 'true' if oauth_configured else 'false' }};
+        var oauthEnabled = {{ 'true' if oauth_enabled else 'false' }};
         var oauthLoginUrl = '{{ oauth_login_url }}';
 
-        // 判断 OAuth 是否已配
-        if (!oauthConfigured) {
-            // 未配 OAuth → 直接显示本地登录
+        // 判断 OAuth 是否已启用（FIX-I：原用 oauth_configured，只表示"provider_url 非空"，
+        // 与后端 oauth_enabled = oauth_configured and settings.OAUTH_ENABLED 不一致
+        // ⇒ 本地设了 OAUTH_PROVIDER_URL 但未设 OAUTH_ENABLED 时，前端会错误地自动跳 OAuth，本地登录不可达）
+        if (!oauthEnabled) {
+            // 未启用 OAuth → 直接显示本地登录
             document.getElementById('oauthSection').style.display = 'none';
             document.getElementById('localLoginSection').style.display = 'block';
         } else {

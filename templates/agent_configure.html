@@ -1495,7 +1495,8 @@
 
             document.getElementById('diffModal').style.display = 'flex';
             // FIX-D：打开后聚焦到「批准更改」按钮，键盘用户不逃逸
-            const applyBtn = document.getElementById('diffApplyBtn');
+            // FIX-I：此处原为重声明 `const applyBtn`（与上方同一作用域）⇒ SyntaxError ⇒ 整块 <script> 解析失败
+            //         （表现为：配置页「加载中...」不动、保存/完成初始化点了没反应）⇒ 改为复用上方已声明的变量
             if (applyBtn) applyBtn.focus();
         }
 
