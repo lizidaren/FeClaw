@@ -1,0 +1,15 @@
+# FeClaw 开发/测试依赖（N24：安全回归套件可跑入口）
+# 安装：pip install -r requirements.txt -r requirements-dev.txt
+# FUSE 压测/挂载测试另需 requirements-fuse.txt + 系统 libfuse3（见该文件说明）；
+# 缺 trio/pyfuse3 时 scripts/run_security_tests.sh 会自动忽略相关文件，不影响其余套件。
+
+pytest>=8.0.0
+pytest-asyncio>=0.24.0
+
+# pytest.mark.anyio（tests/test_message_compactor.py 用）—— anyio 的 pytest 插件随包自带
+anyio>=4.0.0
+
+# trio：services/vfs_fuse_daemon.py:1068 有未保护的模块级 `import trio`，
+# tests/test_fuse_mount.py / tests/stress_test.py 会模块级 import 它。
+# 缺 trio 时整套收集会失败；装齐则全套可跑（见 run_security_tests.sh 的自动降级）。
+trio>=0.25.0

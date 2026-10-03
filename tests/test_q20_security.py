@@ -135,7 +135,11 @@ class TestBwrapClearenv:
         from services.sandbox_manager import SandboxManager
         mgr = object.__new__(SandboxManager)
         mgr._is_fuse_ready = MagicMock(return_value=False)
-        cmd = mgr._build_bwrap_command("/tmp/x.py", None)
+        # FIX-E（复审残余）：netns 缺失时 builder 现在直接 raise（fail-closed）。
+        # 本测试只验「clearenv 等价 env -i」前缀，故 mock 出可用 netns 前缀再断言。
+        with patch("services.sandbox_manager.NetworkIsolationManager.get_netns_prefix",
+                   return_value=["/usr/local/libexec/feclaw/helper"]):
+            cmd = mgr._build_bwrap_command("/tmp/x.py", None)
         # 本机 bwrap 0.4.0 不支持 --clearenv，改由 env -i 前缀实现等价 clearenv
         assert "/usr/bin/env" in cmd
         assert "-i" in cmd

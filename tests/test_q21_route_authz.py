@@ -11,6 +11,7 @@ Q21 路由级授权测试矩阵（审计 §7.15 要求）
 目的是卡住审计 §7 结论：这类越权回归必须由测试卡住。
 """
 import pytest
+import re
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 
@@ -25,8 +26,11 @@ def client():
 # ======================================================================
 # 1. 匿名白名单 —— 逐条理由
 # ======================================================================
-# 每个条目：(methods 集合或 None=任意方法, 路径前缀/精确路径, 理由)
-# 匹配规则：先精确匹配 (method, path)，再前缀匹配（path.startswith(prefix)）。
+# 每个条目：(methods 集合或 None=任意方法, 精确路径, 理由)
+# 匹配规则：**只做精确匹配** (method, path)。N23 修复：旧版用
+#   `path == prefix or path.startswith(prefix)`，其中 ("/", ...) 条目会让
+#   所有以 / 开头的路径（即全部路由）被前缀命中 ⇒ GET 回归永远测不到。
+# 现全部按路由模板精确逐条枚举，缺一条即被矩阵抓出来。
 ANON_WHITELIST = [
     # --- 存活探针 / 健康检查（无需鉴权，仅返回进程状态）---
     ({"GET"}, "/health", "liveness probe（main.py 显式定义，返回 {'status':'healthy'}）"),
@@ -43,19 +47,34 @@ ANON_WHITELIST = [
     ({"POST"}, "/api/workspace/totp/verify", "workspace TOTP 持有即认证"),
 
     # --- OAuth/OIDC 握手（外部 IdP 重定向回调，state 校验 + PKCE）---
-    (None, "/api/oauth/", "OAuth login/callback/exchange/refresh/mobile-login/logout 握手端点"),
+    ({"GET"}, "/api/oauth/callback", "OAuth 回调（state 校验 + PKCE）"),
+    ({"POST"}, "/api/oauth/exchange", "OAuth code 换 token（PKCE）"),
+    ({"GET"}, "/api/oauth/login", "OAuth 登录跳转入口"),
+    ({"GET", "POST"}, "/api/oauth/logout", "OAuth 登出（幂等）"),
+    ({"GET"}, "/api/oauth/me", "OAuth 用户信息（无有效 cookie 不返回数据）"),
+    ({"GET"}, "/api/oauth/mobile-login", "移动端 OAuth 登录入口"),
+    ({"POST"}, "/api/oauth/refresh", "OAuth refresh token 刷新"),
+
     # --- 登出（幂等：匿名调用也只清 cookie 返回 ok，不泄露数据）---
     ({"POST"}, "/api/auth/logout", "登出幂等：匿名调用仍返回 ok 并清 cookie，无数据泄露"),
     ({"GET"}, "/api/auth/options", "返回登录方式清单（非敏感）"),
     ({"GET"}, "/api/auth/sync", "Cookie SSO 中继，无有效 cookie 不返回数据"),
 
     # --- 分享链接（slug/token 本身就是凭据；密码门禁 H18）---
-    (None, "/s/", "公开分享短链，token 即凭据 + 可选密码（H18）"),
-    (None, "/share/", "公开分享 token 链接，token 即凭据 + 可选密码（H18）"),
-    (None, "/api/share/reference", "分享引用令牌即凭据，按 IP 限流（创建需携带合法 share_hash）"),
+    ({"GET"}, "/s/{slug}", "公开分享短链，token 即凭据 + 可选密码（H18）"),
+    ({"GET"}, "/share/{token}", "公开分享 token 链接，token 即凭据 + 可选密码（H18）"),
+    ({"POST"}, "/api/share/reference", "创建分享引用令牌即凭据，按 IP 限流（需合法 share_hash）"),
+    ({"GET"}, "/api/share/reference/{ref_hash}", "按引用令牌拉取片段（token 即凭据）"),
 
     # --- 沙箱内部 VFS（128-bit 随机 token 走 query + MySQL 查表，无 token 返回良性空响应）---
-    (None, "/api/sandbox/vfs/", "内部 VFS，token 不可猜测；无 token 返回 {'exists':false} 不泄数据"),
+    ({"GET"}, "/api/sandbox/vfs/file", "内部 VFS 读文件，token 不可猜测；无 token 返回 {'exists':false}"),
+    ({"PUT"}, "/api/sandbox/vfs/file", "内部 VFS 写文件，token 不可猜测"),
+    ({"DELETE"}, "/api/sandbox/vfs/file", "内部 VFS 删文件，token 不可猜测"),
+    ({"GET"}, "/api/sandbox/vfs/listdir", "内部 VFS 列目录，token 不可猜测"),
+    ({"POST"}, "/api/sandbox/vfs/mkdir", "内部 VFS 建目录，token 不可猜测"),
+    ({"POST"}, "/api/sandbox/vfs/rename", "内部 VFS 重命名，token 不可猜测"),
+    ({"GET"}, "/api/sandbox/vfs/stat", "内部 VFS 取状态，token 不可猜测"),
+    ({"DELETE"}, "/api/sandbox/vfs/dir", "内部 VFS 删目录，token 不可猜测"),
 
     # --- 纯页面壳（数据由前端带 JWT 另行拉取，L10 已确认无数据泄露）---
     ({"GET"}, "/", "首页/介绍页壳"),
@@ -63,10 +82,22 @@ ANON_WHITELIST = [
     ({"GET"}, "/initialize", "初始化页壳"),
     ({"GET"}, "/favicon.ico", "favicon"),
     ({"GET"}, "/console", "Agent 配置 UI 页壳（L10：静态 HTML，数据走 JWT API）"),
+    ({"GET"}, "/console/", "同上（trailing-slash 重定向）"),
     ({"GET"}, "/filemanager", "filemanager SPA 页壳"),
+    ({"GET"}, "/filemanager/", "同上（trailing-slash 重定向）"),
+    ({"GET"}, "/dashboard/group", "群聊消息 Dashboard 页壳（静态 HTML，数据走 /api/messages 需 401）"),
+    ({"GET"}, "/dashboard/group/", "同上（trailing-slash 重定向）"),
 
     # --- Agent 自部署 App 网关（按 Host 子域名确定 agent，服务公开 App；注册/删除走受鉴权 /api/apps/*）---
-    (None, "/apps", "Agent 自部署 App 服务网关（Host 头作用域；写操作在 /api/apps/* 已鉴权）"),
+    ({"GET"}, "/apps", "Agent 自部署 App 服务网关（Host 头作用域；写操作在 /api/apps/* 已鉴权）"),
+    ({"GET"}, "/apps/", "同上（trailing-slash 重定向）"),
+    ({"POST"}, "/apps/{agent_hash}/{app_id}/data", "App 数据写入（Host 头作用域网关）"),
+    ({"GET"}, "/apps/{agent_hash}/{app_id}/data", "App 数据读取（Host 头作用域网关）"),
+    ({"DELETE"}, "/apps/{agent_hash}/{app_id}/data", "App 数据删除（Host 头作用域网关）"),
+    ({"GET"}, "/apps/{app_id}", "App 网关（Host 头作用域）"),
+    ({"GET"}, "/apps/{app_id}/", "同上（trailing-slash 重定向）"),
+    ({"POST"}, "/apps/{app_id}/api/{path:path}", "App API 透传（Host 头作用域）"),
+    ({"GET"}, "/apps/{app_id}/{path:path}", "App 静态资源（Host 头作用域）"),
 
     # --- 静态站公开访问 catch-all（公开站点托管）---
     (None, "/{file_path:path}", "静态站公开访问 catch-all（public site hosting）"),
@@ -103,32 +134,78 @@ def _substitute(path: str) -> str:
 
 
 def _is_whitelisted(method: str, path: str) -> str:
-    """返回白名单理由；不在白名单返回 None。"""
+    """返回白名单理由；不在白名单返回 None。
+
+    N23 修复：只做精确匹配。旧版 `path == prefix or path.startswith(prefix)`
+    会让 ("/", ...) 前缀命中所有路由，导致 GET 回归整体空转。
+    """
     if (method, path) in ANON_EXACT_WHITELIST:
         return ANON_EXACT_WHITELIST[(method, path)]
-    # 前缀匹配（允许指定 method 或任意）
-    for methods, prefix, reason in ANON_WHITELIST:
+    for methods, exact_path, reason in ANON_WHITELIST:
+        if path != exact_path:
+            continue
         if methods is not None and method not in methods:
             continue
-        if path == prefix or path.startswith(prefix):
-            return reason
+        return reason
     return None
 
 
 def _all_routes():
-    return [r for r in app.routes if isinstance(r, APIRoute)]
+    """枚举全部 APIRoute（兼容 FastAPI 0.139+ 的 _IncludedRouter 嵌套结构）。
+
+    0.136 及更早：app.routes 直接就是 APIRoute 列表。
+    0.139+：include_router 把路由包进 _IncludedRouter.original_router，
+    不递归展开的话矩阵只看到直接注册的 /health 一条路由（空转）。
+    """
+    routes = []
+
+    def _walk(items):
+        for r in items:
+            if isinstance(r, APIRoute):
+                routes.append(r)
+            elif getattr(r, "original_router", None) is not None:
+                _walk(r.original_router.routes)
+            elif hasattr(r, "routes"):
+                _walk(r.routes)
+
+    _walk(app.routes)
+    return routes
+
+
+def _is_open_redirect(loc: str) -> bool:
+    """仅把「指向外部源的绝对 URL / 协议相对 //」判为开放重定向。
+
+    相对路径（/login、/dashboard、/login?redirect_to=…）是本应用内部跳转，
+    不算开放重定向。N23 修复：旧版 `"/login" not in loc` 会把
+    /files → 302 /dashboard 这类内部跳转误判成开放重定向。
+    """
+    if not loc:
+        return False
+    if loc.startswith("//"):
+        return True
+    m = re.match(r"^https?://([^/]+)", loc)
+    if m:
+        host = m.group(1).split(":")[0]
+        if host not in ("testserver", "localhost", "127.0.0.1"):
+            return True
+    return False
 
 
 def _route_request(client, method: str, path: str):
-    """按方法发匿名请求，返回 (status, location)。"""
+    """按方法发匿名请求，返回 (status, location)。
+
+    N23 修复：follow_redirects=False —— 匿名被 302 到 /login 是「正确拒绝」，
+    若用 TestClient 默认 follow_redirects=True，会把 302→/login 追到 200 登录页，
+    被误判成 leak。关闭跟随，把「重定向到登录」与「直接放行」区分开。
+    """
     url = _substitute(path)
     headers = {"Host": "testserver"}
     if method == "GET":
-        return client.get(url, headers=headers)
+        return client.get(url, headers=headers, follow_redirects=False)
     if method == "DELETE":
-        return client.delete(url, headers=headers)
+        return client.delete(url, headers=headers, follow_redirects=False)
     # POST / PUT / PATCH：给空 body，缺 body 校验 422 也属「不放行」
-    return client.request(method, url, json={}, headers=headers)
+    return client.request(method, url, json={}, headers=headers, follow_redirects=False)
 
 
 # ======================================================================
@@ -169,7 +246,7 @@ def test_route_authz_matrix_no_anonymous_leak(client):
             leaks.append((method, r.path, sc))
         elif 300 <= sc < 400:
             loc = (resp.headers.get("location") or "")
-            if "/login" not in loc:
+            if _is_open_redirect(loc):
                 suspicious.append((method, r.path, sc, loc))
         else:
             denied[str(sc)] = denied.get(str(sc), 0) + 1

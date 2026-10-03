@@ -130,17 +130,23 @@ class TestAgentContextEntry:
 
     def test_session_allowed(self):
         from services.totp_service import TOTPService
-        r = TOTPService.verify_jwt(_mk("session", username="u"))
+        # FIX-E（复审残余）：verify_jwt 现补查 jwt_version（is_token_revoked）。
+        # 本类只验「令牌类型 × 入口」矩阵，吊销逻辑另测 —— 故 mock 掉吊销判定，
+        # 不耦合到 DB 里 user_id=1 的真实 jwt_version。
+        with patch("utils.auth.is_token_revoked", return_value=False):
+            r = TOTPService.verify_jwt(_mk("session", username="u"))
         assert r is not None and r["user_id"] == 1
 
     def test_totp_allowed(self):
         from services.totp_service import TOTPService
-        r = TOTPService.verify_jwt(_mk("totp", auth_method="totp", agent_hash="abcd"))
+        with patch("utils.auth.is_token_revoked", return_value=False):
+            r = TOTPService.verify_jwt(_mk("totp", auth_method="totp", agent_hash="abcd"))
         assert r is not None and r["agent_hash"] == "abcd"
 
     def test_legacy_totp_allowed(self):
         from services.totp_service import TOTPService
-        r = TOTPService.verify_jwt(_mk(None, auth_method="totp", agent_hash="abcd"))
+        with patch("utils.auth.is_token_revoked", return_value=False):
+            r = TOTPService.verify_jwt(_mk(None, auth_method="totp", agent_hash="abcd"))
         assert r is not None and r["agent_hash"] == "abcd"
 
     def test_agent_rejected(self):

@@ -68,7 +68,9 @@ class GroupMessage(Base):
     # Q18: group_id 回退为 String(36) UUID（对齐生产 varchar(36)）
     group_id = Column(String(36), nullable=False, index=True)
     sender_type = Column(String(8), nullable=False)
-    sender_hash = Column(String(4), nullable=True)
+    # FIX-E/P0-1：原 String(4) 会静默截断 8 位 agent hash（agent_profiles.hash 允许 4 或 8 位），
+    # 写入方传 8 位时群消息归属错人。扩到 String(8)（MySQL 无损扩列，老数据不动）。
+    sender_hash = Column(String(8), nullable=True)
     content = Column(Text)
     message_type = Column(String(32), default="text")
     attachments = Column(JSON, nullable=True)

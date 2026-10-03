@@ -177,6 +177,14 @@ class TOTPService:
         if token_type(payload) not in (TOKEN_TYPE_SESSION, TOKEN_TYPE_TOTP):
             return None
 
+        # FIX-E（复审残余 L3）：补登出吊销（jwt_version）校验 —— 与页面路由侧
+        # （_resolve_local_user_id）和 session 依赖侧（_decode_or_none）口径一致。
+        # is_token_revoked 在「无法判定」（用户不存在/查不到版本）时返回 False（放行），
+        # 仅在能确定版本不一致时才拒绝，不会误伤老 token。
+        from utils.auth import is_token_revoked
+        if is_token_revoked(payload):
+            return None
+
         return {
             "user_id": payload["user_id"],
             "agent_hash": payload.get("agent_hash"),

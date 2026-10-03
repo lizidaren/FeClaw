@@ -338,6 +338,50 @@ async def lifespan(app: FastAPI):
         except Exception:
             pass
 
+        # FIX-E/P0-1：group_messages.sender_hash 曾为 VARCHAR(4)，写入方可能传 8 位
+        # agent hash（agent_profiles.hash 允许 4 或 8 位），MySQL 静默截断 ⇒ 群消息
+        # 归属错人。扩到 VARCHAR(8)（无损扩列，幂等可重复跑）。
+        try:
+            conn.execute(text(
+                "ALTER TABLE group_messages MODIFY COLUMN sender_hash VARCHAR(8) NULL"
+            ))
+            logger.info("FIX-E: widened group_messages.sender_hash to VARCHAR(8)")
+        except Exception as _e:
+            logger.debug(f"FIX-E: group_messages.sender_hash alter skipped: {_e}")
+
+        # FIX-E/P0-1：share_mappings.share_hash 模型已声明 unique=True（Q20/H19），但
+        # create_all 不会给已存在的表补唯一索引 ⇒ 补迁移。⚠️ 加唯一索引前先查重复值，
+        # 有重复则只告警不硬加（避免迁移在脏数据上失败 / 掩盖既有跨租户解析串味）。
+        try:
+            _dup = conn.execute(text(
+                "SELECT share_hash FROM share_mappings "
+                "GROUP BY share_hash HAVING COUNT(*) > 1 LIMIT 1"
+            )).fetchone()
+            _has_unique = conn.execute(text(
+                "SELECT INDEX_NAME FROM information_schema.STATISTICS "
+                "WHERE TABLE_NAME='share_mappings' AND TABLE_SCHEMA=DATABASE() "
+                "AND COLUMN_NAME='share_hash' AND NON_UNIQUE=0 LIMIT 1"
+            )).fetchone()
+            if _dup is not None:
+                logger.warning(
+                    "FIX-E: share_mappings.share_hash has duplicate value(s) "
+                    f"(e.g. {_dup[0]}); skipping unique index — needs manual dedup"
+                )
+            elif _has_unique is None:
+                conn.execute(text(
+                    "ALTER TABLE share_mappings "
+                    "ADD UNIQUE INDEX uq_share_mappings_share_hash (share_hash)"
+                ))
+                logger.info("FIX-E: added unique index uq_share_mappings_share_hash")
+            else:
+                logger.debug("FIX-E: share_mappings.share_hash unique index already present")
+        except Exception as _e:
+            logger.debug(f"FIX-E: share_mappings.share_hash unique index migration skipped: {_e}")
+        try:
+            conn.commit()
+        except Exception:
+            pass
+
         # P4: groups.organization_id 列 + 索引（外键 use_alter 避免循环依赖）
         try:
             org_cols = [r[0] for r in conn.execute(text(

@@ -284,11 +284,16 @@ async def get_agent_status_by_hash(
 
 
 @router.get("/vfs-templates")
-async def get_vfs_templates(db: Session = Depends(get_db)):
+async def get_vfs_templates(
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user)
+):
     """
     获取 VFS 模板列表
 
     返回可用的 VFS 目录结构和配置模板
+    FIX-E/N23：本路由是全 /api/console/* 家族里唯一漏加 get_current_user 的端点
+    （会匿名回显 internal::default 默认人设模板）。补上鉴权，与同族一致。
     """
     from services.template_manager import TemplateManager
     default_persona = TemplateManager.get_persona(db, "internal::default") or ""

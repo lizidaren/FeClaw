@@ -22,14 +22,25 @@
 
 set -uo pipefail
 
-PORT="${FECLAW_PORT:-58080}"
 SERVICE="${FECLAW_SERVICE:-feclaw-backend}"
-BASE="http://127.0.0.1:${PORT}"
 MAX_WAIT="${FECLAW_WD_MAX_WAIT:-5}"
 RESTART_WAIT="${FECLAW_WD_RESTART_WAIT:-15}"
 
 log() { logger -t feclaw-watchdog -p "daemon.$1" "$2"; }
 fail() { local m="$1"; log err "FAIL: ${m}"; echo "FAIL: ${m}" >&2; }
+
+# FIX-E/P0-2：端口单一真相源 —— 从 systemd unit 的 ExecStart 解析 --port；
+# 取不到退 FECLAW_PORT；仍取不到 ⇒ 报错退出（fail-closed，不猜默认值）。
+# 生产实测（139）听 58080、仓库 unit 写 8080 —— 写死任一默认值都会探测错端口。
+PORT="$(systemctl show "${SERVICE}" -p ExecStart --value 2>/dev/null | grep -oE -- '--port[= ]+[0-9]+' | grep -oE '[0-9]+' | head -n1)"
+if [ -z "${PORT}" ]; then
+  PORT="${FECLAW_PORT:-}"
+fi
+if [ -z "${PORT}" ]; then
+  fail "无法从 systemd ExecStart 或 FECLAW_PORT 解析端口 —— 拒绝继续（不猜默认值）"
+  exit 1
+fi
+BASE="http://127.0.0.1:${PORT}"
 
 # ① 关键接口必须健康：/health 含 "healthy"，/login 返回 200
 probe() {

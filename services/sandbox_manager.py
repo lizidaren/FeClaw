@@ -455,7 +455,14 @@ class SandboxManager:
 
         # H5：网络隔离可用时才拼 helper 前缀；否则返回空前缀（调用方在
         # _exec_bash_via_sandbox 已 fail-closed 拒绝，这里不会被执行）。
-        return (NetworkIsolationManager.get_netns_prefix() or []) + opts + entry
+        _netns = NetworkIsolationManager.get_netns_prefix()
+        if _netns is None:
+            # FIX-E（复审残余）：把「调用方已 fail-closed」这一约定变成强制 ——
+            # builder 自身在 netns 缺失时直接 raise，防第四个调用点静默退回宿主网络。
+            raise RuntimeError(
+                "Sandbox network isolation unavailable (netns/helper missing); refusing to build command"
+            )
+        return _netns + opts + entry
 
     # ========================================================================
     # 友好错误转译
@@ -759,7 +766,14 @@ class SandboxManager:
 
         # H5：网络隔离可用时才拼 helper 前缀；否则返回空前缀（调用方在
         # _execute_with_bwrap / start_background 已 fail-closed 拒绝）。
-        return (NetworkIsolationManager.get_netns_prefix() or []) + opts + entry
+        _netns = NetworkIsolationManager.get_netns_prefix()
+        if _netns is None:
+            # FIX-E（复审残余）：把「调用方已 fail-closed」这一约定变成强制 ——
+            # builder 自身在 netns 缺失时直接 raise，防第四个调用点静默退回宿主网络。
+            raise RuntimeError(
+                "Sandbox network isolation unavailable (netns/helper missing); refusing to build command"
+            )
+        return _netns + opts + entry
 
     # ========================================================================
     # 后台任务

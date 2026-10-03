@@ -30,11 +30,25 @@ fi
 REMOTE_DIR="${FECLAW_REMOTE_DIR:-/home/ubuntu/FeClaw}"
 LOCAL_DIR="${FECLAW_LOCAL_DIR:-$(cd "$(dirname "$0")" && pwd)}"
 SERVICE="${FECLAW_SERVICE:-feclaw-backend}"
-PORT="${FECLAW_PORT:-58080}"
+SSH=(ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no)
+
+# FIX-E/P0-2：端口不再写死默认值（58080/8080 都不是单一真相源 —— 生产实测听 58080，
+# 而仓库 unit 写 8080，两处默认值会让 watchdog 探测一个没人听的端口）。
+# 单一真相源 = 远端 systemd unit 的 ExecStart；取不到退 FECLAW_PORT；仍取不到 ⇒ 报错退出（fail-closed，不猜）。
+resolve_port() {
+  local p
+  p="$("${SSH[@]}" "$SERVER" "systemctl show '${SERVICE}' -p ExecStart --value 2>/dev/null | grep -oE -- '--port[= ]+[0-9]+' | grep -oE '[0-9]+' | head -n1" 2>/dev/null || true)"
+  if [ -z "${p}" ]; then p="${FECLAW_PORT:-}"; fi
+  if [ -z "${p}" ]; then
+    echo "FAIL: 无法从 systemd ExecStart 或 FECLAW_PORT 解析端口 —— 拒绝继续（不猜默认值）" >&2
+    exit 1
+  fi
+  echo "${p}"
+}
+PORT="$(resolve_port)"
 
 DRY_RUN=""
 [ "${1:-}" = "--dry-run" ] && DRY_RUN="--dry-run"
-SSH=(ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no)
 
 echo "=== 部署 FeClaw ==="
 echo "  本地   : $LOCAL_DIR"
