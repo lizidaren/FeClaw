@@ -313,14 +313,15 @@ async def resolve_share_by_slug(slug: str, request: Request, db: Session = Depen
     """
     from services.share_service import resolve_slug
 
-    # 从 Host 头提取 agent_hash（子域名前缀）
+    # 从 Host 头提取 agent_hash（子域名前缀）。
+    # M2：收敛到 utils.agent_access.extract_hash_from_host —— 同时接受 4 位（老）与
+    # 8 位（新）hex 子域名；此前这里手写 `len(prefix) == 4`，8 位 hash 的 Agent 分享
+    # 子域名永远解析不出隔离作用域。
+    from utils.agent_access import extract_hash_from_host
     host = request.headers.get("host", "")
     agent_hash = None
     if host and settings.FECLAW_SUBDOMAIN_ENABLED and settings.FECLAW_PUBLIC_URL in host:
-        prefix = host.split(f".{settings.FECLAW_PUBLIC_URL}")[0]
-        # 4 字符的 agent hash 子域名
-        if prefix and prefix != settings.FECLAW_PUBLIC_URL and len(prefix) == 4:
-            agent_hash = prefix
+        agent_hash = extract_hash_from_host(host)
 
     mapping = resolve_slug(slug, agent_hash, db)
     if not mapping:

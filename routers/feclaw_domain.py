@@ -49,6 +49,7 @@ from utils.agent_access import (
     extract_hash_from_host,
     get_request_domain as _get_domain,
     user_owns_agent,
+    agent_belongs_to_user,
     get_authorized_agent_hash,
     extract_agent_token,
     totp_scoped_agent_hash,
@@ -461,7 +462,7 @@ async def generate_totp(request: TOTPVerifyRequest, user=Depends(get_current_use
         agent = db.query(AgentProfile).filter(AgentProfile.hash == request.agent_hash).first()
         if not agent:
             raise HTTPException(status_code=404, detail="Agent not found")
-        if str(agent.user_id) != str(user.id):
+        if not agent_belongs_to_user(agent, user.id):
             raise HTTPException(status_code=403, detail="无权访问该 Agent")
         totp_secret = agent.totp_secret
     finally:
@@ -1477,7 +1478,7 @@ async def get_agent_status_api(request: Request, user: User = Depends(get_curren
         if not agent:
             raise HTTPException(status_code=404, detail="Agent not found")
 
-        if str(agent.user_id) != str(user.id):
+        if not agent_belongs_to_user(agent, user.id):
             raise HTTPException(status_code=403, detail="无权访问")
 
         from services.agent_init_service import agent_init_service
@@ -1528,7 +1529,7 @@ async def initialize_agent_api(request: Request, body: InitializeRequest, user: 
         if not agent:
             raise HTTPException(status_code=404, detail="Agent not found")
 
-        if str(agent.user_id) != str(user.id):
+        if not agent_belongs_to_user(agent, user.id):
             raise HTTPException(status_code=403, detail="无权访问")
 
         if agent.status == "initialized":
@@ -1574,7 +1575,7 @@ async def get_settings_api(request: Request, user: User = Depends(get_current_us
         agent = db.query(AgentProfile).filter(AgentProfile.hash == agent_hash).first()
         if not agent:
             raise HTTPException(status_code=404, detail="Agent not found")
-        if str(agent.user_id) != str(user.id):
+        if not agent_belongs_to_user(agent, user.id):
             raise HTTPException(status_code=403, detail="无权访问")
         _sr_enabled = agent.sr_enabled
     finally:
@@ -1620,7 +1621,7 @@ async def update_settings_api(request: Request, body: SettingsUpdateRequest, use
         agent = db.query(AgentProfile).filter(AgentProfile.hash == agent_hash).first()
         if not agent:
             raise HTTPException(status_code=404, detail="Agent not found")
-        if str(agent.user_id) != str(user.id):
+        if not agent_belongs_to_user(agent, user.id):
             raise HTTPException(status_code=403, detail="无权访问")
 
         # sr_enabled 是 AgentProfile 字段，直接更新

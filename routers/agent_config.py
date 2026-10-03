@@ -18,6 +18,7 @@ from config import settings
 from models.database import get_db, AgentProfile, AgentConfig
 from services.agent_init_service import agent_init_service, DEFAULT_SOUL, DEFAULT_IDENTITY
 from utils.auth import get_current_user, User
+from utils.agent_access import agent_belongs_to_user
 from services.model_registry import resolve as resolve_model, PROVIDER_META
 
 logger = logging.getLogger(__name__)
@@ -61,11 +62,11 @@ _PERSONA_SAFETY_LINES = """
 
 
 def _verify_agent_ownership(agent_hash: str, user: User, db: Session) -> AgentProfile:
-    """验证 Agent 所有权并返回 AgentProfile"""
+    """验证 Agent 所有权并返回 AgentProfile（M1：收敛到 agent_belongs_to_user）"""
     agent = db.query(AgentProfile).filter(AgentProfile.hash == agent_hash).first()
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
-    if str(agent.user_id) != str(user.id):
+    if not agent_belongs_to_user(agent, user.id):
         raise HTTPException(status_code=403, detail="无权访问")
     return agent
 

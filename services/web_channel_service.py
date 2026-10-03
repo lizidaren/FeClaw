@@ -138,13 +138,14 @@ class WebChannelService:
             raise AgentNotSpecifiedError("agent_hash required")
         if self._agent is None:
             from models.database import AgentProfile
+            from utils.agent_access import agent_belongs_to_user
 
-            self._agent = self.db.query(AgentProfile).filter(
+            agent = self.db.query(AgentProfile).filter(
                 AgentProfile.hash == self._agent_hash,
-                AgentProfile.user_id == self.user_id,
             ).first()
-            if self._agent is None:
+            if not agent_belongs_to_user(agent, self.user_id):
                 raise AgentOwnershipError("agent not owned by user")
+            self._agent = agent
         return self._agent
 
     async def resolve_agent(

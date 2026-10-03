@@ -181,13 +181,14 @@ def _user_owns_agent(user_id: int, agent_hash: str) -> tuple[bool, bool]:
                           exists=True 时 agent 存在于 DB（owns=False 但 exists=True 表示无权访问）
     """
     from models.agent_profile import AgentProfile
+    from utils.agent_access import agent_belongs_to_user
 
     db = SessionLocal()
     try:
         agent = db.query(AgentProfile).filter(AgentProfile.hash == agent_hash).first()
         if agent is None:
             return False, False
-        return agent.user_id == user_id, True
+        return agent_belongs_to_user(agent, user_id), True
     finally:
         db.close()
 

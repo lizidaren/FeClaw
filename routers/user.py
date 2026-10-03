@@ -17,6 +17,7 @@ from config import settings
 from models.database import get_db, User, AgentProfile, ChatHistory, FilePermission
 from models.group import GroupMoments
 from utils.auth import hash_password, verify_password, create_jwt_token, get_current_user, get_current_user_id, needs_rehash
+from utils.agent_access import agent_belongs_to_user
 from services.agent_init_service import agent_init_service
 from services.storage_service import get_storage_service
 from services.permission_service import PermissionService
@@ -30,32 +31,14 @@ router = APIRouter(prefix="/api/user", tags=["User"])
 # Q20/H17：登录限流（IP + username 双维度，防在线爆破）
 # ==========================================
 
-from collections import defaultdict as _defaultdict
-_login_attempts: dict = _defaultdict(list)
-_LOGIN_MAX = 10           # 每窗口最多尝试次数
-_LOGIN_WINDOW = 300       # 窗口 5 分钟
-_LOGIN_CLEAN_THRESHOLD = 10000
-
+# M3（审计 §M3）：登录限流收敛为单点 —— `services/rate_limiter.login_limiter`
+# （SlidingWindowLimiter，10 次 / 300s，线程安全，与 FIX-A 收敛过的实例同一实现）。
+# 原先这里的内联无锁 dict（10/300）已删除；行为不变：超过阈值返回 429 +
+# 「尝试次数过多，请稍后再试」。
 # FIX-A（审计 §6 H17）：登录再补一个 **IP 单桶**（防「用户名喷洒」——(IP,username) 桶
 # 拦不住攻击者换用户名重试）。阈值放宽到 100 次/300s，避免误伤 NAT 后的多人。
-# 现有 (IP,username) 桶保留不动。
+from services.rate_limiter import login_limiter as _login_limiter
 from services.rate_limiter import login_ip_limiter as _login_ip_limiter
-
-
-def _login_rate_limited(key: str) -> bool:
-    now = time.time()
-    bucket = [t for t in _login_attempts.get(key, []) if now - t < _LOGIN_WINDOW]
-    if len(bucket) >= _LOGIN_MAX:
-        _login_attempts[key] = bucket
-        return True
-    bucket.append(now)
-    _login_attempts[key] = bucket
-    if len(_login_attempts) > _LOGIN_CLEAN_THRESHOLD:
-        _stale = [k for k, v in list(_login_attempts.items())
-                  if all(now - t >= _LOGIN_WINDOW for t in v)]
-        for k in _stale:
-            _login_attempts.pop(k, None)
-    return False
 
 
 # ==========================================
@@ -63,12 +46,9 @@ def _login_rate_limited(key: str) -> bool:
 # ==========================================
 
 def _get_agent_or_404(db: Session, agent_hash: str, user_id: int) -> AgentProfile:
-    """Verify agent ownership, raise 404 if not found."""
-    agent = db.query(AgentProfile).filter(
-        AgentProfile.hash == agent_hash,
-        AgentProfile.user_id == user_id
-    ).first()
-    if agent is None:
+    """Verify agent ownership, raise 404 if not found (M1：收敛到 agent_belongs_to_user)."""
+    agent = db.query(AgentProfile).filter(AgentProfile.hash == agent_hash).first()
+    if not agent_belongs_to_user(agent, user_id):
         raise HTTPException(status_code=404, detail="Agent not found")
     return agent
 
@@ -734,7 +714,7 @@ async def login_user(
 
         # Q20/H17：登录限流（IP + username），失败尝试过多返回 429
         client_ip = request.client.host if request.client else "unknown"
-        if _login_rate_limited(f"{client_ip}:{username}"):
+        if _login_limiter.is_limited(f"{client_ip}:{username}"):
             raise HTTPException(status_code=429, detail={"status": "error", "message": "尝试次数过多，请稍后再试"})
         # FIX-A（H17）：IP 单桶，防「用户名喷洒」；阈值放宽避免误伤 NAT 多人。
         if _login_ip_limiter.is_limited(f"ip:{client_ip}"):
@@ -951,12 +931,9 @@ async def get_agent_by_hash(
 
     验证 agent 属于当前用户。
     """
-    agent = db.query(AgentProfile).filter(
-        AgentProfile.hash == agent_hash,
-        AgentProfile.user_id == user_id
-    ).first()
+    agent = db.query(AgentProfile).filter(AgentProfile.hash == agent_hash).first()
 
-    if agent is None:
+    if not agent_belongs_to_user(agent, user_id):
         raise HTTPException(status_code=404, detail="Agent not found")
 
     from utils.auth import format_timestamp

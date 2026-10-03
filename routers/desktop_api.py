@@ -11,6 +11,7 @@ from pydantic import BaseModel
 from config import settings
 from models.database import get_db, User, AgentProfile
 from utils.auth import get_current_user_id
+from utils.agent_access import agent_belongs_to_user
 from services.oauth_service import oauth_service
 from utils.oauth_helpers import issue_token_pair_for_platform_user
 
@@ -156,12 +157,9 @@ async def upload_agent_avatar(
     db: Session = Depends(get_db),
 ):
     """Upload avatar image for an agent (Desktop client). Saves to COS at agents/{hash}/avatar.png."""
-    # 1. Verify agent ownership
-    agent = db.query(AgentProfile).filter(
-        AgentProfile.hash == hash,
-        AgentProfile.user_id == user_id,
-    ).first()
-    if not agent:
+    # 1. Verify agent ownership（M1：收敛到 agent_belongs_to_user）
+    agent = db.query(AgentProfile).filter(AgentProfile.hash == hash).first()
+    if not agent_belongs_to_user(agent, user_id):
         raise HTTPException(status_code=404, detail="Agent not found")
 
     # 2. Validate and read file

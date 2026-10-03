@@ -7,7 +7,6 @@ TOTP 服务（标准 RFC 6238 实现）
 - 允许向前追溯多个窗口（宽限时间）
 """
 import pyotp
-import secrets
 from datetime import datetime
 from typing import Optional, Tuple
 
@@ -204,14 +203,9 @@ class TOTPService:
         """
         db = SessionLocal()
         try:
-            # 生成唯一的 4 位 hash
-            while True:
-                hash_value = secrets.token_hex(2)  # 4 位十六进制
-                existing = db.query(AgentProfile).filter(
-                    AgentProfile.hash == hash_value
-                ).first()
-                if not existing:
-                    break
+            # 生成唯一的 4 位 hash（收敛到 utils.agent_access.generate_agent_hash 唯一入口）
+            from utils.agent_access import generate_agent_hash
+            hash_value = generate_agent_hash(db, length_bytes=2)
             
             # 生成 TOTP secret
             totp_secret = TOTPService.generate_secret()

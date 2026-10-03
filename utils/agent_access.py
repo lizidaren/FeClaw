@@ -107,15 +107,41 @@ def resolve_agent_hash(request: Request, agent_hash: str = "") -> Optional[str]:
 # 归属判定（唯一判据入口）
 # ────────────────────────────────────────────────────────────────────
 
-def user_owns_agent(db: Session, agent_hash: str, user_id) -> bool:
-    """该 agent 是否属于该用户 —— 全仓唯一判据。
+def agent_belongs_to_user(agent, user_id) -> bool:
+    """归属比较的**唯一实现**：已取到 agent 对象时，`str()` 归一比较 user_id。
 
-    比较用 `str()` 归一，兼容 user_id 为 int / str 两种来源。
+    兼容 user_id 为 int / str 两种来源（`workspace_service` 等存 `str(user_id)`，
+    原始 `==` 会判错）。agent 为 None（不存在）或 user_id 不匹配时返回 False。
+    任何「agent 归属判定」都必须经本函数或 `user_owns_agent`，勿再手写 `==`。
+    """
+    return agent is not None and str(agent.user_id) == str(user_id)
+
+
+def user_owns_agent(db: Session, agent_hash: str, user_id) -> bool:
+    """该 agent 是否属于该用户 —— 全仓唯一判据（按 hash 查询）。
+
+    委托 `agent_belongs_to_user` 做 `str()` 归一比较，兼容 user_id 为 int / str。
     """
     if not agent_hash:
         return False
     agent = db.query(AgentProfile).filter(AgentProfile.hash == agent_hash).first()
-    return agent is not None and str(agent.user_id) == str(user_id)
+    return agent_belongs_to_user(agent, user_id)
+
+
+def generate_agent_hash(db: Session, *, length_bytes: int = 4, max_attempts: int = 100) -> str:
+    """生成**唯一**的 agent hash（hex）—— 全仓唯一生成入口。
+
+    新 agent 口径为 8 位（`length_bytes=4`）；`services/totp_service.create_agent`
+    是仅被测试引用的老入口，仍传 `length_bytes=2`（4 位），行为保持不变。
+    碰撞时重试，超过 `max_attempts` 抛 `ValueError`。
+    """
+    import secrets
+
+    for _ in range(max_attempts):
+        candidate = secrets.token_hex(length_bytes)
+        if db.query(AgentProfile).filter(AgentProfile.hash == candidate).first() is None:
+            return candidate
+    raise ValueError("Failed to generate unique hash")
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -278,6 +304,8 @@ __all__ = [
     "get_request_domain",
     "resolve_agent_hash",
     "user_owns_agent",
+    "agent_belongs_to_user",
+    "generate_agent_hash",
     "require_agent_owner",
     "get_authorized_agent_hash",
     "extract_agent_token",

@@ -32,6 +32,7 @@ from utils.agent_access import (
     extract_agent_token,
     totp_scoped_agent_hash,
     resolve_user_id_from_token,
+    agent_belongs_to_user,
 )
 
 
@@ -581,7 +582,7 @@ async def chat_websocket(websocket: WebSocket):
         await websocket.send_json({"type": "error", "code": "AGENT_NOT_FOUND", "message": "Agent 不存在"})
         await websocket.close(code=4004)
         return
-    if str(agent.user_id) != str(user_id):
+    if not agent_belongs_to_user(agent, user_id):
         db.close()
         await websocket.send_json({"type": "error", "code": "FORBIDDEN", "message": "无权访问此 Agent"})
         await websocket.close(code=4003)
@@ -761,11 +762,11 @@ async def create_chat_session(
     if not agent_hash:
         raise HTTPException(status_code=400, detail="agent_hash is required")
 
-    # 校验 Agent 存在且属于当前用户
+    # 校验 Agent 存在且属于当前用户（M1：收敛到 agent_belongs_to_user）
     agent = db.query(AgentProfile).filter(AgentProfile.hash == agent_hash).first()
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
-    if agent.user_id != user_id:
+    if not agent_belongs_to_user(agent, user_id):
         raise HTTPException(status_code=403, detail="Not authorized to access this agent")
 
     # FIX-A：totp 令牌（Agent 作用域）只能针对它自己的 Agent 建会话

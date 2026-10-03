@@ -13,15 +13,39 @@ import json
 import logging
 
 from models.database import get_db, User, AgentProfile
-from models.agent_profile import AgentProfile
 from services.agent_jwt_service import agent_jwt_service
 from services.agent_init_service import agent_init_service
 from utils.auth import get_current_user
+from utils.agent_access import agent_belongs_to_user
 from config import settings
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/console", tags=["Console"])
+
+
+def _get_owned_agent(
+    db: Session,
+    *,
+    agent_id: int = None,
+    agent_hash: str = None,
+    user_id: int,
+    status: int = 404,
+    detail: str = "Agent not found",
+) -> AgentProfile:
+    """按 id 或 hash 取 agent 并校验归属（M1：收敛到 agent_belongs_to_user 单点比较）。
+
+    「不存在」与「不属于你」同响应（防枚举）；默认 404，delete 路径用 403。
+    """
+    q = db.query(AgentProfile)
+    if agent_id is not None:
+        q = q.filter(AgentProfile.id == agent_id)
+    else:
+        q = q.filter(AgentProfile.hash == agent_hash)
+    agent = q.first()
+    if not agent_belongs_to_user(agent, user_id):
+        raise HTTPException(status_code=status, detail=detail)
+    return agent
 
 
 # ==========================================
@@ -166,13 +190,7 @@ async def get_agent_by_hash(
     """
     通过 agent_hash 获取 Agent 详情
     """
-    agent = db.query(AgentProfile).filter(
-        AgentProfile.hash == agent_hash,
-        AgentProfile.user_id == user.id
-    ).first()
-
-    if agent is None:
-        raise HTTPException(status_code=404, detail="Agent not found")
+    agent = _get_owned_agent(db, agent_hash=agent_hash, user_id=user.id)
 
     return JSONResponse(content={
         "status": "success",
@@ -199,13 +217,7 @@ async def initialize_agent_by_hash(
 
     创建 Agent 配置文件和 VFS 目录结构
     """
-    agent = db.query(AgentProfile).filter(
-        AgentProfile.hash == agent_hash,
-        AgentProfile.user_id == user.id
-    ).first()
-
-    if agent is None:
-        raise HTTPException(status_code=404, detail="Agent not found")
+    agent = _get_owned_agent(db, agent_hash=agent_hash, user_id=user.id)
 
     if agent.status == "initialized":
         return JSONResponse(content={
@@ -259,13 +271,7 @@ async def get_agent_status_by_hash(
 
     包括 profile 文件和 VFS 目录状态
     """
-    agent = db.query(AgentProfile).filter(
-        AgentProfile.hash == agent_hash,
-        AgentProfile.user_id == user.id
-    ).first()
-
-    if agent is None:
-        raise HTTPException(status_code=404, detail="Agent not found")
+    agent = _get_owned_agent(db, agent_hash=agent_hash, user_id=user.id)
 
     status_info = agent_init_service.get_agent_status(agent)
 
@@ -332,13 +338,7 @@ async def get_agent(
     """
     获取 Agent 详情
     """
-    agent = db.query(AgentProfile).filter(
-        AgentProfile.id == agent_id,
-        AgentProfile.user_id == user.id
-    ).first()
-
-    if agent is None:
-        raise HTTPException(status_code=404, detail="Agent not found")
+    agent = _get_owned_agent(db, agent_id=agent_id, user_id=user.id)
 
     return JSONResponse(content={
         "status": "success",
@@ -363,13 +363,7 @@ async def update_agent(
     """
     更新 Agent 配置
     """
-    agent = db.query(AgentProfile).filter(
-        AgentProfile.id == agent_id,
-        AgentProfile.user_id == user.id
-    ).first()
-
-    if agent is None:
-        raise HTTPException(status_code=404, detail="Agent not found")
+    agent = _get_owned_agent(db, agent_id=agent_id, user_id=user.id)
 
     # 获取请求体
     body = await request.json()
@@ -435,14 +429,10 @@ async def delete_agent(
     """
     from services.agent_cleanup_service import agent_cleanup_service
 
-    agent = db.query(AgentProfile).filter(
-        AgentProfile.id == agent_id,
-        AgentProfile.user_id == user.id
-    ).first()
-
-    if agent is None:
-        # 不区分"不存在"和"无权访问"，统一 403 避免越权探测
-        raise HTTPException(status_code=403, detail="Agent not found or access denied")
+    agent = _get_owned_agent(
+        db, agent_id=agent_id, user_id=user.id,
+        status=403, detail="Agent not found or access denied",
+    )
 
     agent_hash = agent.hash
     agent_name = agent.name
@@ -505,13 +495,7 @@ async def issue_agent_token(
     为 Agent 签发 JWT token
     用于 Agent 与外部系统交互
     """
-    agent = db.query(AgentProfile).filter(
-        AgentProfile.id == agent_id,
-        AgentProfile.user_id == user.id
-    ).first()
-
-    if agent is None:
-        raise HTTPException(status_code=404, detail="Agent not found")
+    agent = _get_owned_agent(db, agent_id=agent_id, user_id=user.id)
 
     # 签发 Agent JWT
     token = agent_jwt_service.issue_agent_jwt(
@@ -541,13 +525,7 @@ async def initialize_agent(
 
     创建 Agent 配置文件和 VFS 目录结构
     """
-    agent = db.query(AgentProfile).filter(
-        AgentProfile.id == agent_id,
-        AgentProfile.user_id == user.id
-    ).first()
-
-    if agent is None:
-        raise HTTPException(status_code=404, detail="Agent not found")
+    agent = _get_owned_agent(db, agent_id=agent_id, user_id=user.id)
 
     if agent.status == "initialized":
         return JSONResponse(content={
@@ -601,13 +579,7 @@ async def get_agent_status(
 
     包括 profile 文件和 VFS 目录状态
     """
-    agent = db.query(AgentProfile).filter(
-        AgentProfile.id == agent_id,
-        AgentProfile.user_id == user.id
-    ).first()
-
-    if agent is None:
-        raise HTTPException(status_code=404, detail="Agent not found")
+    agent = _get_owned_agent(db, agent_id=agent_id, user_id=user.id)
 
     status_info = agent_init_service.get_agent_status(agent)
 
@@ -634,13 +606,7 @@ async def get_agent_persona(
     """
     获取 Agent persona 内容
     """
-    agent = db.query(AgentProfile).filter(
-        AgentProfile.id == agent_id,
-        AgentProfile.user_id == user.id
-    ).first()
-
-    if agent is None:
-        raise HTTPException(status_code=404, detail="Agent not found")
+    agent = _get_owned_agent(db, agent_id=agent_id, user_id=user.id)
 
     persona = agent_init_service.load_agent_persona(agent.hash)
 
@@ -666,13 +632,7 @@ async def get_agent_tools(
     """
     获取 Agent 工具配置
     """
-    agent = db.query(AgentProfile).filter(
-        AgentProfile.id == agent_id,
-        AgentProfile.user_id == user.id
-    ).first()
-
-    if agent is None:
-        raise HTTPException(status_code=404, detail="Agent not found")
+    agent = _get_owned_agent(db, agent_id=agent_id, user_id=user.id)
 
     tools = agent_init_service.load_agent_tools(agent.hash)
 
@@ -698,13 +658,7 @@ async def get_agent_config(
     """
     获取 Agent 配置
     """
-    agent = db.query(AgentProfile).filter(
-        AgentProfile.id == agent_id,
-        AgentProfile.user_id == user.id
-    ).first()
-
-    if agent is None:
-        raise HTTPException(status_code=404, detail="Agent not found")
+    agent = _get_owned_agent(db, agent_id=agent_id, user_id=user.id)
 
     config = agent_init_service.load_agent_config(agent.hash)
 
@@ -738,13 +692,7 @@ async def update_agent_config(
 
     配置更新后会自动重新加载
     """
-    agent = db.query(AgentProfile).filter(
-        AgentProfile.id == agent_id,
-        AgentProfile.user_id == user.id
-    ).first()
-
-    if agent is None:
-        raise HTTPException(status_code=404, detail="Agent not found")
+    agent = _get_owned_agent(db, agent_id=agent_id, user_id=user.id)
 
     if agent.status != "initialized":
         raise HTTPException(status_code=400, detail="Agent must be initialized before updating config")
@@ -819,13 +767,7 @@ async def get_agent_style(
     """
     获取 Agent 回复风格
     """
-    agent = db.query(AgentProfile).filter(
-        AgentProfile.id == agent_id,
-        AgentProfile.user_id == user.id
-    ).first()
-
-    if agent is None:
-        raise HTTPException(status_code=404, detail="Agent not found")
+    agent = _get_owned_agent(db, agent_id=agent_id, user_id=user.id)
 
     config = agent_init_service.load_agent_config(agent.hash)
     style = config.get("style", "professional") if config else "professional"
@@ -853,13 +795,7 @@ async def list_agent_sessions(
     """
     列出 Agent 的会话记录
     """
-    agent = db.query(AgentProfile).filter(
-        AgentProfile.id == agent_id,
-        AgentProfile.user_id == user.id
-    ).first()
-
-    if agent is None:
-        raise HTTPException(status_code=404, detail="Agent not found")
+    agent = _get_owned_agent(db, agent_id=agent_id, user_id=user.id)
 
     # 获取会话记录（使用 ConversationSession 表）
     from models.database import ConversationSession

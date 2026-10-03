@@ -238,7 +238,6 @@ class AgentInitService:
         Returns:
             AgentProfile 实例
         """
-        import secrets
         from sqlalchemy import func
 
         # 检查 Agent 数量限制（最多 100 个）
@@ -248,20 +247,10 @@ class AgentInitService:
         if agent_count >= 100:
             raise ValueError("每个用户最多创建 50 个 Agent")
 
-        # 生成唯一的 8 位 hash
+        # 生成唯一的 8 位 hash（收敛到 utils.agent_access.generate_agent_hash 唯一入口）
         if not hash_value:
-            def generate_hash():
-                return secrets.token_hex(4)  # 8 位十六进制，匹配 DB String(8)
-
-            hash_value = generate_hash()
-            max_attempts = 100
-            attempts = 0
-
-            while db.query(AgentProfile).filter(AgentProfile.hash == hash_value).first():
-                hash_value = generate_hash()
-                attempts += 1
-                if attempts >= max_attempts:
-                    raise ValueError("Failed to generate unique hash")
+            from utils.agent_access import generate_agent_hash
+            hash_value = generate_agent_hash(db, length_bytes=4)
 
         # 生成 TOTP secret
         totp_secret = TOTPService.generate_secret()

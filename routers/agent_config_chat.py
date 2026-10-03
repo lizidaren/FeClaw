@@ -21,7 +21,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from config import settings
-from models.database import get_db, AgentProfile
+from models.database import get_db
 from utils.auth import get_current_user, User
 
 logger = logging.getLogger(__name__)
@@ -51,11 +51,9 @@ async def agent_config_chat(
 
     返回 SSE 流（透传 DeepSeek 原始输出）。
     """
-    # 验证所有权
-    agent = db.query(AgentProfile).filter(
-        AgentProfile.hash == agent_hash, AgentProfile.user_id == user.id
-    ).first()
-    if not agent:
+    # 验证所有权（M1：收敛到 user_owns_agent）
+    from utils.agent_access import user_owns_agent
+    if not user_owns_agent(db, agent_hash, user.id):
         raise HTTPException(status_code=403, detail="无权访问")
 
     body = await request.json()

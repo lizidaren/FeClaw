@@ -16,6 +16,7 @@ from datetime import datetime
 from models.database import get_db, AgentProfile, SessionLocal
 from models.group import Group, GroupMember, GroupMessage
 from utils.auth import get_current_user_id
+from utils.agent_access import user_owns_agent
 from services.group_service import group_dispatch_service, GroupDispatchService
 from services.vfs.paths import GROUP_ATTACH_DIR, GROUP_SHARE_DIR, GROUP_REF_DIR
 from config import settings
@@ -104,13 +105,36 @@ class MessageResponse(BaseModel):
 # ==========================================
 
 def _get_group_or_404(db: Session, group_id: str, user_id: int) -> Group:
-    """Verify group exists and user owns it (or is member via agent)."""
+    """Verify group exists and user owns it（owner only —— 群成员/Agent 不经此助手放行）。"""
     group = db.query(Group).filter(Group.id == group_id).first()
     if not group or group.deleted_at:
         raise HTTPException(status_code=404, detail="Group not found")
     if group.owner_user_id != user_id:
         raise HTTPException(status_code=403, detail="Not authorized to access this group")
     return group
+
+
+def _require_group_file_access(db: Session, group_id: str, user_id: int) -> None:
+    """校验群共享空间读权限：群主，或「群内某 agent 的持有者」。
+
+    M1 收敛：把 list_group_files / download_group_file 两份复制粘贴的权限块合成一处；
+    「是否拥有该 agent」统一经 `user_owns_agent`（str() 归一）判定。
+    """
+    group = db.query(Group).filter(
+        Group.id == group_id,
+        Group.deleted_at.is_(None),
+    ).first()
+    if not group:
+        raise HTTPException(status_code=404, detail="Group not found")
+    if group.owner_user_id != user_id:
+        member_hashes = [
+            m.agent_hash for m in db.query(GroupMember).filter(
+                GroupMember.group_id == group_id,
+                GroupMember.agent_hash != "",
+            ).all()
+        ]
+        if not any(user_owns_agent(db, h, user_id) for h in member_hashes):
+            raise HTTPException(status_code=403, detail="Not authorized to access this group's files")
 
 
 def _format_group(db: Session, group: Group) -> GroupResponse:
@@ -178,11 +202,7 @@ async def create_group(
     # Validate member hashes
     if body.member_hashes:
         for h in body.member_hashes:
-            agent = db.query(AgentProfile).filter(
-                AgentProfile.hash == h,
-                AgentProfile.user_id == user_id,
-            ).first()
-            if not agent:
+            if not user_owns_agent(db, h, user_id):
                 raise HTTPException(status_code=400, detail=f"Agent {h} not found or not owned by you")
 
     svc = GroupDispatchService()
@@ -300,11 +320,7 @@ async def add_member(
         raise HTTPException(status_code=403, detail="Only the owner can add members")
 
     # Verify agent exists and belongs to user
-    agent = db.query(AgentProfile).filter(
-        AgentProfile.hash == body.agent_hash,
-        AgentProfile.user_id == user_id,
-    ).first()
-    if not agent:
+    if not user_owns_agent(db, body.agent_hash, user_id):
         raise HTTPException(status_code=404, detail="Agent not found or not owned by you")
 
     svc = GroupDispatchService()
@@ -534,24 +550,7 @@ async def list_group_files(
     对齐 file_ops.py 中已有的 feclaw/groups/{gid}/ 前缀；
     权限：群主可访问全部 scope；群成员仅可访问 share/attach。
     """
-    group = db.query(Group).filter(
-        Group.id == group_id,
-        Group.deleted_at.is_(None),
-    ).first()
-    if not group:
-        raise HTTPException(status_code=404, detail="Group not found")
-    # 权限：群主可访问任何 scope；其他用户需为群内 agent 持有者
-    if group.owner_user_id != user_id:
-        from models.group import GroupMember
-        owned_agent = db.query(GroupMember).join(
-            AgentProfile, AgentProfile.hash == GroupMember.agent_hash
-        ).filter(
-            GroupMember.group_id == group_id,
-            GroupMember.agent_hash != "",
-            AgentProfile.user_id == user_id,
-        ).first()
-        if not owned_agent:
-            raise HTTPException(status_code=403, detail="Not authorized to access this group's files")
+    _require_group_file_access(db, group_id, user_id)
 
     scope_to_dir = {
         "share": GROUP_SHARE_DIR,
@@ -603,22 +602,7 @@ async def download_group_file(
     - 调用方必须是群主或群内 agent 的持有者
     """
     # 1. 权限校验：复用 list 的逻辑（群主 / 群内 agent 持有者）
-    group = db.query(Group).filter(
-        Group.id == group_id,
-        Group.deleted_at.is_(None),
-    ).first()
-    if not group:
-        raise HTTPException(status_code=404, detail="Group not found")
-    if group.owner_user_id != user_id:
-        owned_agent = db.query(GroupMember).join(
-            AgentProfile, AgentProfile.hash == GroupMember.agent_hash
-        ).filter(
-            GroupMember.group_id == group_id,
-            GroupMember.agent_hash != "",
-            AgentProfile.user_id == user_id,
-        ).first()
-        if not owned_agent:
-            raise HTTPException(status_code=403, detail="Not authorized to access this group's files")
+    _require_group_file_access(db, group_id, user_id)
 
     # 2. Key 校验：必须落在本群目录下
     expected_prefix = f"feclaw/groups/{group_id}/"

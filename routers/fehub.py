@@ -25,6 +25,7 @@ from sqlalchemy.orm import Session
 from models.database import get_db, AgentProfile
 from models.fehub import FePublish, AppData
 from utils.auth import get_current_user_id
+from utils.agent_access import agent_belongs_to_user
 from services.fehub_service import FeHubService
 from config import settings
 
@@ -69,12 +70,9 @@ class AppDataResponse(BaseModel):
 
 
 def _get_user_agent(db: Session, user_id: int, agent_hash: str) -> AgentProfile:
-    """Verify user owns this agent_hash."""
-    agent = db.query(AgentProfile).filter(
-        AgentProfile.hash == agent_hash,
-        AgentProfile.user_id == user_id,
-    ).first()
-    if not agent:
+    """Verify user owns this agent_hash（M1：收敛到 agent_belongs_to_user）."""
+    agent = db.query(AgentProfile).filter(AgentProfile.hash == agent_hash).first()
+    if not agent_belongs_to_user(agent, user_id):
         raise HTTPException(status_code=404, detail="Agent not found")
     return agent
 

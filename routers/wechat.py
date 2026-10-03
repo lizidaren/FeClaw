@@ -173,12 +173,8 @@ async def bind_wechat(request: BindRequest, user: User = Depends(get_current_use
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="agent_hash 不能为空，请从 Agent 设置页进入绑定"
             )
-        from models.agent_profile import AgentProfile
-        agent_owner = db.query(AgentProfile).filter(
-            AgentProfile.hash == request.agent_hash,
-            AgentProfile.user_id == current_user.id
-        ).first()
-        if not agent_owner:
+        from utils.agent_access import user_owns_agent
+        if not user_owns_agent(db, request.agent_hash, current_user.id):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Agent not found or does not belong to the current user"

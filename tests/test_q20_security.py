@@ -337,12 +337,12 @@ class TestOAuthIdentityBinding:
 
 class TestLoginRateLimit:
     def test_blocks_after_max_attempts(self):
-        from routers.user import _login_rate_limited, _login_attempts, _LOGIN_MAX
-        _login_attempts.clear()
+        from services.rate_limiter import login_limiter
+        login_limiter.clear()
         key = "203.0.113.9:alice"
-        for _ in range(_LOGIN_MAX):
-            assert _login_rate_limited(key) is False
-        assert _login_rate_limited(key) is True
+        for _ in range(10):
+            assert login_limiter.is_limited(key) is False
+        assert login_limiter.is_limited(key) is True
 
 
 # ======================================================================
