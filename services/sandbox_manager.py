@@ -53,7 +53,12 @@ _NETNS_UNAVAILABLE_MSG = (
 )
 # H6/N11：bwrap 进程自身（沙箱 PID namespace 的 PID 1）只继承最小环境，
 # 防止 /proc/1/environ 泄露 JWT_SECRET / DATABASE_URL / API Key。
-_BWRAP_MIN_ENV = {"PATH": "/usr/bin:/bin"}
+# Q25 补线：setuid helper 从**自己的环境**读 FECLAW_RLIMIT_MEM_MB（helper.c 默认 128MB）。
+# subprocess 用这个 env 替换整个环境 ⇒ 不显式带过去，settings 里配的 512 永远不生效。
+_BWRAP_MIN_ENV = {
+    "PATH": "/usr/bin:/bin",
+    "FECLAW_RLIMIT_MEM_MB": str(getattr(settings, "FECLAW_RLIMIT_MEM_MB", 512)),
+}
 from .tool_log_service import is_tool_log_cos_key
 
 logger = logging.getLogger(__name__)
@@ -140,7 +145,8 @@ class SandboxManager:
 
     def exec_code(self, code: str, timeout: int = None,
                   parallel_sandbox: bool = False,
-                  lock_behavior: str = "wait_3s") -> ExecResult:
+                  lock_behavior: str = "wait_3s",
+                  cwd: str = None) -> ExecResult:
         """
         安全执行 Python 代码
 
@@ -217,7 +223,7 @@ class SandboxManager:
                 )
 
             # 7. 执行
-            result = self._execute_with_sandbox(full_code, timeout, sandbox_id)
+            result = self._execute_with_sandbox(full_code, timeout, sandbox_id, cwd)
             return result
 
         finally:
@@ -230,7 +236,8 @@ class SandboxManager:
 
     def exec_command(self, command: str, timeout: int = None,
                      parallel_sandbox: bool = False,
-                     lock_behavior: str = "wait_3s") -> ExecResult:
+                     lock_behavior: str = "wait_3s",
+                     cwd: str = None) -> ExecResult:
         """
         支持 python3 -c, python3 script.py, /bin/bash -c 格式
 
@@ -246,11 +253,11 @@ class SandboxManager:
         if command.startswith("python3 -c ") or command.startswith("python -c "):
             # FUSE 模式：走 bash 脚本路径（干净，避免 regex 引号 bug）
             if settings.FUSE_ENABLED and self._is_fuse_ready():
-                return self._exec_bash_via_sandbox(command, timeout)
+                return self._exec_bash_via_sandbox(command, timeout, cwd)
             parts = command.split(" -c ", 1)
             if len(parts) == 2:
                 code = parts[1].strip().strip("\"'")
-                return self.exec_code(code, timeout, parallel_sandbox, lock_behavior)
+                return self.exec_code(code, timeout, parallel_sandbox, lock_behavior, cwd)
             return ExecResult(
                 stdout="",
                 stderr="Error: Invalid command format",
@@ -267,7 +274,7 @@ class SandboxManager:
             if script_arg.startswith("-m "):
                 module_name = script_arg[3:].strip()
                 code = f"import {module_name}"
-                return self.exec_code(code, timeout, parallel_sandbox, lock_behavior)
+                return self.exec_code(code, timeout, parallel_sandbox, lock_behavior, cwd)
 
             # 从 VFS 获取脚本内容
             script_path = script_arg.split()[0]
@@ -279,7 +286,7 @@ class SandboxManager:
                 if content is None:
                     return ExecResult(stdout="", stderr=f"Error: Script not found: {script_path}", exit_code=1)
                 code = content.decode("utf-8", errors="replace")
-                return self.exec_code(code, timeout, parallel_sandbox, lock_behavior)
+                return self.exec_code(code, timeout, parallel_sandbox, lock_behavior, cwd)
             except Exception as e:
                 return ExecResult(stdout="", stderr=f"Error reading script: {e}", exit_code=1)
 
@@ -300,7 +307,7 @@ class SandboxManager:
                     bash_cmd = bash_cmd[1:-1]
                 elif bash_cmd.startswith('"') and bash_cmd.endswith('"'):
                     bash_cmd = bash_cmd[1:-1]
-            return self._exec_bash_via_sandbox(bash_cmd, timeout)
+            return self._exec_bash_via_sandbox(bash_cmd, timeout, cwd)
 
         else:
             return ExecResult(
@@ -309,7 +316,8 @@ class SandboxManager:
                 exit_code=1
             )
 
-    def _exec_bash_via_sandbox(self, bash_command: str, timeout: int = None) -> ExecResult:
+    def _exec_bash_via_sandbox(self, bash_command: str, timeout: int = None,
+                               cwd: str = None) -> ExecResult:
         """在 bwrap 沙箱中执行真实 bash 命令（FUSE 模式）"""
         sandbox_id = uuid.uuid4().hex[:12]
         if timeout is None:
@@ -340,7 +348,7 @@ class SandboxManager:
                 f.write("#!/bin/bash\nset -e\n" + bash_command)
             os.chmod(script_path, 0o755)
 
-            bwrap_cmd = self._build_bwrap_bash_command(script_path, timeout)
+            bwrap_cmd = self._build_bwrap_bash_command(script_path, timeout, cwd)
 
             result = subprocess.run(
                 bwrap_cmd, capture_output=True, text=True, timeout=timeout,
@@ -451,9 +459,12 @@ class SandboxManager:
         except Exception:
             pass
 
-    def _build_bwrap_bash_command(self, script_path: str, timeout: int) -> List[str]:
+    def _build_bwrap_bash_command(self, script_path: str, timeout: int,
+                                 cwd: str = None) -> List[str]:
         """构建用于执行 bash 脚本的 bubblewrap 命令（含 netns + seccomp enforcer）"""
         opts = self._build_bwrap_base_opts(script_path)
+        if cwd:
+            opts = opts + ["--chdir", cwd]
 
         # 入口：env -i（clearenv 白名单）→ /seccomp-enforcer → exec bash
         entry = ["/usr/bin/env", "-i", *self._build_sandbox_env(),
@@ -549,7 +560,7 @@ class SandboxManager:
     # ========================================================================
 
     def _execute_with_sandbox(self, code: str, timeout: int,
-                              sandbox_id: str) -> ExecResult:
+                              sandbox_id: str, cwd: str = None) -> ExecResult:
         """bwrap 沙箱执行（Q19/C1：fail-closed，绝不回退到无隔离 subprocess）。
 
         审计 C1：原实现会在 bwrap 内进程非 0 退出时，把**同一份代码**用
@@ -567,7 +578,7 @@ class SandboxManager:
                 sandbox_id=sandbox_id,
             )
 
-        result = self._execute_with_bwrap(code, timeout, sandbox_id)
+        result = self._execute_with_bwrap(code, timeout, sandbox_id, cwd)
         if result.exit_code == 0:
             return result
         # bwrap 内进程非 0 退出 —— 只记录，**不重跑**（fail-closed）
@@ -576,7 +587,7 @@ class SandboxManager:
         return result
 
     def _execute_with_bwrap(self, code: str, timeout: int,
-                            sandbox_id: str) -> ExecResult:
+                            sandbox_id: str, cwd: str = None) -> ExecResult:
         """通过 bubblewrap 安全执行（H5 fail-closed：无网络隔离即拒绝）"""
         # H5：网络隔离（netns + helper）不可用 ⇒ 拒绝执行，绝不退回宿主网络
         if NetworkIsolationManager.get_netns_prefix() is None:
@@ -592,7 +603,7 @@ class SandboxManager:
                 f.write(code)
 
             # 构建 bwrap 命令
-            bwrap_cmd = self._build_bwrap_command(script_path, timeout)
+            bwrap_cmd = self._build_bwrap_command(script_path, timeout, cwd)
 
             # 执行（helper 负责 netns + rlimits，seccomp 由 Python bootstrap 安装）
             # H6/N11：bwrap 自身（PID 1）只继承最小环境，不透传服务端密钥
@@ -754,17 +765,25 @@ class SandboxManager:
             "PYTHONWARNINGS=ignore",
             "LANG=C.UTF-8",
             "LC_ALL=C.UTF-8",
+            # Q25: BLAS 默认按 CPU 核数开线程，每线程都占地址空间；小任务单线程更快也更省
+            "OPENBLAS_NUM_THREADS=1",
+            "OMP_NUM_THREADS=1",
+            "MKL_NUM_THREADS=1",
         ]
         if self._is_fuse_ready():
             envs.append("FECLAW_USE_FUSE=1")
         return envs
 
-    def _build_bwrap_command(self, script_path: str, timeout: int) -> List[str]:
+    def _build_bwrap_command(self, script_path: str, timeout: int,
+                            cwd: str = None) -> List[str]:
         """构建 bubblewrap 隔离命令（含 netns 网络隔离 + seccomp enforcer）"""
         FECLAW_VENV = settings.FECLAW_VENV_PATH
         python_bin = "/venv/bin/python3" if os.path.exists(FECLAW_VENV) else \
             os.path.realpath(shutil.which("python3") or "/usr/local/bin/python3.12")
         opts = self._build_bwrap_base_opts(script_path)
+        if cwd:
+            # Q25: 让沙箱内工作目录 = 调用方 cwd（bash_tools 传 /workspace）
+            opts = opts + ["--chdir", cwd]
 
         # 入口：env -i（clearenv 白名单）→ /seccomp-enforcer → exec python
         entry = ["/usr/bin/env", "-i", *self._build_sandbox_env(),

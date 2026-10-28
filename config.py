@@ -311,6 +311,9 @@ class Settings(BaseSettings):
     SANDBOX_MAX_FILE_SIZE: int = 100 * 1024 * 1024      # 100 MB
     # Python venv 路径（沙箱内绑定到 /venv），默认服务器路径
     FECLAW_VENV_PATH: str = "./venv"
+    # Q25: 沙箱内存上限（MB）。deploy/helper/helper.c 读这同一个变量，
+    # 默认 128MB 对 numpy/matplotlib 不够；helper 硬上限 512MB。
+    FECLAW_RLIMIT_MEM_MB: int = 512
 
     # FUSE 文件系统配置
     FUSE_ENABLED: bool = True

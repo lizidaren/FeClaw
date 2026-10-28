@@ -1535,7 +1535,19 @@ async def initialize_agent_api(request: Request, body: InitializeRequest, user: 
             raise HTTPException(status_code=403, detail="无权访问")
 
         if agent.status == "initialized":
-            raise HTTPException(status_code=400, detail="Agent already initialized")
+            # Q25: 已初始化的 Agent 也允许改名/改描述
+            # （原来直接 400 ⇒ 设置页「保存」对已初始化 Agent 永远失败）
+            changed = False
+            if body.name and body.name != agent.name:
+                agent.name = body.name
+                changed = True
+            if body.description and body.description != agent.description:
+                agent.description = body.description
+                changed = True
+            if changed:
+                db.commit()
+            return {"status": "success", "message": f"Agent {agent_hash} updated",
+                    "result": {"updated": changed}}
 
         from services.agent_init_service import agent_init_service
 

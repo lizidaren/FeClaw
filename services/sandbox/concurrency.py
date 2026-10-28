@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class SandboxConfig:
     """沙箱配置"""
-    memory_limit_mb: int = 128
+    memory_limit_mb: int = 512  # Q25: numpy/OpenBLAS 需要更大地址空间（128MB 下 pthread_create 失败，实测 256MB 起可用）
     execution_timeout: int = 300
     max_processes: int = 10
     max_open_files: int = 64
