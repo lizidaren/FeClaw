@@ -15,7 +15,8 @@ import re
 
 def _env_keys(path):
     keys = {}
-    with open(path) as f:
+    # 显式 utf-8：模板里有中文注释，Windows 默认 locale(GBK/cp936) 会 UnicodeDecodeError
+    with open(path, encoding="utf-8") as f:
         for raw in f:
             line = raw.strip()
             if not line:
@@ -38,7 +39,7 @@ def test_env_example_has_no_duplicate_keys():
 
 def test_env_example_documents_oauth_endpoints():
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    with open(os.path.join(root, ".env.example")) as f:
+    with open(os.path.join(root, ".env.example"), encoding="utf-8") as f:
         content = f.read()
     assert "OAUTH_TOKEN_URL" in content
     assert "OAUTH_USERINFO_URL" in content

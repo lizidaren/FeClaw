@@ -1,16 +1,25 @@
 /**
- * 统一认证模块
- * 支持就地 TOTP 验证（不跳转）、session 检查、用户信息获取
+ * 统一认证模块（T18a：浏览器认证已迁移到服务端 HttpOnly Cookie）
  *
- * 核心功能：
- * 1. checkAuthBeforeRender() - 阻塞式认证检查，在页面渲染前执行
- * 2. fetch 包装 - 自动添加 Authorization 头，处理 401 认证失败
+ * 核心变化（相对旧版）：
+ * 1. **不再把 JWT 写进 localStorage**，也不再从 cookie 复制 token 到 localStorage。
+ *    会话令牌只在 HttpOnly cookie 里 —— 脚本读不到 ⇒ XSS 拿不到会话。
+ * 2. 认证判据是**服务端探测**（`GET /api/oauth/me`，cookie 自动携带），
+ *    而不是「localStorage 里有没有字符串」。
+ * 3. `Auth.fetch` 只给**同源**请求带 cookie（`credentials: 'same-origin'`），
+ *    只给**显式移动端 token** 加 `Authorization: Bearer`；跨源一律不带凭据。
+ * 4. URL 里的一次性 token（SSO 中继 `#token=`）交给服务端 `/api/user/session`
+ *    换成 HttpOnly cookie，然后立刻从地址栏抹掉，**不落 localStorage**。
+ * 5. 迁移只读兼容：旧 localStorage token 会被读取一次、换成 cookie、然后删除。
+ * 6. 登录后跳转走 `Auth.safeInternalPath`（与后端
+ *    `utils.auth_dependencies.safe_internal_redirect_path` 同一套规则）。
  */
 const Auth = {
-  // JWT 存储键名
+  // 旧存储键名（只用于迁移清理，不再写入）
   JWT_KEY: 'feclaw_jwt',
   USER_KEY: 'feclaw_user',
   EXPIRES_KEY: 'feclaw_jwt_expires_at',
+  MOBILE_TOKEN_KEY: 'feclaw_mobile_token',
 
   // 根域名（SSO 同步用）
   ROOT_DOMAIN: window.ROOT_DOMAIN || '',
@@ -18,9 +27,16 @@ const Auth = {
   // API 端点
   API_BASE: '/api/workspace',
   VERIFY_TOTP_ENDPOINT: '/api/workspace/totp/verify',
+  SESSION_PROBE_ENDPOINT: '/api/oauth/me',
+  ADOPT_ENDPOINT: '/api/user/session',
+  CSRF_COOKIE: 'feclaw_csrf',
 
   // 登录页面路径
   LOGIN_PATH: '/login',
+
+  // 迁移期内存中的一次性 token（不写任何持久化存储）
+  _memoryToken: null,
+  _csrfToken: null,
 
   /**
    * 在页面加载前检查认证（阻塞式）
@@ -28,59 +44,223 @@ const Auth = {
    * @returns {Promise<boolean>} 是否已认证
    */
   async checkAuthBeforeRender() {
-    // 0. 检查 URL 参数 / fragment 中的 token（SSO 同步回调或 OAuth 回调）
-    //    先保存 token，防止后续检查因无 token 而跳转
-    const urlParams = new URLSearchParams(window.location.search);
-    let urlToken = urlParams.get('token');
-    let cleanedUrl = null;
-    if (urlToken) {
-      urlParams.delete('token');
-      cleanedUrl = window.location.pathname + (urlParams.toString() ? '?' + urlParams.toString() : '');
-    } else if (window.location.hash && window.location.hash.indexOf('#token=') === 0) {
-      // Q19/C7：SSO sync 现在把 token 放 fragment（#token=），不进 query/Referer
-      urlToken = window.location.hash.substring('#token='.length);
-      cleanedUrl = window.location.pathname + window.location.search;
-    }
-    if (urlToken) {
-      this.setToken(urlToken);
-      // 清理 URL 中的 token，避免泄露
-      if (cleanedUrl !== null) {
-        window.history.replaceState({}, '', cleanedUrl);
-      }
+    // 0. URL 一次性 token（SSO 中继 / 老回调）：换成 cookie，不落 localStorage
+    await this._consumeUrlToken();
+
+    // 1. 服务端 cookie 会话是否有效 —— 唯一判据
+    if (await this._hasCookieSession()) {
+      return true;
     }
 
-    const token = this.getToken();
-    const expiresAt = localStorage.getItem(this.EXPIRES_KEY);
+    // 2. 迁移兼容：旧的 localStorage token 只读一次 → 换 cookie → 删除
+    if (await this._migrateLegacyToken()) {
+      return true;
+    }
 
-    // 1. 没有 JWT → 根据域名决定行为
-    if (!token) {
-      if (this._isSubdomain()) {
-        // 子域名：先尝试 SSO sync（从根域名要 token）
-        const currentPath = window.location.pathname + window.location.search;
-        const currentHost = window.location.hostname;
-        const syncUrl = `https://${this.ROOT_DOMAIN}/api/auth/sync?redirect=${encodeURIComponent(currentPath)}&host=${encodeURIComponent(currentHost)}`;
-        window.location.href = syncUrl;
-        return false;
-      }
-      // 根域名：跳转登录页（但不在登录页本身跳转，防止无限循环）
-      if (!window.location.pathname.includes('/login')) {
-        this.redirectToLogin();
-      }
+    // 3. 未登录 → 子域走 SSO 中继，根域跳登录页
+    if (this._isSubdomain()) {
+      const currentPath = window.location.pathname + window.location.search;
+      const currentHost = window.location.hostname;
+      const syncUrl = `https://${this.ROOT_DOMAIN}/api/auth/sync?redirect=${encodeURIComponent(currentPath)}&host=${encodeURIComponent(currentHost)}`;
+      window.location.href = syncUrl;
       return false;
     }
+    if (!window.location.pathname.includes('/login')) {
+      this.redirectToLogin();
+    }
+    return false;
+  },
 
-    // 2. JWT 已过期 → 清除并跳转登录
-    //    serverRevoke:false —— 被动过期不是用户主动登出，不能吊销该用户其他设备的 token
-    if (expiresAt && Date.now() > parseInt(expiresAt)) {
-      this.clearAuth({ serverRevoke: false });
-      if (!window.location.pathname.includes('/login')) {
-        this.redirectToLogin();
-      }
+  /**
+   * 探测服务端 cookie 会话（不抛错、不触发登录跳转）。
+   * @returns {Promise<boolean>}
+   */
+  async _hasCookieSession() {
+    const fetcher = window._originalFetch || window.__feclawFetchWithCsrf || window.fetch;
+    try {
+      const res = await fetcher(this.SESSION_PROBE_ENDPOINT, {
+        method: 'GET',
+        credentials: 'same-origin',
+        cache: 'no-store'
+      });
+      return !!res && res.ok;
+    } catch (e) {
       return false;
     }
+  },
 
-    // 3. 有 token 且未过期，返回成功
-    return true;
+  /**
+   * 消费 URL 中的一次性 token：`?token=`（旧）或 `#token=`（SSO 中继）。
+   * 读了立刻从地址栏抹掉（防 Referer / 历史记录 / 截图泄漏），再交给服务端换 cookie。
+   */
+  async _consumeUrlToken() {
+    let token = null;
+    let cleaned = null;
+    try {
+      const params = new URLSearchParams(window.location.search);
+      if (params.has('token')) {
+        token = params.get('token');
+        params.delete('token');
+        cleaned = window.location.pathname + (params.toString() ? '?' + params.toString() : '');
+      } else if (window.location.hash && window.location.hash.indexOf('#token=') === 0) {
+        token = window.location.hash.substring('#token='.length);
+        cleaned = window.location.pathname + window.location.search;
+      }
+    } catch (e) {
+      return;
+    }
+    if (!token) return;
+
+    if (cleaned !== null) {
+      try { window.history.replaceState({}, '', cleaned); } catch (e) {}
+    }
+
+    const ok = await this.adoptSessionToken(token);
+    if (!ok) {
+      // 旧 cookie 可能是无效的「同名不同域」变体，挡住新的 cookie 写入。
+      // 先做一次幂等登出（服务端会清 host-only + domain 变体），再重试一次。
+      try {
+        const fetcher = window._originalFetch || window.fetch;
+        await fetcher('/api/auth/logout', { method: 'POST', credentials: 'same-origin', keepalive: true });
+      } catch (e) {}
+      await this.adoptSessionToken(token);
+    }
+  },
+
+  /**
+   * 迁移兼容：读取旧 localStorage token，交给服务端换 HttpOnly cookie，然后删除。
+   * 只读一次、只尝试一次；失败即删除（无效 token 留着只会制造登录循环）。
+   * @returns {Promise<boolean>}
+   */
+  async _migrateLegacyToken() {
+    let legacy = null;
+    try { legacy = localStorage.getItem(this.JWT_KEY); } catch (e) { return false; }
+    if (!legacy) return false;
+
+    const ok = await this.adoptSessionToken(legacy);
+    if (ok) {
+      this._purgeLegacyToken();
+      return true;
+    }
+    this._purgeLegacyToken();
+    return false;
+  },
+
+  /** 删除旧版 token 存储键（真正迁到 cookie 之后才调用）。 */
+  _purgeLegacyToken() {
+    try {
+      localStorage.removeItem(this.JWT_KEY);
+      localStorage.removeItem(this.EXPIRES_KEY);
+      localStorage.removeItem('feclaw_jwt_expires');
+    } catch (e) {}
+    this._memoryToken = null;
+  },
+
+  /**
+   * 把一次性 token 交给服务端换成 HttpOnly 会话 cookie（不再持久化 token 本身）。
+   * @param {string} token
+   * @returns {Promise<boolean>}
+   */
+  async adoptSessionToken(token) {
+    if (!token || typeof token !== 'string') return false;
+    const fetcher = window._originalFetch || window.fetch;
+    try {
+      const res = await fetcher(this.ADOPT_ENDPOINT, {
+        method: 'POST',
+        credentials: 'same-origin',
+        cache: 'no-store',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: token })
+      });
+      if (!res || !res.ok) return false;
+      try {
+        const data = await res.json();
+        if (data && data.csrf_token) this._csrfToken = data.csrf_token;
+      } catch (e) {}
+      return true;
+    } catch (e) {
+      return false;
+    }
+  },
+
+  /**
+   * 读 CSRF token（双提交）：内存优先，其次可读 cookie。
+   * 后端下发点：登录 / 注册 / 改密 / `/api/oauth/me`（有会话时补发）。
+   * @returns {string|null}
+   */
+  csrfToken() {
+    if (this._csrfToken) return this._csrfToken;
+    try {
+      const m = document.cookie.match(new RegExp('(?:^|;\\s*)' + this.CSRF_COOKIE + '=([^;]+)'));
+      return m ? decodeURIComponent(m[1]) : null;
+    } catch (e) {
+      return null;
+    }
+  },
+
+  /**
+   * 显式移动端 token 支持（`Authorization: Bearer`），**只用于非浏览器场景**。
+   * 浏览器流程不需要、也不应该调用它。
+   */
+  setMobileToken(token) {
+    try {
+      if (token) sessionStorage.setItem(this.MOBILE_TOKEN_KEY, token);
+      else sessionStorage.removeItem(this.MOBILE_TOKEN_KEY);
+    } catch (e) {}
+  },
+
+  getMobileToken() {
+    try { return sessionStorage.getItem(this.MOBILE_TOKEN_KEY) || null; } catch (e) { return null; }
+  },
+
+  /**
+   * 内部规范相对路径白名单（**必须**与后端
+   * `utils.auth_dependencies.safe_internal_redirect_path` 规则一致）
+   * @param {*} value
+   * @param {string} fallback
+   * @returns {string}
+   */
+  safeInternalPath(value, fallback) {
+    const def = fallback || '/dashboard';
+    if (typeof value !== 'string') return def;
+    const text = value.trim();
+    if (!text) return def;
+
+    const check = (s) => {
+      if (!s || s.charAt(0) !== '/') return false;
+      if (s.slice(0, 2) === '//' || s.slice(0, 2) === '/\\') return false;
+      if (s.indexOf('\\') !== -1) return false;
+      for (let i = 0; i < s.length; i++) {
+        const c = s.charCodeAt(i);
+        if (c < 0x20 || c === 0x7f || c === 0x20) return false;
+      }
+      const low = s.toLowerCase();
+      if (low.indexOf('javascript:') !== -1 || low.indexOf('data:') !== -1 ||
+          low.indexOf('vbscript:') !== -1 || low.indexOf('file:') !== -1) return false;
+      return true;
+    };
+
+    if (!check(text)) return def;
+    let decoded = text;
+    for (let i = 0; i < 3; i++) {
+      let next;
+      try { next = decodeURIComponent(decoded); } catch (e) { next = decoded; }
+      if (next === decoded) break;
+      decoded = next;
+    }
+    if (decoded !== text && !check(decoded)) return def;
+    return text;
+  },
+
+  /** 登录成功后按白名单跳转（`data.redirect` / `?redirect_to=`）。 */
+  redirectAfterLogin(data) {
+    let target = (data && data.redirect) || null;
+    if (!target) {
+      try {
+        target = new URLSearchParams(window.location.search).get('redirect_to');
+      } catch (e) { target = null; }
+    }
+    window.location.href = this.safeInternalPath(target, '/dashboard');
   },
 
   /**
@@ -263,26 +443,67 @@ const Auth = {
   },
 
   /**
-   * 包装 fetch，自动添加 Authorization 头并处理 401
-   * 使用方式：直接调用 window.fetch()
+   * 是否同源（同源才允许带 cookie / Bearer）
+   */
+  _isSameOrigin(url) {
+    try {
+      const resolved = new URL(typeof url === 'string' ? url : (url && url.url) || '', window.location.href);
+      return resolved.origin === window.location.origin;
+    } catch (e) {
+      return false;
+    }
+  },
+
+  /**
+   * 包装 fetch：同源带 cookie、跨源不带任何凭据、401 统一处理
+   *
+   * T18a 规则：
+   * - 同源 → `credentials: 'same-origin'`（cookie 自动携带，HttpOnly 也生效）
+   * - 跨源 → `credentials: 'omit'` + **绝不**加 `Authorization`
+   *   （旧实现无条件加 Bearer，跨源请求会把令牌送到外域）
+   * - `Authorization` 只用于**显式移动端 token**（`Auth.setMobileToken` /
+   *   `options.mobileToken`），普通浏览器流程不需要它
+   *
+   * 使用方式：直接调用 window.fetch()（本模块安装为全局包装）
    */
   async fetch(url, options = {}) {
-    const token = this.getToken();
-    if (token) {
+    const fetcher = window._originalFetch || window.__feclawFetchWithCsrf || window.fetch;
+    options = options || {};
+    const sameOrigin = this._isSameOrigin(url);
+
+    if (sameOrigin) {
+      if (!('credentials' in options)) options.credentials = 'same-origin';
+    } else {
+      // 跨源：不发 cookie、不带 Bearer
+      if (!('credentials' in options)) options.credentials = 'omit';
+    }
+
+    const explicitMobileToken = options.mobileToken || null;
+    if ('mobileToken' in options) delete options.mobileToken;
+    const mobileToken = explicitMobileToken || this.getMobileToken();
+
+    if (sameOrigin && mobileToken) {
       options.headers = options.headers || {};
       if (!(options.headers instanceof Headers)) {
         options.headers = new Headers(options.headers);
       }
-      options.headers.set('Authorization', `Bearer ${token}`);
+      options.headers.set('Authorization', `Bearer ${mobileToken}`);
     }
 
-    const response = await window._originalFetch(url, options);
+    const response = await fetcher(url, options);
 
-    // 认证失败 → 清除认证并跳转登录
-    // serverRevoke:false —— 401 可能只是本浏览器 token 陈旧，不该连带吊销其他设备
+    // 认证失败 → 清理本地状态并跳转登录
+    // serverRevoke:false —— 401 可能只是本浏览器会话陈旧，不该连带吊销其他设备
     if (response.status === 401) {
-      this.clearAuth({ serverRevoke: false });
-      this.redirectToLogin();
+      const path = (window.location && window.location.pathname) || '';
+      const isAuthEndpoint = typeof url === 'string' &&
+        (url.indexOf('/api/user/login') === 0 ||
+         url.indexOf('/api/user/session') === 0 ||
+         url.indexOf('/api/oauth/me') === 0);
+      if (!path.includes('/login') && !isAuthEndpoint) {
+        this.clearAuth({ serverRevoke: false });
+        this.redirectToLogin();
+      }
       throw new Error('Authentication failed');
     }
 
@@ -318,15 +539,22 @@ const Auth = {
    * @returns {Promise} 后端登出请求的 promise（供调用方在跳转前 await）
    */
   clearAuth(options = {}) {
+    this._memoryToken = null;
+    this._csrfToken = null;
     localStorage.removeItem(this.JWT_KEY);
     localStorage.removeItem(this.EXPIRES_KEY);
     localStorage.removeItem('feclaw_jwt_expires');
     localStorage.removeItem(this.USER_KEY);
     localStorage.removeItem('feclaw_agent_hash');
-    // 清除认证 cookie（三个名字，各含 domain + host-only 变体）
+    try { sessionStorage.removeItem(this.MOBILE_TOKEN_KEY); } catch (e) {}
+    // 清除**非 HttpOnly** 旧 cookie（host-only + domain 变体）。
+    // T18a 起会话 cookie 是 HttpOnly，只能由服务端删 —— `/api/auth/logout`
+    // （routers/feclaw_domain.py）与 `/api/oauth/logout` 都会清 host-only + domain
+    // 两个变体，并附带清 TOTP cookie 与 CSRF cookie。
     this._clearCookie('feclaw_jwt');
     this._clearCookie('feclaw_id_token');
     this._clearCookie('platform_token');
+    this._clearCookie(this.CSRF_COOKIE);
     // 清除所有 TOTP Agent 专属 cookie
     var cookies = document.cookie.split('; ');
     for (var i = 0; i < cookies.length; i++) {
@@ -362,18 +590,27 @@ const Auth = {
 
   /**
    * 设置认证信息（登录成功后调用）
-   * @param {string} token JWT token
+   *
+   * T18a：**不再写 localStorage**。会话令牌由服务端 HttpOnly cookie 承载；
+   * 这里只把一次性 token 交给服务端换 cookie（`adoptSessionToken`），
+   * 并记住非敏感的过期时间（仅用于 UI 提示）。
+   *
+   * @param {string} token JWT token（一次性交接用；可为 null）
    * @param {string|number} expiresAt 过期时间（ISO 字串或毫秒数）
-   * @param {object} user 用户信息（可选）
+   * @param {object} user 用户信息（可选，非敏感展示数据）
    */
   setAuth(token, expiresAt, user = null) {
-    this.setToken(token);
+    if (token) {
+      this._memoryToken = token;
+      // 服务端通常已经种好 cookie；这一调用只覆盖「token 是从别处拿到」的情况
+      this.adoptSessionToken(token);
+    }
     if (expiresAt) {
-      // 支持两种格式：ISO 字串或毫秒数
       const expiresMs = typeof expiresAt === 'string'
         ? (expiresAt.includes('T') ? new Date(expiresAt).getTime() : parseInt(expiresAt))
         : expiresAt;
-      localStorage.setItem(this.EXPIRES_KEY, expiresMs.toString());
+      // 只存过期时间（非凭据）—— 方便 UI 提前续期提示
+      try { localStorage.setItem(this.EXPIRES_KEY, String(expiresMs)); } catch (e) {}
     }
     if (user) {
       this.setUser(user);
@@ -381,28 +618,25 @@ const Auth = {
   },
 
   /**
-   * 检查登录状态
+   * 检查登录状态（T18a：服务端 cookie 探测，不再看 localStorage token）
    * @returns {Promise<{loggedIn: boolean, user?: object}>}
    */
   async checkSession() {
-    const token = this.getToken();
-    if (!token) {
-      return { loggedIn: false };
-    }
-
-    // 验证 token 是否有效
+    const fetcher = window._originalFetch || window.fetch;
     try {
-      const response = await fetch(`${this.API_BASE}/me`, {
-        headers: { 'Authorization': `Bearer ${token}` }
+      const response = await fetcher(this.SESSION_PROBE_ENDPOINT, {
+        method: 'GET',
+        credentials: 'same-origin',
+        cache: 'no-store'
       });
-
       if (response.ok) {
-        const data = await response.json();
-        // 保存用户信息
-        this.setUser({ user_id: data.user_id, workspace_root: data.workspace_root });
+        const data = await response.json().catch(() => ({}));
+        const u = (data && data.user) || {};
+        // 只缓存非敏感展示信息（不是凭据）
+        this.setUser({ user_id: u.id, username: u.username });
         return { loggedIn: true, user: data };
-      } else if (response.status === 401) {
-        // Token 无效，清除
+      }
+      if (response.status === 401) {
         this.clearToken();
         return { loggedIn: false };
       }
@@ -590,36 +824,52 @@ const Auth = {
     return false;
   },
 
-  // ========== Token 管理 ==========
+  // ========== Token 管理（T18a：只读兼容，不再写入）==========
 
+  /**
+   * 读旧版 localStorage token（**只读兼容**，一个版本后移除）
+   *
+   * 新登录流程不再产生 localStorage token；这里只为迁移期让尚未切换的页面
+   * 仍然「有个值可用」（最终它们也应该只依赖 cookie）。
+   */
   getToken() {
-    let token = localStorage.getItem(this.JWT_KEY);
-    if (!token) {
-      token = this.getTokenFromCookie();
-      if (token) {
-        localStorage.setItem(this.JWT_KEY, token);
-      }
+    if (this._memoryToken) return this._memoryToken;
+    try {
+      return localStorage.getItem(this.JWT_KEY) || null;
+    } catch (e) {
+      return null;
     }
-    return token;
   },
 
+  /** 读非 HttpOnly 的旧 cookie（只读兼容；HttpOnly 会话 cookie 读不到，这是设计）。 */
   getTokenFromCookie() {
     const match = document.cookie.match(new RegExp('(^| )feclaw_jwt=([^;]+)'));
     return match ? decodeURIComponent(match[2]) : null;
   },
 
+  /**
+   * 登记 token（T18a：**不写 localStorage / 不写 document.cookie**）
+   *
+   * 服务端 HttpOnly cookie 才是会话权威；本方法只把一次性 token 交给服务端
+   * 换 cookie（`adoptSessionToken`），调用方无需 await。
+   */
   setToken(token) {
-    localStorage.setItem(this.JWT_KEY, token);
-    // Q20/H10：不再用 document.cookie 写同名 cookie —— 那会让服务端的 HttpOnly 失效，
-    // 使任意子域 XSS 可读走会话 JWT。页面路由的 cookie 由服务端（HttpOnly）统一下发。
+    if (!token) return;
+    this._memoryToken = token;
+    // 服务端若已种 cookie，这次调用是幂等的；否则它会把 token 落成 HttpOnly cookie
+    this.adoptSessionToken(token);
   },
 
   clearToken() {
-    localStorage.removeItem(this.JWT_KEY);
-    localStorage.removeItem(this.USER_KEY);
-    // 清除 cookie
-    document.cookie = 'feclaw_jwt=; path=/; SameSite=Lax; max-age=0';
-    document.cookie = 'feclaw_jwt=; path=/; SameSite=Lax; max-age=0';
+    this._memoryToken = null;
+    try {
+      localStorage.removeItem(this.JWT_KEY);
+      localStorage.removeItem(this.USER_KEY);
+      localStorage.removeItem(this.EXPIRES_KEY);
+    } catch (e) {}
+    // 清掉迁移期可能存在的**非 HttpOnly** 旧 cookie（host-only 与 domain 变体）。
+    // HttpOnly 会话 cookie 只能由服务端删（`/api/auth/logout` 已统一处理）。
+    this._clearCookie('feclaw_jwt');
   },
 
   // ========== User 信息管理 ==========

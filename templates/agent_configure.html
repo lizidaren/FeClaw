@@ -560,7 +560,10 @@
     <script>window.ROOT_DOMAIN = "{{ feclaw_domain }}";</script>
     <script src="/static/js/token-sync.js"></script>
     <script src="/static/js/auth.js"></script>
-    <script src="/static/markdown-it.min.js"></script>
+    <!-- T16：唯一安全渲染边界（marked → DOMPurify），加载顺序不可调换 -->
+    <script src="/static/marked.min.js"></script>
+    <script src="/static/vendor/dompurify.min.js"></script>
+    <script src="/static/js/safe-render.js"></script>
     <script>
         (async function() {
             const loggedIn = await Auth.checkAuthBeforeRender();
@@ -647,13 +650,13 @@
                             </div>
                         </div>
 
-                        <!-- Persona / SOUL.md -->
+                        <!-- Persona / soul.md -->
                         <div class="config-section">
                             <div class="section-label">
-                                <h4>SOUL.md — 人格定义</h4>
+                                <h4>soul.md — 人格定义</h4>
                                 <span class="char-count" id="soulCount">0 字</span>
                             </div>
-                            <textarea class="form-textarea soul initial-height" id="soulInput" placeholder="Agent 的性格、身份、行为准则..." aria-label="SOUL.md 人格定义" oninput="saveEditorContent();updateCounts();autoGrow(this)"></textarea>
+                            <textarea class="form-textarea soul initial-height" id="soulInput" placeholder="Agent 的性格、身份、行为准则..." aria-label="soul.md 人格定义" oninput="saveEditorContent();updateCounts();autoGrow(this)"></textarea>
                         </div>
 
                         <!-- identity.md -->
@@ -741,7 +744,7 @@
             'user.md': 'userInput',
         };
         const FILE_LABEL_MAP = {
-            'soul.md': 'SOUL.md',
+            'soul.md': 'soul.md',
             'identity.md': 'identity.md',
             'user.md': 'user.md',
         };
@@ -1394,13 +1397,13 @@
             const bubble = document.createElement('div');
             bubble.className = 'message tool';
             if (tr.type === 'read_file') {
-                bubble.innerHTML = `📖 已读取 ${tr.detail}`;
+                bubble.innerHTML = `📖 已读取 ${escapeHtml(tr.detail)}`;
                 recordRender('tool_read', { detail: tr.detail });
             } else if (tr.type === 'edit_file' || tr.type === 'write_file') {
                 const edit = tr.edit;
                 const action = tr.type === 'edit_file' ? '修改' : '重写';
                 bubble.innerHTML = `
-                    <div>[${action}] ${tr.detail}</div>
+                    <div>[${action}] ${escapeHtml(tr.detail)}</div>
                     <div class="tool-actions">
                         <button class="tool-btn" onclick="viewDiff(${edit.id})" title="对比差异">📄 对比差异</button>
                         <button class="tool-btn" id="applyBtn_${edit.id}" onclick="applyEdit(${edit.id})" title="批准更改">✅ 批准更改</button>
@@ -1580,17 +1583,20 @@
         }
 
         // ========== Markdown renderer ==========
+        // T16：唯一安全渲染边界 —— 配置助手气泡同样走 marked → DOMPurify，
+        // 不再各自维护一套解析/清洗逻辑。安全边界缺失时退化为纯文本。
         function renderMarkdown(text) {
             if (!text) return '';
-            if (typeof window.markdownit !== 'undefined') {
-                const md = window.markdownit({ html: false, breaks: true, linkify: true });
-                md.disable('table');
-                return md.render(text);
+            var sr = window.FeClawSafeRender;
+            if (!sr || typeof sr.renderMarkdownSafe !== 'function') {
+                return escapeHtml(text).replace(/\n/g, '<br>');
             }
-            // fallback: safe escape + <br>
-            const el = document.createElement('div');
-            el.textContent = text;
-            return el.innerHTML.replace(/\n/g, '<br>');
+            try {
+                return sr.renderMarkdownSafe(text);
+            } catch (e) {
+                console.error('renderMarkdown error:', e);
+                return escapeHtml(text).replace(/\n/g, '<br>');
+            }
         }
 
         function escapeHtml(text) {

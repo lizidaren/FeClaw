@@ -510,11 +510,16 @@
             const btn = event.target;
             btn.disabled = true; btn.textContent = '保存中...';
             try {
-                const res = await Auth.fetch('/api/agent/initialize', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ persona: '', name: name, description: '' })
-                });
+                // T03a：改名只走显示名 PATCH，不再用 /api/agent/initialize
+                // （对已初始化 Agent 会 400，且可能把 persona 当初始化参数重写）
+                const res = await Auth.fetch(
+                    '/api/console/agents/by-hash/' + encodeURIComponent(agentHash) + '/settings',
+                    {
+                        method: 'PATCH',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ alias: name })
+                    }
+                );
                 if (res.ok) {
                     showToast('保存成功');
                     loadProfile();

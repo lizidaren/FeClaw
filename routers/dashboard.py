@@ -467,6 +467,10 @@ PAGE_HTML = """<!DOCTYPE html>
     </div>
 
     <script src="/static/marked.min.js"></script>
+    <!-- T16：自托管 DOMPurify（锁定 3.2.4，禁止改回 CDN） -->
+    <script src="/static/vendor/dompurify.min.js"></script>
+    <!-- T16：唯一安全渲染边界 marked → DOMPurify（加载顺序不可调换） -->
+    <script src="/static/js/safe-render.js"></script>
     <script>
         // Q18: group_id 回退为 UUID 字符串；无 query string 时不发请求（不再默认假群 "1"）
         const GROUP_ID = (new URLSearchParams(window.location.search)).get("group_id") || "";
@@ -507,12 +511,41 @@ PAGE_HTML = """<!DOCTYPE html>
             return `${month}/${day}`;
         }
 
+        // T16：唯一安全渲染边界 —— marked → DOMPurify（safe-render.js）。
+        // @提及在消毒后的 DOM 文本节点内处理，不再对 HTML 字符串做 replace，
+        // 否则拼接结果可能落进属性值或代码块。
         function processContent(text) {
-            // Render markdown (uses marked.min.js from static)
-            let html = marked.parse(text || '', { breaks: true, gfm: true });
-            // @mentions after markdown so code blocks aren't affected
-            html = html.replace(/@(\\S+)/g, '<span class="mention">@$1</span>');
-            return html;
+            var source = text || '';
+            var sr = window.FeClawSafeRender;
+            if (!sr || typeof sr.renderMarkdownSafe !== 'function') {
+                // 安全边界未加载：退化为纯文本，绝不注入未消毒 HTML
+                return escapeHtml(source);
+            }
+            try {
+                return sr.renderMarkdownSafe(source, {
+                    transformText: function (value) {
+                        if (value.indexOf('@') === -1) return null;
+                        var frag = document.createDocumentFragment();
+                        var re = /@(\\S+)/g;
+                        var last = 0;
+                        var m;
+                        while ((m = re.exec(value)) !== null) {
+                            if (m.index > last) frag.appendChild(document.createTextNode(value.slice(last, m.index)));
+                            var span = document.createElement('span');
+                            span.className = 'mention';
+                            span.textContent = '@' + m[1];
+                            frag.appendChild(span);
+                            last = m.index + m[0].length;
+                        }
+                        if (!frag.childNodes.length) return null;
+                        if (last < value.length) frag.appendChild(document.createTextNode(value.slice(last)));
+                        return frag;
+                    }
+                });
+            } catch (e) {
+                console.error('processContent error:', e);
+                return escapeHtml(source);
+            }
         }
 
         function renderMessage(m) {
@@ -524,9 +557,9 @@ PAGE_HTML = """<!DOCTYPE html>
             return `
                 <div class="msg ${isUser ? 'user' : ''}" data-msg-id="${escapeHtml(m.id)}">
                     <div class="msg-head">
-                        <div class="msg-avatar">${m.emoji || '👤'}</div>
-                        <span class="msg-name">${escapeHtml(m.sender_name)}</span>
-                        <span class="msg-round">R${round}</span>
+                        <div class="msg-avatar">${escapeHtml(String(m.emoji || '👤'))}</div>
+                        <span class="msg-name">${escapeHtml(String(m.sender_name || ''))}</span>
+                        <span class="msg-round">R${escapeHtml(String(round == null ? '' : round))}</span>
                         <span class="msg-time">${date} ${time}</span>
                     </div>
                     <div class="msg-content">${processContent(m.content)}</div>

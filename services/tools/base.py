@@ -79,7 +79,12 @@ class AgentToolsServiceBase:
         self.base_path = f"feclaw/agents/{self.agent_hash}/"
         self._vfs = VirtualFileSystem(agent_hash=agent_hash)
         self._storage = None
-        self._perm_service = PermissionService(agent_hash)
+        # T03a：必须用关键字传 agent_hash。
+        # PermissionService(user_id=None, db=None, agent_hash=None) 的第一个位置参数是
+        # user_id —— 旧写法 PermissionService(agent_hash) 把 4 位 hash 当成 user_id 传进去，
+        # 权限查询于是按「用户 id = 'ab12'」去匹配，永远查不到真实授权。
+        # 构造器本身保持 user-first 兼容，不改签名（老 caller 不受影响）。
+        self._perm_service = PermissionService(agent_hash=agent_hash)
 
     # ========== 属性（懒加载） ==========
 

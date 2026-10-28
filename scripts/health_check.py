@@ -8,44 +8,81 @@
   （Q9 又补一例：dashboard JS 静默坏）
 本脚本把这些「静态坏」变成可检测、可重复、可回归的体检。
 
-四个阶段
-  ① JS 语法体检      node --check 全部 static/js/*.js（script + module 两种模式）
-                     并抽取 templates/*.html 的内联 <script> 一并检查（Jinja 变量已中性化）
-  ② 静态资源真实性   扫描模板里的 src=/href=/url()，本站资源真请求，必须 200；外链单列
-  ③ 页面加载体检     真 Chromium 逐页打开，收集 console.error / pageerror / 失败请求
-  ④ 接口健康矩阵     按 /openapi.json 穷举所有路由，真实请求，输出「接口/方法/期望码/实测码」
+⚠️ 2026-10-25（T02）：默认路径**必须真的只读**。
+   旧版默认会 login/register、创建 Agent、跑 POST/PUT/PATCH/DELETE、撞自毁接口，
+   即「体检本身会改数据」。现在分三级：
+
+   L0 默认（只读巡检，CI/日常/生产可安全跑）
+      ① JS 语法体检（本地 node --check）
+      ② 模板静态资源真实性（仅 GET）
+      ③ 页面加载体检（真 Chromium，仅 GET/导航）
+      ④ 接口矩阵（仅 GET；POST/PUT/PATCH/DELETE 一律记为「只读模式跳过」）
+      • 不登录、不注册、不创建、不删除、不调用模型
+      • 身份只来自运维显式提供的只读令牌 FECLAW_HC_TOKEN（可选，脚本不代登录）
+
+   L1 --integration（仍只读）
+      允许带 FECLAW_HC_TOKEN 做已鉴权 GET 探活；仍然不 login/register、不写。
+
+   L2 --integration --allow-mutations（破坏性，人已批准的一次性空库/测试环境）
+      • 必须显式传 --base-url，且只接受回环/私网地址，生产域名一律拒绝（fail-closed）
+      • 不复用任何已有账号或它的首个 Agent：本次运行注册自己的随机账号、自己建 Agent
+      • 每条写操作的目标都必须能追溯到本次 ResourceLedger 记录（清理白名单）
+      • 清理只删 ledger 里记录的资源；未记录的 id 一律拒绝，账号（无删除端点）如实报保留
 
 用法
-  python scripts/health_check.py                          # 跑在 http://127.0.0.1:8080
-  python scripts/health_check.py --base-url http://127.0.0.1:8091
+  python scripts/health_check.py                          # L0 只读巡检 http://127.0.0.1:8080
+  python scripts/health_check.py --base-url http://127.0.0.1:8091 --only 1,2
   python scripts/health_check.py --json /tmp/hc.json --skip-browser
-  python scripts/health_check.py --only 1,2               # 只跑指定阶段
+  python scripts/health_check.py --ready-check            # 只做 /ready 门禁（deploy.sh 同一契约）
+  python scripts/health_check.py --integration --allow-mutations \
+        --base-url http://127.0.0.1:8091                # L2，仅一次性测试环境
 
 依赖：node（①）；playwright + 本机已装的 chromium（③，不会联网下载浏览器）。
-退出码：0 = 无发现；1 = 有发现；2 = 环境准备失败（如服务没起、缺 node）。
+退出码：0 = 无发现；1 = 有发现；2 = 环境准备失败 / 参数不安全（如 mutation 目标不合规）。
 """
 from __future__ import annotations
 
 import argparse
 import glob
+import ipaddress
 import json
 import os
 import re
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections import Counter
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 
+# 输出统一 UTF-8：CI / Windows 控制台的 locale 可能是 GBK，中文与 ✓/✗ 会直接
+# UnicodeEncodeError 把体检脚本自己搞崩（静默失败的反面：脚本挂了却像没问题）。
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001
+        pass
+
 # ─────────────────────────── 配置 ───────────────────────────
 
-# 浏览器访客身份：用测试账号的 JWT 注入 cookie（不含真实用户）
-TEST_USER = os.environ.get("FECLAW_HC_USER", "q4_health")
-TEST_PASS = os.environ.get("FECLAW_HC_PASS", "Q4Health#2026")
+DEFAULT_BASE_URL = "http://127.0.0.1:8080"
+
+# 生产域名：mutation 模式必须拒绝（即使有人显式传了这些 host 也拒绝）
+PRODUCTION_HOSTS = tuple(
+    h.strip().lower()
+    for h in os.environ.get(
+        "FECLAW_HC_PROD_HOSTS", "feclaw.lizidaren.cn,lizidaren.cn"
+    ).split(",")
+    if h.strip()
+)
+
+# 只读巡检可用的令牌：由运维显式提供，脚本自己**不**登录拿 token
+ENV_READONLY_TOKEN = "FECLAW_HC_TOKEN"
 
 # 页面清单（label, host 角色 root|sub, path）
 PAGES = [
@@ -72,21 +109,23 @@ BENIGN_SUBSTR = {
 # 测试账号非管理员 ⇒ 管理页 403 属预期（换成 admin 账号可消除）
 ADMIN_ONLY_PAGES = {"admin-settings"}
 
+MUTATING_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+
 # ④ 接口探活：变更类方法一律用「不存在的」资源 id，避免破坏数据
 BOGUS_HASH = "ffffffff"
 BOGUS_ID = "99999999"
 
-# 自毁类：会吊销本轮 token，放到最后并用独立 token 跑
+# 自毁类：会吊销本轮 token，放到最后并用独立 token 跑（仅 L2）
 SELF_DESTRUCTIVE = (
     "/api/auth/logout", "/api/oauth/logout",
     "/api/user/change-password", "/api/user/password",
     "/setup/", "/api/auth/revoke-all",
 )
 
-# 这些 POST/PUT 用 {} 请求体会「真的创建资源」（而不是校验失败）⇒ 跳过，
-# 以免每跑一次体检就往库里塞数据。
+# 这些 POST/PUT 用 {} 请求体会「真的创建资源」（而不是校验失败）⇒ 跳过。
+# L2 也不跑：那会创建 ledger 之外、无法追溯清理的资源。
 MUTATING_SKIP = {
-    "/api/user/agents": "空 body 会真创建一个 Agent",
+    "/api/user/agents": "空 body 会真创建一个 Agent（改用本次 ledger 显式创建）",
     "/api/chat/sessions": "空 body 可能建会话",
     "/api/groups": "空 body 可能建群",
     "/api/organizations": "空 body 可能建组织",
@@ -96,6 +135,24 @@ MUTATING_SKIP = {
     "/api/static-sites": "空 body 可能建站",
     "/api/user/agents/{hash}/vfs/mkdir": "会在 VFS 建目录",
 }
+
+# 只读巡检也绝不触碰的路径：可能触发计费模型 / 自毁。模型可用性应独立低频观察，
+# 不能让每次探活都调用收费模型。
+READONLY_SKIP_SUBSTR = (
+    "/chat/stream",      # SSE 对话 = 模型调用
+    "/chat/ws",          # WebSocket 对话
+    "/generate",         # 生成类
+    "/auto_suggest",     # 自动建议会话（模型）
+    "/summarize",        # 摘要（模型）
+    "/tts",              # 语音合成（计费）
+    "/llm",              # 直连模型
+    "/completion",
+    "/oauth/authorize",  # 会 302 到第三方 OAuth 提供方（只读巡检不出网）
+    "/oauth/callback",
+    "/oauth/login",
+)
+
+READY_OK_STATUS = "ready"
 
 
 def _param_table(agent_hash: str, agent_id: str, user_id: str) -> dict:
@@ -111,6 +168,49 @@ def _param_table(agent_hash: str, agent_id: str, user_id: str) -> dict:
         "path": "hc_no_such_file.txt", "file_path": "hc_no_such_file.txt",
         "provider": "hc-nonexistent", "model": "hc-nonexistent",
     }
+
+
+# ─────────────────────── 资源账本（清理白名单） ───────────────────────
+
+class ResourceLedger:
+    """记录本次 run 创建的资源。
+
+    清理阶段只能删除这里的记录（或运维用 --mutation-resource-allowlist 显式追加的
+    kind:id）。未记录的 id 一律拒绝 —— 这样「体检脚本」不会删掉别人的数据。
+    """
+
+    def __init__(self) -> None:
+        self._created: dict[str, list[str]] = {}
+        self._allowlist: set[tuple[str, str]] = set()
+
+    def record(self, kind: str, ident) -> None:
+        if ident is None or str(ident) == "":
+            raise ValueError(f"拒绝记录空资源 {kind}")
+        bucket = self._created.setdefault(kind, [])
+        ident = str(ident)
+        if ident not in bucket:
+            bucket.append(ident)
+
+    def ids(self, kind: str) -> list[str]:
+        return list(self._created.get(kind, []))
+
+    def add_allowlist(self, entries: str) -> None:
+        """--mutation-resource-allowlist 形如 "agent:12,agent:13"。"""
+        for raw in (entries or "").split(","):
+            raw = raw.strip()
+            if not raw:
+                continue
+            if ":" not in raw:
+                raise ValueError(f"allowlist 条目格式应为 kind:id，收到 {raw!r}")
+            kind, ident = raw.split(":", 1)
+            self._allowlist.add((kind.strip(), ident.strip()))
+
+    def may_delete(self, kind: str, ident) -> bool:
+        ident = str(ident)
+        return ident in self._created.get(kind, []) or (kind, ident) in self._allowlist
+
+    def summary(self) -> dict:
+        return {k: list(v) for k, v in self._created.items()}
 
 
 # ─────────────────────────── 工具 ───────────────────────────
@@ -140,6 +240,53 @@ def http(url: str, method: str = "GET", token: str | None = None,
         except Exception as e:  # noqa: BLE001
             last = (None, f"{type(e).__name__}: {e}")
     return last
+
+
+# ─────────────────── /ready 门禁（deploy.sh 同一契约） ───────────────────
+
+def probe_ready(base_url: str, timeout: float = 5.0) -> tuple[bool, dict]:
+    """检查 /ready：退出码语义 + HTTP status + JSON status == "ready" 三者都要过。
+
+    返回 (ok, report)。report 里只有可公开字段：不写凭证、不回显内部异常文本。
+    """
+    url = base_url.rstrip("/") + "/ready"
+    report: dict = {"url": url, "ok": False, "http_status": None, "reason": "",
+                    "status": None, "checks": None}
+    code, raw = http(url, "GET", timeout=timeout, retries=0, maxbytes=None)
+    report["http_status"] = code
+    if code is None:
+        report["reason"] = "unreachable"
+        return False, report
+    if not (raw or "").strip():
+        report["reason"] = "empty-body"
+        return False, report
+    if code != 200:
+        report["reason"] = f"http-{code}"
+        # 失败时仍然尝试解析 body 便于排障（只取 status/checks，不落原始文本）
+        try:
+            payload = json.loads(raw)
+        except Exception:  # noqa: BLE001
+            return False, report
+        if isinstance(payload, dict):
+            report["status"] = payload.get("status")
+            report["checks"] = payload.get("checks")
+        return False, report
+    try:
+        payload = json.loads(raw)
+    except Exception:  # noqa: BLE001
+        report["reason"] = "invalid-json"
+        return False, report
+    if not isinstance(payload, dict):
+        report["reason"] = "json-not-object"
+        return False, report
+    status = payload.get("status")
+    report["status"] = status
+    report["checks"] = payload.get("checks")
+    if status != READY_OK_STATUS:
+        report["reason"] = f"status={status!r}"
+        return False, report
+    report["ok"] = True
+    return True, report
 
 
 # ─────────────────────── ① JS 语法体检 ───────────────────────
@@ -218,7 +365,7 @@ _ASSET_RE = re.compile(r"""\b(?:src|href)\s*=\s*["']([^"']+)["']|url\(\s*['"]?([
 
 
 def phase_assets(base_url: str, repo: Path) -> dict:
-    hr("② 模板静态资源真实性")
+    hr("② 模板静态资源真实性（仅 GET）")
     local, external, dynamic = {}, {}, {}
     for path in sorted(glob.glob(str(repo / "templates/*.html"))):
         html = Path(path).read_text(encoding="utf-8", errors="replace")
@@ -275,8 +422,13 @@ def _find_chromium() -> str | None:
 
 
 def phase_pages(base_url: str, root_host: str, token: str, agent_hash: str,
-                sub_host: str | None) -> dict:
-    hr("③ 页面加载即报错体检（Playwright / 真 Chromium）")
+                sub_host: str | None, guard_mutations: bool = True) -> dict:
+    """页面加载体检。
+
+    guard_mutations=True（默认只读巡检）：在浏览器层拦截并 abort 所有
+    POST/PUT/PATCH/DELETE —— 页面 JS 悄悄发写请求也不会落到服务端。
+    """
+    hr("③ 页面加载即报错体检（Playwright / 真 Chromium，仅导航 GET）")
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
@@ -293,11 +445,22 @@ def phase_pages(base_url: str, root_host: str, token: str, agent_hash: str,
     if sub_host:
         hmap.append(f"MAP {sub_host} 127.0.0.1")
 
+    anonymous = not token
+    if anonymous:
+        print("  ℹ️ 未提供只读令牌（FECLAW_HC_TOKEN）：按匿名身份加载；"
+              "需要登录的 401/403 记为已知预期，不判失败")
+    # 只读巡检不代登录 ⇒ 可能不知道真实 Agent hash。此时带 {hash} 的页面没有意义
+    # （会打出不存在的 Agent）。显式 --agent-hash / --sub-host 时才会跑。
+    skip_hash_pages = not agent_hash
+
     results = []
     with sync_playwright() as p:
         b = p.chromium.launch(executable_path=exe, headless=True,
                               args=[f"--host-resolver-rules={','.join(hmap)}", "--no-sandbox"])
         for label, role, path_tpl in PAGES:
+            if "{hash}" in path_tpl and skip_hash_pages:
+                print(f"  ~ {label:20s} 跳过（未提供 --agent-hash：只读巡检不代登录取 hash）")
+                continue
             path = path_tpl.format(hash=agent_hash)
             host = sub_host if role == "sub" else root_host
             if role == "sub" and not sub_host:
@@ -309,6 +472,18 @@ def phase_pages(base_url: str, root_host: str, token: str, agent_hash: str,
                     ctx.add_cookies([{"name": "feclaw_jwt", "value": token, "domain": sub_host, "path": "/"}])
             page = ctx.new_page()
             errs, fails, bad = [], [], []
+            blocked_mutations: list[str] = []
+            if guard_mutations:
+                # 只读兜底：即使页面 JS 想 POST/PUT/PATCH/DELETE，也在浏览器层 abort，
+                # 保证「默认巡检」对服务端零写入。
+                def _guard(route, request, L=blocked_mutations):
+                    if request.method.upper() in MUTATING_METHODS:
+                        L.append(f"{request.method.upper()} {request.url}")
+                        route.abort()
+                    else:
+                        route.continue_()
+
+                page.route("**/*", _guard)
             page.on("pageerror", lambda e, L=errs: L.append(f"pageerror: {e}"))
             page.on("console", lambda m, L=errs: L.append(f"console.error: {m.text}")
                     if m.type == "error" else None)
@@ -338,6 +513,8 @@ def phase_pages(base_url: str, root_host: str, token: str, agent_hash: str,
                     known.append((s, why))
                 elif label in ADMIN_ONLY_PAGES and "403" in s:
                     known.append((s, "测试账号非管理员 ⇒ 管理页 403 预期"))
+                elif anonymous and ("401" in s or "403" in s):
+                    known.append((s, "匿名加载：需要登录的请求 401/403 属预期（提供 FECLAW_HC_TOKEN 可覆盖）"))
                 else:
                     unknown.append(s)
             for f in fails:
@@ -345,19 +522,24 @@ def phase_pages(base_url: str, root_host: str, token: str, agent_hash: str,
             for st, u in bad:
                 if _benign(u) or (label in ADMIN_ONLY_PAGES and st == 403):
                     known.append((f"{st} {u}", "见上（favicon / 非管理员 403）"))
+                elif anonymous and st in (401, 403):
+                    known.append((f"{st} {u}", "匿名加载：401/403 属预期"))
                 else:
                     unknown.append(f"{st} {u}")
 
             results.append({"label": label, "url": url, "status": status,
                             "final": None, "errors": errs, "reqfail": fails,
                             "http4xx5xx": bad, "unknown": unknown,
+                            "blocked_mutations": blocked_mutations,
                             "known": [{"item": i, "why": w} for i, w in known]})
             n_err = len([e for e in errs if e.startswith("pageerror")])
             print(f"  {label:20s} status={status} pageerror={n_err} "
                   f"console.err={len(errs) - n_err} reqfail={len(fails)} http>=400={len(bad)}"
-                  f"  未知={len(unknown)}")
+                  f"  未知={len(unknown)}  已拦截写请求={len(blocked_mutations)}")
             for e in unknown:
                 print(f"      ✗ {e[:220]}")
+            for bm in blocked_mutations:
+                print(f"      ⛔ 只读拦截：{bm[:160]}")
             for i, w in known:
                 print(f"      · 已知：{i[:120]}  —— {w}")
         b.close()
@@ -367,156 +549,387 @@ def phase_pages(base_url: str, root_host: str, token: str, agent_hash: str,
 
 # ─────────────────── ④ 接口健康矩阵 ───────────────────
 
-def _expected(method: str, path: str) -> str:
-    if method in ("PUT", "PATCH", "DELETE"):
-        return "4xx（不存在资源）"
+def _expected_readonly(method: str, path: str) -> str:
     if "{" in path:
-        return "4xx"
-    return "200/4xx"
+        return "2xx/4xx"
+    return "2xx/4xx"
 
 
-def phase_api(base_url: str, token: str, agent_hash: str, agent_id: str, user_id: str) -> dict:
-    hr("④ 接口健康矩阵（按 /openapi.json 穷举）")
+def _skip_readonly(path: str) -> str | None:
+    low = path.lower()
+    for token in READONLY_SKIP_SUBSTR:
+        if token in low:
+            return f"只读巡检跳过（可能触发模型/计费或长连接）：{token}"
+    if path.startswith(SELF_DESTRUCTIVE):
+        return "自毁接口（会吊销 token）—— 仅 L2 用独立一次性账号跑"
+    return None
+
+
+def _write_json(path: str, payload) -> None:
+    """JSON 一律 UTF-8 落盘（默认 locale 在 Windows 是 GBK，会写出坏文件）。"""
+    Path(path).write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def _load_openapi(base_url: str) -> tuple[dict | None, str]:
     code, raw = http(base_url + "/openapi.json", timeout=60, maxbytes=None)
     if code != 200:
-        print(f"  ✗ 取不到 /openapi.json（{code}）")
-        return {"rows": [], "error": f"openapi {code}: {raw[:160]}"}
-    spec = json.loads(raw)
-    read_tbl = _param_table(agent_hash, agent_id, user_id)
+        return None, f"openapi {code}: {(raw or '')[:160]}"
+    try:
+        return json.loads(raw), ""
+    except Exception as e:  # noqa: BLE001
+        return None, f"openapi parse error: {type(e).__name__}"
 
+
+def phase_api_readonly(base_url: str, token: str | None) -> dict:
+    """只读接口矩阵：只发 GET；写方法仅登记为「跳过」，绝不发出。"""
+    hr("④ 接口健康矩阵（只读：仅 GET）")
+    spec, err = _load_openapi(base_url)
+    if spec is None:
+        print(f"  ✗ 取不到 /openapi.json（{err}）")
+        return {"rows": [], "error": err}
+
+    read_tbl = _param_table(BOGUS_HASH, BOGUS_ID, "1")
     rows = []
-    for path in sorted(spec["paths"]):
-        for method in spec["paths"][path]:
+    mutating_skipped = 0
+    for path in sorted(spec.get("paths", {})):
+        for method in sorted(spec["paths"][path]):
             if method not in ("get", "post", "put", "delete", "patch"):
                 continue
-            mut = method in ("put", "patch", "delete")
-            sd = path.startswith(SELF_DESTRUCTIVE)
-            skip = path in MUTATING_SKIP and method in ("post", "put", "patch")
+            if method.upper() in MUTATING_METHODS:
+                mutating_skipped += 1
+                rows.append({"method": method.upper(), "path": path, "real": path,
+                             "code": None, "expected": "只读模式跳过",
+                             "note": "只读巡检不发写/变更请求（--integration --allow-mutations 才跑）",
+                             "self_destructive": False})
+                continue
+            skip = _skip_readonly(path)
             real = re.sub(r"\{([^}]+)\}", lambda m: read_tbl.get(m.group(1), "1"), path)
-            body = {} if method in ("post", "put", "patch") else None
-            if sd:
+            if skip:
+                rows.append({"method": method.upper(), "path": path, "real": real,
+                             "code": None, "expected": "跳过", "note": skip,
+                             "self_destructive": False})
+                continue
+            c, payload = http(base_url + real, "GET", token=token)
+            rows.append({"method": "GET", "path": path, "real": real,
+                         "code": c, "expected": _expected_readonly("GET", path),
+                         "note": "", "body": (payload or "")[:200], "self_destructive": False})
+
+    hist = Counter(r["code"] for r in rows)
+    print(f"  ops={len(rows)}  写方法已跳过={mutating_skipped}  histogram={hist.most_common()}")
+    bad = [r for r in rows if r["code"] is not None and r["code"] >= 500]
+    print(f"  5xx = {len(bad)}   跳过/只读省略 = {len([r for r in rows if r['code'] is None])}")
+    for r in bad:
+        print(f"    ✗ {r['code']} {r['method']:6s} {r['real']}\n        {(r.get('body') or '')[:160]}")
+    return {"rows": rows, "histogram": dict(hist),
+            "mutating_skipped": mutating_skipped, "readonly": True}
+
+
+# ─────────────────── L2：一次性资源 + 变更探活 ───────────────────
+
+def _random_tag() -> str:
+    import secrets
+    return f"{int(time.time())}{secrets.token_hex(3)}"
+
+
+def _register_disposable_account(base_url: str, tag: str, ledger: ResourceLedger) -> dict:
+    """注册本次运行专属账号（绝不复用已有账号 / 首个 agent）。"""
+    import secrets
+    username = os.environ.get("FECLAW_HC_MUTATION_USER") or f"q4_hc_{tag}"
+    password = os.environ.get("FECLAW_HC_MUTATION_PASS") or f"Hc#{secrets.token_hex(8)}"
+    code, raw = http(base_url + "/api/user/register", "POST",
+                     body={"username": username, "password": password,
+                           "email": f"{username}@example.invalid"})
+    if code != 200:
+        raise RuntimeError(f"一次性账号注册失败（HTTP {code}）：拒绝复用已有账号")
+    try:
+        payload = json.loads(raw)
+    except Exception:  # noqa: BLE001
+        payload = {}
+    token = payload.get("token")
+    if not token:
+        code, raw = http(base_url + "/api/user/login", "POST",
+                         body={"username": username, "password": password})
+        if code != 200:
+            raise RuntimeError(f"一次性账号登录失败（HTTP {code}）")
+        token = (json.loads(raw) or {}).get("token")
+    if not token:
+        raise RuntimeError("一次性账号拿不到 token")
+    ledger.record("account", username)
+    print(f"  + 本次一次性账号：{username}（已记入 ledger，只用于本 run）")
+    return {"username": username, "token": token}
+
+
+def _create_ledger_agent(base_url: str, token: str, tag: str, ledger: ResourceLedger) -> dict:
+    name = f"hc-probe-{tag}"
+    code, raw = http(base_url + "/api/user/agents", "POST", token=token,
+                     body={"name": name, "agent_type": "classic"})
+    if code != 200:
+        raise RuntimeError(f"本次测试 Agent 创建失败（HTTP {code}）")
+    payload = json.loads(raw or "{}")
+    agent_hash = payload.get("hash")
+    agent_id = payload.get("id")
+    if agent_hash:
+        ledger.record("agent_hash", agent_hash)
+    if agent_id is not None:
+        ledger.record("agent", agent_id)
+    print(f"  + 本次测试 Agent：name={name} hash={agent_hash} id={agent_id}（已记入 ledger）")
+    return payload
+
+
+def phase_api_mutations(base_url: str, account: dict, ledger: ResourceLedger,
+                        tag: str) -> dict:
+    """L2 破坏性探活：只用本次一次性账号的 token，且不创建 ledger 外的资源。"""
+    hr("④' 接口变更矩阵（--integration --allow-mutations，一次性账号）")
+    token = account["token"]
+    spec, err = _load_openapi(base_url)
+    if spec is None:
+        print(f"  ✗ 取不到 /openapi.json（{err}）")
+        return {"rows": [], "error": err}
+
+    read_tbl = _param_table(BOGUS_HASH, BOGUS_ID, "1")
+    rows = []
+    for path in sorted(spec.get("paths", {})):
+        for method in sorted(spec["paths"][path]):
+            if method not in ("get", "post", "put", "delete", "patch"):
+                continue
+            real = re.sub(r"\{([^}]+)\}", lambda m: read_tbl.get(m.group(1), "1"), path)
+            if path.startswith(SELF_DESTRUCTIVE):
                 rows.append({"method": method.upper(), "path": path, "real": real,
                              "code": None, "expected": "自毁接口", "note": "延后单独跑",
                              "self_destructive": True})
                 continue
-            if skip:
+            mut = method in ("post", "put", "patch", "delete")
+            if mut and path in MUTATING_SKIP:
                 rows.append({"method": method.upper(), "path": path, "real": real,
-                             "code": None, "expected": "跳过", "note": MUTATING_SKIP[path],
+                             "code": None, "expected": "跳过",
+                             "note": MUTATING_SKIP[path] + "（ledger 外资源，不创建）",
                              "self_destructive": False})
                 continue
+            body = {} if mut else None
             c, payload = http(base_url + real, method.upper(), token=token, body=body)
             rows.append({"method": method.upper(), "path": path, "real": real,
-                         "code": c, "expected": _expected(method.upper(), path),
-                         "note": "", "body": payload[:200], "self_destructive": False})
+                         "code": c, "expected": _expected_readonly(method.upper(), path),
+                         "note": "", "body": (payload or "")[:200], "self_destructive": False})
 
-    # 自毁接口最后跑（用一次性 token，跑完即失效）
-    tmp_token = _login_temp(base_url)
+    # 自毁接口：再用一个独立的一次性账号，避免吊销主 token
+    tmp_account = _register_disposable_account(base_url, tag + "d", ledger)
     for r in rows:
         if r["self_destructive"]:
             c, payload = http(base_url + r["real"], r["method"],
-                              token=tmp_token, body={} if r["method"] != "GET" else None)
+                              token=tmp_account["token"],
+                              body={} if r["method"] != "GET" else None)
             r["code"] = c
-            r["body"] = payload[:200]
+            r["body"] = (payload or "")[:200]
 
     hist = Counter(r["code"] for r in rows)
     print(f"  ops={len(rows)}  histogram={hist.most_common()}")
     bad = [r for r in rows if r["code"] is not None and r["code"] >= 500]
-    skipped = [r for r in rows if r["code"] is None and r.get("note", "").startswith(("跳过", "延后"))]
-    print(f"  5xx = {len(bad)}   跳过/自毁 = {len(skipped)}")
+    print(f"  5xx = {len(bad)}")
     for r in bad:
         print(f"    ✗ {r['code']} {r['method']:6s} {r['real']}\n        {(r.get('body') or '')[:160]}")
-    return {"rows": rows, "histogram": dict(hist)}
+    return {"rows": rows, "histogram": dict(hist), "readonly": False}
 
 
-def _login_temp(base_url: str) -> str | None:
-    c, _ = http(base_url + "/api/user/login", "POST",
-                body={"username": TEST_USER, "password": TEST_PASS})
-    if c != 200:
-        return None
+def cleanup_created_resources(base_url: str, ledger: ResourceLedger,
+                              token: str | None) -> dict:
+    """只清理 ledger（+ 显式 allowlist）里的资源；其它 id 一律拒绝。"""
+    hr("⑤ 清理本次创建的资源（白名单）")
+    deleted, refused, failed = [], [], []
+    for agent_id in ledger.ids("agent"):
+        if not ledger.may_delete("agent", agent_id):
+            refused.append(agent_id)
+            print(f"  ⛔ 拒绝删除未记录/未授权的 agent {agent_id}")
+            continue
+        code, payload = http(base_url + f"/api/console/agents/{agent_id}", "DELETE",
+                             token=token)
+        if code in (200, 204):
+            deleted.append(agent_id)
+            print(f"  - 已删除本次测试 Agent id={agent_id}")
+        elif code == 404:
+            print(f"  ~ 本次测试 Agent id={agent_id} 已不存在（视为已清理）")
+            deleted.append(agent_id)
+        else:
+            failed.append({"agent": agent_id, "code": code})
+            print(f"  ✗ 删除 Agent id={agent_id} 失败 HTTP {code}: {(payload or '')[:120]}")
+    for username in ledger.ids("account"):
+        print(f"  ℹ️ 一次性账号 {username} 无删除端点：保留并如实报告（不伪装已清理）")
+    return {"deleted_agents": deleted, "refused": refused, "failed": failed,
+            "retained_accounts": ledger.ids("account")}
+
+
+# ─────────────────── mutation 目标安全校验 ───────────────────
+
+def _is_private_host(host: str) -> bool:
+    host = (host or "").strip().lower().strip("[]")
+    if not host:
+        return False
+    if host in ("localhost",):
+        return True
+    if host.endswith((".local", ".localhost", ".test", ".invalid", ".internal")):
+        return True
     try:
-        return json.loads(http(base_url + "/api/user/login", "POST",
-                               body={"username": TEST_USER, "password": TEST_PASS})[1]).get("token")
-    except Exception:  # noqa: BLE001
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return bool(ip.is_loopback or ip.is_private or ip.is_link_local)
+
+
+def validate_mutation_target(base_url_explicit: bool, base_url: str,
+                             integration: bool) -> str | None:
+    """L2 目标校验；返回错误串（非 None ⇒ 拒绝执行且不发任何请求）。"""
+    if not integration:
+        return "--allow-mutations 必须与 --integration 同时使用"
+    if not base_url_explicit:
+        return ("mutation 模式必须显式传 --base-url（不接受默认值/环境变量默认），"
+                "并指向一次性测试环境")
+    parsed = urllib.parse.urlsplit(base_url)
+    if parsed.scheme not in ("http", "https"):
+        return f"--base-url 必须是 http(s)：{base_url!r}"
+    host = (parsed.hostname or "").lower()
+    if not host:
+        return f"--base-url 缺少主机名：{base_url!r}"
+    for prod in PRODUCTION_HOSTS:
+        if host == prod or host.endswith("." + prod):
+            return f"拒绝在生产域名上执行 mutation：{host}"
+    if _is_private_host(host):
         return None
-
-
-# ─────────────────── 准备：测试账号 ───────────────────
-
-def ensure_account(base_url: str) -> tuple[str | None, str | None, str | None]:
-    """确保测试账号存在并返回 (token, agent_hash, agent_id)。"""
-    c, raw = http(base_url + "/api/user/login", "POST",
-                  body={"username": TEST_USER, "password": TEST_PASS})
-    if c != 200:
-        c, raw = http(base_url + "/api/user/register", "POST",
-                      body={"username": TEST_USER, "password": TEST_PASS,
-                            "email": f"{TEST_USER}@example.invalid"})
-    if c != 200:
-        print(f"  ⚠️ 无法登录/注册测试账号 {TEST_USER}（{c}）: {raw[:200]}")
-        return None, None, None
-    token = json.loads(raw).get("token")
-    # 复用已有 agent；没有才建（GET 用 /api/console/agents —— /api/user/agents 只有 POST）
-    agent_hash = agent_id = None
-    c, raw = http(base_url + "/api/console/agents", token=token)
-    if c == 200:
-        try:
-            items = json.loads(raw).get("agents", [])
-            if items:
-                agent_hash = items[0].get("hash")
-                agent_id = str(items[0].get("id", "1"))
-        except Exception:  # noqa: BLE001
-            pass
-    if not agent_hash:
-        c, raw = http(base_url + "/api/user/agents", "POST", token=token,
-                      body={"name": "健康检查助手", "agent_type": "classic"})
-        if c == 200:
-            agent_hash = json.loads(raw).get("hash")
-    return token, agent_hash, agent_id
+    allowed_extra = {
+        h.strip().lower() for h in os.environ.get("FECLAW_HC_MUTATION_HOSTS", "").split(",")
+        if h.strip()
+    }
+    if host in allowed_extra:
+        return None
+    return (f"mutation 模式只允许回环/私网 base-url（当前 {host}）；"
+            f"公网 staging 必须显式列入 FECLAW_HC_MUTATION_HOSTS 后再评估")
 
 
 # ─────────────────────────── main ───────────────────────────
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="FeClaw 健康检查")
-    ap.add_argument("--base-url", default=os.environ.get("FECLAW_HC_URL", "http://127.0.0.1:8080"))
+    ap = argparse.ArgumentParser(description="FeClaw 健康检查（默认只读）")
+    ap.add_argument("--base-url", default=None,
+                    help="服务地址；默认 http://127.0.0.1:8080（mutation 模式必须显式给）")
     ap.add_argument("--root-host", default=os.environ.get("FECLAW_HC_HOST", "feclaw.lizidaren.cn"))
     ap.add_argument("--sub-host", default=os.environ.get("FECLAW_HC_SUBHOST", ""),
                     help="Agent 子域名主机（留空则按 <hash>.<root-host> 推导）")
     ap.add_argument("--json", default=None, help="把结果写到该 JSON 文件")
     ap.add_argument("--only", default="1,2,3,4", help="只跑指定阶段，如 1,2")
     ap.add_argument("--skip-browser", action="store_true")
+    ap.add_argument("--integration", action="store_true",
+                    help="启用集成检查（仍只读；可用 FECLAW_HC_TOKEN 做已鉴权 GET）")
+    ap.add_argument("--allow-mutations", action="store_true",
+                    help="允许写/删除探活；必须同时 --integration，且显式指定非生产 --base-url")
+    ap.add_argument("--mutation-resource-allowlist", default="",
+                    help='允许清理的资源白名单，形如 "agent:12,agent:13"（默认只清本次 ledger）')
+    ap.add_argument("--ready-check", action="store_true",
+                    help="只检查 /ready（退出码 + HTTP status + JSON status==ready）")
+    ap.add_argument("--ready-timeout", type=float, default=5.0)
+    ap.add_argument("--agent-hash", default=os.environ.get("FECLAW_HC_AGENT_HASH", ""),
+                    help="只读巡检时已知的 Agent hash（用于 agent 页面/子域检查；不代登录）")
     args = ap.parse_args()
+
+    base_url = args.base_url
+    base_url_explicit = base_url is not None
+    if not base_url:
+        base_url = os.environ.get("FECLAW_HC_URL", DEFAULT_BASE_URL)
+    base_url = base_url.rstrip("/")
+
+    # ── /ready 门禁模式（deploy.sh 同一契约）──
+    if args.ready_check:
+        ok, report = probe_ready(base_url, timeout=args.ready_timeout)
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        if args.json:
+            _write_json(args.json, report)
+        if not ok:
+            print(f"✗ /ready 未通过：{report.get('reason')}", file=sys.stderr)
+            return 1
+        print("✓ /ready → status=ready")
+        return 0
+
+    ledger = ResourceLedger()
+    mutation_mode = bool(args.allow_mutations)
+
+    if mutation_mode:
+        problem = validate_mutation_target(base_url_explicit, base_url, args.integration)
+        if problem:
+            print(f"✗ 拒绝执行 mutation 检查：{problem}", file=sys.stderr)
+            return 2
+        try:
+            ledger.add_allowlist(args.mutation_resource_allowlist)
+        except ValueError as e:
+            print(f"✗ {e}", file=sys.stderr)
+            return 2
+    elif args.mutation_resource_allowlist:
+        print("✗ --mutation-resource-allowlist 只在 --allow-mutations 下有意义",
+              file=sys.stderr)
+        return 2
+
+    token = None
+    if args.integration and not mutation_mode:
+        token = os.environ.get(ENV_READONLY_TOKEN) or None
+        if not token:
+            print(f"  ℹ️ --integration 但未设置 {ENV_READONLY_TOKEN}：只做匿名只读探活")
+        else:
+            print(f"  ℹ️ 使用运维提供的只读令牌（{ENV_READONLY_TOKEN}），脚本不代为登录")
 
     only = {s.strip() for s in args.only.split(",")}
     root_host = args.root_host
 
-    # 服务探活
-    c, _ = http(args.base_url + "/login", timeout=10)
+    # 服务探活（只读 GET）
+    c, _ = http(base_url + "/login", timeout=10)
     if c is None:
-        print(f"✗ 服务未起：{args.base_url}（先启动 uvicorn --lifespan off）", file=sys.stderr)
+        print(f"✗ 服务未起：{base_url}（先启动 uvicorn --lifespan off）", file=sys.stderr)
         return 2
 
-    token, agent_hash, agent_id = ensure_account(args.base_url)
-    if not (token and agent_hash):
-        print("⚠️ 测试账号/Agent 准备失败，③④ 可能大量 4xx")
+    tag = _random_tag()
+    agent_hash = (args.agent_hash or "").strip()
+    account: dict | None = None
+    out: dict = {"meta": {"base_url": base_url, "mode": "read-only",
+                          "allow_mutations": mutation_mode, "integration": args.integration,
+                          "agent_hash": agent_hash or None}}
+
+    if mutation_mode:
+        out["meta"]["mode"] = "integration-mutations"
+        try:
+            account = _register_disposable_account(base_url, tag, ledger)
+            created = _create_ledger_agent(base_url, account["token"], tag, ledger)
+            agent_hash = created.get("hash") or agent_hash
+            out["meta"]["agent_hash"] = agent_hash or None
+            token = account["token"]
+        except RuntimeError as e:
+            print(f"✗ {e}", file=sys.stderr)
+            return 2
+
     sub_host = args.sub_host or (f"{agent_hash}.{root_host}" if agent_hash else "")
-    print(f"base_url={args.base_url}  root_host={root_host}  sub_host={sub_host}  "
-          f"agent={agent_hash}  token={'ok' if token else 'MISSING'}")
+    print(f"base_url={base_url}  mode={out['meta']['mode']}  root_host={root_host}  "
+          f"sub_host={sub_host or '-'}  token={'ok' if token else 'none'}")
 
-    out = {"meta": {"base_url": args.base_url, "agent_hash": agent_hash}}
-
-    if "1" in only:
-        out["js"] = phase_js(REPO)
-    if "2" in only:
-        out["assets"] = phase_assets(args.base_url, REPO)
-    if "3" in only and not args.skip_browser:
-        out["pages"] = phase_pages(args.base_url, root_host, token, agent_hash, sub_host)
-    if "4" in only:
-        out["api"] = phase_api(args.base_url, token, agent_hash or "ffffffff",
-                               agent_id or "1", "1")
+    findings = 0
+    try:
+        if "1" in only:
+            out["js"] = phase_js(REPO)
+        if "2" in only:
+            out["assets"] = phase_assets(base_url, REPO)
+        if "3" in only and not args.skip_browser:
+            out["pages"] = phase_pages(base_url, root_host, token, agent_hash, sub_host,
+                                       guard_mutations=not mutation_mode)
+        if "4" in only:
+            if mutation_mode and account:
+                out["api"] = phase_api_mutations(base_url, account, ledger, tag)
+            else:
+                out["api"] = phase_api_readonly(base_url, token)
+    except RuntimeError as e:
+        # 一次性资源准备/清理失败等：如实记为失败，不让 traceback 变成「看起来没跑」
+        print(f"✗ 检查中断：{e}", file=sys.stderr)
+        out["interrupted"] = str(e)
+        findings += 1
+    finally:
+        if mutation_mode:
+            out["cleanup"] = cleanup_created_resources(base_url, ledger, token)
+            out["meta"]["created_resources"] = ledger.summary()
 
     # ── 结论 ──
     hr("结论")
-    findings = 0
     if "js" in out:
         findings += len(out["js"].get("findings", []))
         print(f"  ① JS 语法问题：{len(out['js'].get('findings', []))}")
@@ -538,10 +951,17 @@ def main() -> int:
         n5 = sum(1 for r in out["api"]["rows"] if r["code"] is not None and r["code"] >= 500)
         print(f"  ④ 接口 5xx：{n5}")
         findings += n5
+        if out["api"].get("readonly"):
+            print(f"  ④ 只读模式：跳过写方法 {out['api'].get('mutating_skipped', 0)} 个（未发出任何写请求）")
+    if "cleanup" in out:
+        cl = out["cleanup"]
+        print(f"  ⑤ 清理：deleted={len(cl['deleted_agents'])} refused={len(cl['refused'])} "
+              f"failed={len(cl['failed'])} retained_accounts={len(cl['retained_accounts'])}")
+        findings += len(cl["failed"])
     print(f"\n  合计硬失败项：{findings}")
 
     if args.json:
-        Path(args.json).write_text(json.dumps(out, indent=2, ensure_ascii=False))
+        _write_json(args.json, out)
         print(f"  JSON → {args.json}")
     return 1 if findings else 0
 

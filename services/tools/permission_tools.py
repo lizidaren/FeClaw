@@ -25,6 +25,11 @@ from typing import Optional
 
 from services.tool_registry import tool
 from services.tools.base import AgentToolsServiceBase
+# T03a：顶层导入能用同一实现。旧代码在函数内 `from services.tools.file_ops import
+# _resolve_group_path` —— 那只是 FileOpsMixin 的 staticmethod，模块里没有这个名字，
+# ImportError 让 request_permission / _execute_approved 直接不可用（审批链半死）。
+# 现在 file_ops.resolve_group_path 是唯一实现（Mixin 的 staticmethod 转调它）。
+from services.tools.file_ops import resolve_group_path
 from services.approval_service import (
     ApprovalService,
     ApprovalAction,
@@ -106,9 +111,8 @@ class PermissionToolsMixin(AgentToolsServiceBase):
             if "old_string" not in arguments or "new_string" not in arguments:
                 return "Error: edit 模式需要 arguments.old_string 和 arguments.new_string"
 
-        # 3. 解析 COS key
-        from services.tools.file_ops import _resolve_group_path  # 延迟导入避免循环
-        cos_key, err = _resolve_group_path(path)
+        # 3. 解析 COS key（唯一实现：services.tools.file_ops.resolve_group_path）
+        cos_key, err = resolve_group_path(path)
         if err:
             return err
 
@@ -151,13 +155,12 @@ class PermissionToolsMixin(AgentToolsServiceBase):
 
         返回 'OK: ...' 或 'Error: ...'。
         """
-        from services.tools.file_ops import _resolve_group_path
         import asyncio
         from services.file_storage import create_file_storage
 
         # 1. TOCTOU：重算 checksum，对比 request 时记录的
         storage = create_file_storage()
-        cos_key, err = _resolve_group_path(req.file_path)
+        cos_key, err = resolve_group_path(req.file_path)
         if err:
             return f"Error: {err}"
         try:

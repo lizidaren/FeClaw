@@ -30,13 +30,21 @@ class TestAgentInitServiceInit:
         assert svc._storage is None
 
     def test_storage_lazy_loaded(self):
-        """storage 属性应懒加载"""
-        with patch("services.storage_service.StorageService") as mock_storage_cls:
-            mock_storage_cls.return_value = "storage_instance"
+        """storage 属性应懒加载
+
+        现行实现走 `from services.file_storage import create_file_storage`（函数内导入），
+        不是 `services.storage_service.StorageService`；patch 目标随之更正。
+        """
+        with patch("services.file_storage.create_file_storage") as mock_factory:
+            mock_factory.return_value = "storage_instance"
             from services.agent_init_service import AgentInitService
             svc = AgentInitService()
+            # 懒加载：访问属性前不构造
+            assert svc._storage is None
+            mock_factory.assert_not_called()
             assert svc.storage == "storage_instance"
             assert svc._storage == "storage_instance"
+            mock_factory.assert_called_once()
 
     def test_available_tools(self):
         """AVAILABLE_TOOLS 应包含核心工具"""
@@ -80,17 +88,32 @@ class TestCreateAgent:
         mock_db.commit.assert_called_once()
 
     def test_create_agent_limit(self):
-        """超过 Agent 数量限制时应抛出 ValueError"""
+        """Agent 数量上限为 100：99 个可建，100 个必须拒绝
+
+        注意（已在报告登记的真实缺陷）：services/agent_init_service.py:264-265 判定
+        `agent_count >= 100`，但报错文案写的是「最多创建 50 个」——阈值与文案不一致。
+        本用例只锁行为（越界必抛 ValueError），不把错误文案固化进断言。
+        """
         from services.agent_init_service import AgentInitService
         svc = AgentInitService()
-        mock_db = MagicMock()
-        mock_db.query.return_value.filter.return_value.scalar.return_value = 5
 
-        with pytest.raises(ValueError, match="最多创建 5 个"):
-            svc.create_agent(db=mock_db, user_id=1, hash_value="test")
+        # 未达上限：允许创建
+        db_below = MagicMock()
+        db_below.query.return_value.filter.return_value.scalar.return_value = 99
+        agent = svc.create_agent(db=db_below, user_id=1, hash_value="abcd")
+        assert agent is not None
+
+        # 达到上限：必须拒绝
+        db_at_limit = MagicMock()
+        db_at_limit.query.return_value.filter.return_value.scalar.return_value = 100
+        with pytest.raises(ValueError):
+            svc.create_agent(db=db_at_limit, user_id=1, hash_value="abcd")
 
     def test_create_agent_generates_hash(self):
-        """未指定 hash_value 时应自动生成"""
+        """未指定 hash_value 时应自动生成 8 位 hex hash
+
+        generate_agent_hash(db, length_bytes=4) → secrets.token_hex(4) → 8 个 hex 字符。
+        """
         from services.agent_init_service import AgentInitService
         svc = AgentInitService()
         mock_db = MagicMock()
@@ -98,7 +121,10 @@ class TestCreateAgent:
         mock_db.query.return_value.filter.return_value.first.side_effect = [None]
 
         agent = svc.create_agent(db=mock_db, user_id=1, name="Auto Agent")
-        assert len(agent.hash) == 4
+        assert isinstance(agent.hash, str)
+        assert len(agent.hash) == 8
+        # 必须是合法 hex（token_hex 生成）
+        int(agent.hash, 16)
 
 
 class TestInitializeAgent:
@@ -120,6 +146,9 @@ class TestInitializeAgent:
                 with patch("services.agent_init_service.settings") as mock_settings:
                     mock_settings.MAIN_TEXT_MODEL = "deepseek-flash"
                     mock_settings.STORAGE_PREFIX = "feclaw/"
+                    # default_config 会把 CONTEXT_LIMIT_TOKENS 塞进 json.dumps()，
+                    # 必须是真实 int；否则 MagicMock 触发 "not JSON serializable"。
+                    mock_settings.CONTEXT_LIMIT_TOKENS = 8000
                     with patch("services.vector_search_service.VectorSearchService") as mock_vs:
                         mock_vs.return_value.ensure_index.return_value = None
 
@@ -146,6 +175,8 @@ class TestInitializeAgent:
                 with patch("services.agent_init_service.settings") as mock_settings:
                     mock_settings.MAIN_TEXT_MODEL = "deepseek-flash"
                     mock_settings.STORAGE_PREFIX = "feclaw/"
+                    # 同 test_initialize_agent_basic：CONTEXT_LIMIT_TOKENS 必须是真实 int
+                    mock_settings.CONTEXT_LIMIT_TOKENS = 8000
                     with patch("services.vector_search_service.VectorSearchService") as mock_vs:
                         mock_vs.return_value.ensure_index.return_value = None
 

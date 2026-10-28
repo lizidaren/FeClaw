@@ -14,20 +14,11 @@
     <script>window.ROOT_DOMAIN = "{{ feclaw_domain }}";</script>
     <script src="/static/js/token-sync.js"></script>
     <script src="/static/js/auth.js"></script>
-    <script>
-        (async function() {
-            var params = new URLSearchParams(window.location.search);
-            var token = params.get("token");
-            if (token) {
-                params.delete("token");
-                var newUrl = window.location.pathname + (params.toString() ? "?" + params.toString() : "");
-                window.history.replaceState({}, "", newUrl);
-                localStorage.setItem("feclaw_jwt", token);
-                document.cookie = "feclaw_jwt=" + token + "; path=/; SameSite=Lax; max-age=" + (60*60*24*7);
-                window.location.href = "/dashboard";
-            }
-        })();
-    </script>
+    {# T18a：首页不再有 “?token= → localStorage + document.cookie” 兼容脚本。
+       那是把会话令牌写进脚本可读存储的入口（XSS 可直接偷走会话），
+       而且 URL 里的 JWT 会进 Referer / 访问日志 / 浏览器历史。
+       现在浏览器会话只走服务端 HttpOnly cookie；SSO 中继的 `#token=` 由
+       auth.js 交给 /api/user/session 换成 cookie 后立刻从地址栏抹掉。 #}
     <style>
         /* ========== 基础重置 & 字体（系统字体栈，避免 Google Fonts 被墙阻塞首屏） ========== */
         * { box-sizing: border-box; }

@@ -10,14 +10,32 @@ LocalStorage — 本地文件系统存储后端
 """
 
 import os
-import fcntl
 import logging
+import time
 from datetime import datetime
 from typing import Optional, List, Dict
 
 from services.file_storage import FileStorage
+from services.portable_lock import lock_exclusive, unlock
 
 logger = logging.getLogger(__name__)
+
+
+def _canonical_fs_path(value: str) -> str:
+    """把 realpath 结果归一成**可比较**的路径形式。
+
+    Windows 上两个真实问题（S8 实测）：
+    * `os.path.realpath()` 有时返回 `\\\\?\\C:\\...` 扩展前缀，而 base 不带前缀；
+    * 8.3 短名（例如 `ADMINI~1`）与长名指向同一目录，但字符串不同。
+    直接 `startswith` 比较会把合法路径误判为“路径穿越”。
+    比较前统一去扩展前缀 + normcase + normpath；不改变返回给调用方的真实路径。
+    """
+    text = str(value)
+    for prefix in ("\\\\?\\", "//?/", "\\\\.\\", "//./"):
+        if text.startswith(prefix):
+            text = text[len(prefix):]
+            break
+    return os.path.normcase(os.path.normpath(text))
 
 
 class LocalStorage(FileStorage):
@@ -27,8 +45,10 @@ class LocalStorage(FileStorage):
     """
 
     def __init__(self, root_dir: str = "./feclaw-storage", public_root: str = "./feclaw-public"):
-        self.root = os.path.abspath(root_dir)
-        self.public_root = os.path.abspath(public_root) if public_root else self.root
+        # realpath：把 8.3 短名/符号链接归一，避免 relpath(full, base) 跨形式生成
+        # `../../Administrator/...` 这类错误 key（S8 在 TEMP=ADMINI~1 下实测复现）。
+        self.root = os.path.realpath(root_dir)
+        self.public_root = os.path.realpath(public_root) if public_root else self.root
         os.makedirs(self.root, exist_ok=True)
         if self.public_root != self.root:
             os.makedirs(self.public_root, exist_ok=True)
@@ -56,7 +76,10 @@ class LocalStorage(FileStorage):
         base = self._resolve_root(key)
         path = os.path.realpath(os.path.join(base, safe))
         base_real = os.path.realpath(base)
-        if not path.startswith(base_real + os.sep) and path != base_real:
+        # 比较用归一形式（去 Windows 扩展前缀 + normcase），否则并发/短名下会误报
+        if (_canonical_fs_path(path) != _canonical_fs_path(base_real)
+                and not _canonical_fs_path(path).startswith(
+                    _canonical_fs_path(base_real) + os.sep)):
             raise ValueError(f"Path traversal detected: {key} (base={base})")
         return path
 
@@ -76,16 +99,27 @@ class LocalStorage(FileStorage):
         os.makedirs(os.path.dirname(path), exist_ok=True)
         # 使用排他锁保护并发写入
         with open(self._lock_path, "w") as lock_f:
-            fcntl.flock(lock_f.fileno(), fcntl.LOCK_EX)
+            lock_exclusive(lock_f.fileno())
             try:
                 tmp_path = path + ".tmp"
                 with open(tmp_path, "wb") as f:
                     f.write(file_bytes)
                     f.flush()
                     os.fsync(f.fileno())
-                os.rename(tmp_path, path)
+                # Windows 限制：目标被读者打开时替换会抛 PermissionError；
+                # 短暂退避重试，避免“读多写少”场景随机丢写（POSIX 上永不触发）。
+                for attempt in range(3):
+                    try:
+                        # os.rename 在 Windows 目标已存在时抛 FileExistsError；
+                        # os.replace 才是 POSIX 语义的原子覆盖。
+                        os.replace(tmp_path, path)
+                        break
+                    except PermissionError:
+                        if attempt >= 2:
+                            raise
+                        time.sleep(0.02 * (attempt + 1))
             finally:
-                fcntl.flock(lock_f.fileno(), fcntl.LOCK_UN)
+                unlock(lock_f.fileno())
 
     def upload_file(self, file_bytes: bytes, key: str, max_retries: int = 3) -> str:
         """直接上传文件到本地存储。
@@ -102,7 +136,7 @@ class LocalStorage(FileStorage):
         if not os.path.isfile(path):
             return False
         with open(self._lock_path, "w") as lock_f:
-            fcntl.flock(lock_f.fileno(), fcntl.LOCK_EX)
+            lock_exclusive(lock_f.fileno())
             try:
                 os.remove(path)
                 return True
@@ -110,7 +144,7 @@ class LocalStorage(FileStorage):
                 logger.error(f"[LocalStorage] delete failed: {key}, {e}")
                 return False
             finally:
-                fcntl.flock(lock_f.fileno(), fcntl.LOCK_UN)
+                unlock(lock_f.fileno())
 
     def delete_file(self, url: str) -> bool:
         """删除文件 —— 与 CosStorage 接口对齐。

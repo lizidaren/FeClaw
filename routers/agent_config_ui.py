@@ -841,7 +841,10 @@ async def _render_agent_config_page(request: Request, agent_id: int):
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>FeClaw Console - Agent 配置</title>
     <!-- FIX-D：移除 Google Fonts（国内不可达，阻塞首屏），改用系统字体栈 -->
+    <!-- T16：唯一安全渲染边界 marked → DOMPurify（加载顺序不可调换） -->
     <script src="/static/marked.min.js"></script>
+    <script src="/static/vendor/dompurify.min.js"></script>
+    <script src="/static/js/safe-render.js"></script>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         /* FIX-D：键盘导航可见焦点环 */
@@ -1262,7 +1265,7 @@ async def _render_agent_config_page(request: Request, agent_id: int):
             '网络工具': ['web_search'],
             '会话管理': ['end_conversation', 'list_conversations', 'load_conversation', 'generate_summary', 'search_sessions', 'auto_suggest_session'],
             '文件编辑': ['edit'],
-            '定时任务': ['schedule_reminder', 'list_reminders', 'cancel_reminder'],
+            '定时任务': ['create_cron_job', 'list_reminders', 'cancel_reminder'],
             '子Agent': ['spawn_subagent', 'list_subagent_roles'],
             '分享与安全': ['create_share_link', 'generate_totp']
         };
@@ -1389,7 +1392,20 @@ async def _render_agent_config_page(request: Request, agent_id: int):
 
         function updatePreview() {
             const content = document.getElementById('personaInput').value;
-            document.getElementById('personaPreview').innerHTML = marked.parse(content);
+            const target = document.getElementById('personaPreview');
+            // T16：persona 预览与聊天/群聊/文件预览走同一安全边界（marked → DOMPurify）。
+            // 边界未加载或抛错时退化为 textContent，绝不注入未消毒 HTML。
+            const sr = window.FeClawSafeRender;
+            if (!sr || typeof sr.renderMarkdownSafe !== 'function') {
+                target.textContent = content;
+                return;
+            }
+            try {
+                target.innerHTML = sr.renderMarkdownSafe(content);
+            } catch (e) {
+                console.error('persona preview error:', e);
+                target.textContent = content;
+            }
         }
 
         function applyTemplate() {

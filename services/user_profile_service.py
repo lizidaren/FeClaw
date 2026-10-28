@@ -6,7 +6,7 @@ User Profile Service — 用户画像后台提取器
 
 参考 Session Memory 架构：
 - 阈值判断：消息数 / 关键词达到阈值时触发提取
-- 提取执行：用受限工具集调用 LLM，读完现有 USER.md 后写入更新
+- 提取执行：用受限工具集调用 LLM，读完现有 user.md 后写入更新
 - 非阻塞：通过 asyncio.create_task 在后台运行，不影响主对话流
 """
 
@@ -22,18 +22,18 @@ from services._format_conversation import format_conversation
 from services.tool_registry import get_tool_schemas
 from services.virtual_filesystem import VirtualFileSystem
 
-USER_PROFILE_FILE_PATH = "/workspace/agent/USER.md"
+USER_PROFILE_FILE_PATH = "/workspace/agent/user.md"
 MAX_USER_PROFILE_SIZE = 50 * 1024  # 50KB
 
 
 def _user_profile_tool_filter(name: str, args: dict) -> bool:
-    """User Profile 工具权限：只允许读写 /workspace/agent/USER.md"""
+    """User Profile 工具权限：只允许读写 /workspace/agent/user.md"""
     if name in ("file_read", "cat"):
         path = args.get("path", "")
-        return path == "/workspace/agent/USER.md"
+        return path == "/workspace/agent/user.md"
     if name in ("file_write", "write"):
         path = args.get("path", "")
-        return path == "/workspace/agent/USER.md"
+        return path == "/workspace/agent/user.md"
     return False
 
 logger = logging.getLogger(__name__)
@@ -59,8 +59,8 @@ class UserProfileConfig:
 EXTRACTION_SYSTEM_PROMPT = """你是当前 Agent 的「用户观察助手」。你的任务是从对话中捕捉关于这位学生的信号，更新 Agent 对学生的认知档案。
 
 # 你的工作方式
-你是一个后台分析器，分析结束后通过 file_write() 工具写入 /workspace/agent/USER.md。
-你正在分析学生和 Agent 之间的对话。如果 USER.md 中已有信息，先用 file_read() 读取再合并。
+你是一个后台分析器，分析结束后通过 file_write() 工具写入 /workspace/agent/user.md。
+你正在分析学生和 Agent 之间的对话。如果 user.md 中已有信息，先用 file_read() 读取再合并。
 
 # 对话类型判断（第一步）
 开始分析前，先判断对话类型：
@@ -113,7 +113,7 @@ EXTRACTION_SYSTEM_PROMPT = """你是当前 Agent 的「用户观察助手」。�
 4. 旧信息如果不再适用，标注「(可能已过时)」而非直接删除
 5. 关于知识点掌握度：如果只有一次接触，暂标记为 confidence 低，标注"有待观察"
 6. 允许不确定："无法确定"是合法的结论
-7. 核心原则：不要为了分析而分析。如果是闲聊或简单查询，没有有价值的观察，就不更新 USER.md，直接返回
+7. 核心原则：不要为了分析而分析。如果是闲聊或简单查询，没有有价值的观察，就不更新 user.md，直接返回
 
 # 输出格式
 先分析对话，再调用 file_write 写入。格式为 Markdown，需包含以下章节（按实际内容取舍）：
@@ -138,7 +138,7 @@ class UserProfileService:
     # ── 读写 ──────────────────────────────────────────────
 
     def get(self, user_id: str = None) -> Optional[str]:
-        """读取当前 USER.md 内容"""
+        """读取当前 user.md 内容"""
         vfs = VirtualFileSystem(agent_hash=self.agent_hash)
         content = vfs.cat(USER_PROFILE_FILE_PATH)
         if content and not content.startswith("Error: 文件不存在") and not content.startswith("Error:"):
@@ -146,7 +146,7 @@ class UserProfileService:
         return None
 
     def save(self, content: str) -> str:
-        """写入更新后的 USER.md"""
+        """写入更新后的 user.md"""
         if not content or not content.strip():
             return "Error: 内容不能为空"
         content_bytes = content.encode("utf-8")
@@ -243,7 +243,7 @@ class UserProfileService:
     # ── 画像文件是否已存在 ────────────────────────────────
 
     def is_profile_initialized(self) -> bool:
-        """检查 USER.md 是否已有画像内容（非空且有实际内容）"""
+        """检查 user.md 是否已有画像内容（非空且有实际内容）"""
         vfs = VirtualFileSystem(agent_hash=self.agent_hash)
         content = vfs.cat(USER_PROFILE_FILE_PATH)
         if content and not content.startswith("Error: 文件不存在") and not content.startswith("Error:"):
@@ -301,7 +301,7 @@ class UserProfileService:
 
         extraction_messages = [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"## 近期对话\n\n{conversation_text}\n\n请按照操作步骤读取现有 USER.md 后更新用户画像。"},
+            {"role": "user", "content": f"## 近期对话\n\n{conversation_text}\n\n请按照操作步骤读取现有 user.md 后更新用户画像。"},
         ]
 
         # 4. 调用 LLM（带受限工具集），最多 3 轮
@@ -389,7 +389,7 @@ class UserProfileService:
 
     @staticmethod
     def has_learning_profile(profile_text: str) -> bool:
-        """检查 USER.md 中是否有学习画像内容"""
+        """检查 user.md 中是否有学习画像内容"""
         if not profile_text:
             return False
         # 检查是否有 # 学习画像 或 ## 学习画像 等标题
@@ -397,7 +397,7 @@ class UserProfileService:
 
     @staticmethod
     def build_injection(profile_text: str) -> str:
-        """从 USER.md 内容中提取学习画像摘要，生成注入文本（供 SR 使用）"""
+        """从 user.md 内容中提取学习画像摘要，生成注入文本（供 SR 使用）"""
         if not profile_text:
             return ""
 

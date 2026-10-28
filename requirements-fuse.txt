@@ -1,4 +1,20 @@
-# FeClaw FUSE 支持（可选）
-# pyfuse3 需要系统安装 fuse3 + libfuse3-dev
-# 安装：apt install fuse3 libfuse3-dev && pip install -r requirements-fuse.txt
+# =============================================================================
+# FeClaw FUSE 组（可选功能：把 VFS 挂载成本地目录）
+#
+# 本组只含 **trio + pyfuse3** 两个包：core/optional 组不得包含它们，
+# 缺失它们时整个应用仍可启动，只是 FUSE 关闭（services/vfs_fuse_daemon.py 的
+# _FUSE_AVAILABLE=False，挂载入口抛 RuntimeError 而不是 ImportError/NameError）。
+#
+# 安装：
+#   apt install fuse3 libfuse3-dev        # 系统层：/dev/fuse + fusermount3
+#   pip install -r requirements-fuse.txt  # Python 层
+# 精确版本见 requirements.lock 的 `fuse` 分组。
+# =============================================================================
+
+# pyfuse3 基于 Trio 事件循环，两者必须成对安装。
+trio>=0.25.0
 pyfuse3>=1.4.0
+
+# lock-pending: pyfuse3  # Windows 无 FUSE，本机 venv 装不上 → 未锁定版本；
+#                         # 干净 Linux venv 验证（T19b）时补 `pyfuse3==<ver>` 到
+#                         # requirements.lock 的 fuse 分组（trio 已锁定）。

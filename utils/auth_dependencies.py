@@ -13,6 +13,7 @@ TOTP / 平台 session 等 agent 级 token 由 `routers/feclaw_domain._get_token_
 - 4+1 依赖：required/optional × User/int + admin
 """
 from typing import Optional
+from urllib.parse import unquote
 
 from fastapi import Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session
@@ -33,6 +34,91 @@ _UNAUTHORIZED = HTTPException(
     detail={"status": "unauthorized"},
     headers={"WWW-Authenticate": "Bearer"},
 )
+
+
+# ────────────────────────────────────────────────────────────────────
+# 登录/重定向白名单（T18a 唯一实现）
+# ────────────────────────────────────────────────────────────────────
+#
+# 唯一规则：**只接受内部规范相对路径**。
+#
+# 拒绝清单（每条都有对应测试向量，见 tests/test_csrf_origin.py）：
+#   - 空串 / 非 `/` 开头（`http://evil`、`evil.com`、`javascript:...`、`data:...`）
+#   - `//host`（协议相对外跳）、`/\host`、`\\host`（浏览器把 `\` 当 `/`）
+#   - 任意控制字符 / 空格 / 换行（`/\r\nLocation:` 头注入、`/%09//evil`）
+#   - 百分号编码绕过：`/%2f%2fevil`、`/%09/evil`（连续解码最多 3 层后再判一次）
+#   - 非 ASCII 控制字符（DEL 0x7f）
+#
+# ⚠️ 前端 `static/js/auth.js` 的 `Auth.safeInternalPath` 必须是**同一套规则**的
+# 镜像（浏览器里没法 import Python）；两边由同一组测试向量约束。
+
+_MAX_UNQUOTE_ROUNDS = 3
+
+
+def _has_control_or_space(text: str) -> bool:
+    for ch in text:
+        code = ord(ch)
+        if code < 0x20 or code == 0x7F:
+            return True
+        if ch in (" ", "\t", "\n", "\r"):
+            return True
+    return False
+
+
+def _single_path_check(candidate: str) -> bool:
+    if not candidate:
+        return False
+    if not candidate.startswith("/"):
+        return False
+    # `//evil.com`（协议相对）与 `/\evil.com`（浏览器把 \ 折叠成 /）
+    if candidate.startswith("//") or candidate.startswith("/\\"):
+        return False
+    # 任何位置的 `\` 都不接受（Windows 浏览器 + 代理差异会把 `\` 当分隔符）
+    if "\\" in candidate:
+        return False
+    if _has_control_or_space(candidate):
+        return False
+    # 显式拒绝危险协议串（规范化后仍出现即拒，宁可多拒）
+    lowered = candidate.lower()
+    for bad in ("javascript:", "data:", "vbscript:", "file:"):
+        if bad in lowered:
+            return False
+    return True
+
+
+def is_safe_internal_path(candidate: Optional[str]) -> bool:
+    """`candidate` 是否是安全的**内部规范相对路径**。
+
+    供登录 `redirect_to`、OAuth 回跳、登出回跳等所有"用户可控跳转"复用。
+    """
+    if not candidate or not isinstance(candidate, str):
+        return False
+    text = candidate.strip()
+    if not text:
+        return False
+    if not _single_path_check(text):
+        return False
+    # 百分号编码绕过：连续解码后再判（限制层数，防解码炸弹）
+    decoded = text
+    for _ in range(_MAX_UNQUOTE_ROUNDS):
+        nxt = unquote(decoded)
+        if nxt == decoded:
+            break
+        decoded = nxt
+    if decoded != text and not _single_path_check(decoded):
+        return False
+    return True
+
+
+def safe_internal_redirect_path(candidate: Optional[str], default: str = "/dashboard") -> str:
+    """返回安全的内部跳转路径；不合法时返回 `default`。
+
+    调用方**不要**再自行拼接或 `startswith` 判断 —— 这里是唯一判定入口。
+    """
+    if is_safe_internal_path(candidate):
+        return candidate.strip()  # type: ignore[union-attr]
+    return default
+
 
 
 def _extract_global_jwt(request: Request) -> Optional[str]:

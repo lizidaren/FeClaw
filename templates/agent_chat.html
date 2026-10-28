@@ -9,6 +9,10 @@
     <script src="/static/js/auth.js"></script>
     <!-- Markdown 渲染（本地托管，避免 CDN 被墙） -->
     <script src="/static/marked.min.js"></script>
+    <!-- T16：自托管 DOMPurify（锁定 3.2.4，禁止改回 CDN） -->
+    <script src="/static/vendor/dompurify.min.js"></script>
+    <!-- T16：唯一安全渲染边界 marked → DOMPurify → KaTeX（加载顺序不可调换） -->
+    <script src="/static/js/safe-render.js"></script>
     <!-- KaTeX 数学公式（本地托管，避免 CDN 被墙） -->
     <link rel="stylesheet" href="/static/katex.min.css">
     <script src="/static/katex.min.js"></script>
@@ -1347,32 +1351,8 @@ let selectedFilePath = null;     // 上传后的 VFS 路径
             `).join('');
             stickToBottom = true;
 
-            // 渲染 LaTeX 公式
-            if (typeof katex !== 'undefined') {
-                try {
-                    var allMsgs = container.querySelectorAll('.message');
-                    for (var mi = 0; mi < allMsgs.length; mi++) {
-                        var html = allMsgs[mi].innerHTML;
-                        html = html.replace(/\$\$([\s\S]*?)\$\$/g, function(_, eq) {
-                            try { return katex.renderToString(eq, {displayMode: true, throwOnError: false}); }
-                            catch(e) { return '$$' + eq + '$$'; }
-                        });
-                        html = html.replace(/\\\[([\s\S]*?)\\\]/g, function(_, eq) {
-                            try { return katex.renderToString(eq, {displayMode: true, throwOnError: false}); }
-                            catch(e) { return '\\[' + eq + '\\]'; }
-                        });
-                        html = html.replace(/\$([^$\n]+?)\$/g, function(_, eq) {
-                            try { return katex.renderToString(eq, {displayMode: false, throwOnError: false}); }
-                            catch(e) { return '$' + eq + '$'; }
-                        });
-                        html = html.replace(/\\\(([^)]+?)\\\)/g, function(_, eq) {
-                            try { return katex.renderToString(eq, {displayMode: false, throwOnError: false}); }
-                            catch(e) { return '\\(' + eq + '\\)'; }
-                        });
-                        allMsgs[mi].innerHTML = html;
-                    }
-                } catch(e) {}
-            }
+            // 公式渲染已由 renderMarkdown（safe-render.js）在消毒后的 DOM 上完成，
+            // 不再对 innerHTML 字符串做 $...$ 正则替换（那样会改写属性/代码块）。
 
             // FIX-D：历史消息给助手气泡加「复制」，最后一条加「重新生成」
             const asstMsgs = container.querySelectorAll('.message.assistant');
@@ -1433,20 +1413,21 @@ let selectedFilePath = null;     // 上传后的 VFS 路径
 
             ConnectionManager.onTool = (msg) => {
                 // 在 AI 消息气泡内部插入工具调用（inline），而非外部
-                _insertBeforeAiMessage(aiMessageEl, '\u{1F527} ' + escapeHtml(msg.tool_name || msg.content || '执行工具'), 'tool-call');
+                _insertBeforeAiMessage(aiMessageEl, '\u{1F527} ' + (msg.tool_name || msg.content || '执行工具'), 'tool-call');
             };
 
             ConnectionManager.onToolResult = (msg) => {
                 const resultText = msg.content || '';
                 const preview = resultText.length > 100 ? resultText.slice(0, 100) + '...' : resultText;
-                _insertBeforeAiMessage(aiMessageEl, '\u2705 ' + escapeHtml(preview), 'tool-result');
+                _insertBeforeAiMessage(aiMessageEl, '\u2705 ' + preview, 'tool-result');
             };
 
             // 在 AI 消息之前插入 inline 元素（工具调用/结果）
-            function _insertBeforeAiMessage(anchor, html, className) {
+            // T16：这里只有纯文本，用 textContent，不做 HTML 拼接
+            function _insertBeforeAiMessage(anchor, text, className) {
                 const el = document.createElement('div');
                 el.className = className;
-                el.innerHTML = html;
+                el.textContent = text;
                 document.getElementById('messagesContainer').insertBefore(el, anchor);
                 scrollToBottom();
             }
@@ -1756,7 +1737,11 @@ let selectedFilePath = null;     // 上传后的 VFS 路径
                         session_id: currentSessionId,
                         image_url: imageData,  // 包含图片数据
                         file_path: fileDataPath,
-                        file_name: fileDataName
+                        file_name: fileDataName,
+                        // T03a：ChatRequest 的 channel/agent_hash 是必填（extra=forbid），
+                        // 缺了服务端直接 422，SSE 聊天会整体不可用。
+                        channel: 'web',
+                        agent_hash: AGENT_HASH
                     })
                 });
                 
@@ -1829,7 +1814,7 @@ let selectedFilePath = null;     // 上传后的 VFS 路径
                                 // 工具调用
                                 const toolEl = document.createElement('div');
                                 toolEl.className = 'tool-call';
-                                toolEl.innerHTML = '🔧 ' + escapeHtml(data.tool_name || data.content || '执行工具');
+                                toolEl.textContent = '🔧 ' + (data.tool_name || data.content || '执行工具');
                                 document.getElementById('messagesContainer').appendChild(toolEl);
                                 scrollToBottom();
                             }
@@ -1840,7 +1825,7 @@ let selectedFilePath = null;     // 上传后的 VFS 路径
                                 resultEl.className = 'tool-result';
                                 const resultText = data.content || '';
                                 const preview = resultText.length > 100 ? resultText.slice(0, 100) + '...' : resultText;
-                                resultEl.innerHTML = '✅ ' + escapeHtml(preview);
+                                resultEl.textContent = '✅ ' + preview;
                                 document.getElementById('messagesContainer').appendChild(resultEl);
                                 scrollToBottom();
                             }
@@ -1934,8 +1919,10 @@ let selectedFilePath = null;     // 上传后的 VFS 路径
             let messageContent = '';
             
             // 如果是用户消息且有图片，显示图片预览
-            if (role === 'user' && imageUrl) {
-                messageContent += `<div class="message-image"><img src="${imageUrl}" alt="发送的图片"></div>`;
+            // T16：src 不做字符串拼接（data URL 里有引号/分号），先占位，插入 DOM 后用属性赋值
+            const hasUserImage = !!(role === 'user' && imageUrl);
+            if (hasUserImage) {
+                messageContent += '<div class="message-image"><img alt="发送的图片"></div>';
             }
             // 如果是用户消息且有文件名（非图片文件）
             if (role === 'user' && fileName) {
@@ -1949,6 +1936,13 @@ let selectedFilePath = null;     // 上传后的 VFS 路径
             messageContent += (withCursor ? '<span class="typing-cursor"></span>' : '');
             
             el.innerHTML = messageContent;
+            if (hasUserImage) {
+                const img = el.querySelector('.message-image img');
+                // 只接受本地上传产生的 data:image / blob: / http(s)，其余不加载
+                if (img && /^(?:data:image\/|blob:|https?:\/\/)/i.test(String(imageUrl))) {
+                    img.src = imageUrl;
+                }
+            }
             container.appendChild(el);
             
             scrollToBottom();
@@ -1959,32 +1953,9 @@ let selectedFilePath = null;     // 上传后的 VFS 路径
         function updateMessage(el, content) {
             const cursor = el.querySelector('.typing-cursor');
             const isAssistant = el.classList.contains('assistant');
+            // T16：assistant 走唯一安全边界；公式也在 safe-render 内部完成，
+            // 这里不再对渲染后的 innerHTML 做正则替换。
             el.innerHTML = isAssistant ? renderMarkdown(content) : escapeHtml(content);
-            // 渲染 LaTeX 公式（使用 katex.renderToString 正则替换）
-            if (typeof katex !== 'undefined') {
-                try {
-                    var html = el.innerHTML;
-                    // 块公式 $$...$$ 或 \[...\]
-                    html = html.replace(/\$\$([\s\S]*?)\$\$/g, function(_, eq) {
-                        try { return katex.renderToString(eq, {displayMode: true, throwOnError: false}); }
-                        catch(e) { return '$$' + eq + '$$'; }
-                    });
-                    html = html.replace(/\\\[([\s\S]*?)\\\]/g, function(_, eq) {
-                        try { return katex.renderToString(eq, {displayMode: true, throwOnError: false}); }
-                        catch(e) { return '\\[' + eq + '\\]'; }
-                    });
-                    // 行内公式 $...$ 或 \(...\)
-                    html = html.replace(/\$([^$\n]+?)\$/g, function(_, eq) {
-                        try { return katex.renderToString(eq, {displayMode: false, throwOnError: false}); }
-                        catch(e) { return '$' + eq + '$'; }
-                    });
-                    html = html.replace(/\\\(([^)]+?)\\\)/g, function(_, eq) {
-                        try { return katex.renderToString(eq, {displayMode: false, throwOnError: false}); }
-                        catch(e) { return '\\(' + eq + '\\)'; }
-                    });
-                    el.innerHTML = html;
-                } catch(e) {}
-            }
             if (cursor) el.appendChild(cursor);
             scrollToBottom();
         }
@@ -2231,10 +2202,17 @@ let selectedFilePath = null;     // 上传后的 VFS 路径
         }
 
         // Markdown 渲染（用于 assistant 消息）
+        // T16：唯一安全渲染边界 —— 不再“marked.parse 结果直接 innerHTML”，
+        // 统一走 safe-render.js（marked → DOMPurify → KaTeX）。
         function renderMarkdown(text) {
             if (!text) return '';
+            var sr = window.FeClawSafeRender;
+            if (!sr || typeof sr.renderMarkdownSafe !== 'function') {
+                // 安全边界未加载：退化为纯文本，绝不注入未消毒 HTML
+                return escapeHtml(text);
+            }
             try {
-                return marked.parse(text, { breaks: true, gfm: true });
+                return sr.renderMarkdownSafe(text);
             } catch(e) {
                 console.error('renderMarkdown error:', e);
                 return escapeHtml(text);

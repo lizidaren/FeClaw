@@ -75,6 +75,41 @@ GROUP_ALIASES = {
 ORG_NOT_BOUND = "_ORG_NOT_BOUND_"
 
 
+def resolve_group_path(path: str) -> Tuple[Optional[str], Optional[str]]:
+    """解析群共享空间路径到 COS key（工具层解析，VFS 不感知）。
+
+    /mnt/group/{gid}/xxx → feclaw/groups/{gid}/xxx
+    /mnt/group/{gid}/    → feclaw/groups/{gid}/         (目录前缀)
+    /mnt/group/{alias}/xxx → 自动按 GROUP_ALIASES 替换为真实 UUID
+
+    T03a：这里是**唯一实现**。此前 `_resolve_group_path` 只存在于 FileOpsMixin 内，
+    而 `services/tools/permission_tools.py` 顶层 `from services.tools.file_ops import
+    _resolve_group_path` 拿到的是模块属性 ⇒ ImportError；审批路径每次 request_permission
+    都会炸/或被迫各自复制一份解析器。现在模块级函数是本尊，Mixin 的 staticmethod
+    只是转调（保持 FileOpsMixin._resolve_group_path 的老调用方不坏）。
+
+    Returns:
+        (cos_key, error_msg)
+    """
+    if not path.startswith("/mnt/group/"):
+        return (None, f"Error: 不是群共享空间路径: {path}")
+    parts = path.strip("/").split("/")
+    # parts = ["mnt", "group", "{gid}", ...]
+    if len(parts) < 3 or not parts[2]:
+        return (None, "Error: /mnt/group/ 路径必须包含 group_id，格式为 /mnt/group/{group_id}/...")
+    if parts[2] in GROUP_ALIASES:
+        parts[2] = GROUP_ALIASES[parts[2]]
+    gid = parts[2]
+    if ".." in gid or "/" in gid or not gid.strip():
+        return (None, "Error: group_id 非法")
+    rest = "/".join(parts[3:])
+    if ".." in rest:
+        return (None, "Error: 路径不允许 .. 穿越")
+    if rest:
+        return (f"feclaw/groups/{gid}/{rest}", None)
+    return (f"feclaw/groups/{gid}/", None)
+
+
 class FileOpsMixin(AgentToolsServiceBase):
     """文件操作工具 Mixin"""
 
@@ -87,33 +122,8 @@ class FileOpsMixin(AgentToolsServiceBase):
 
     @staticmethod
     def _resolve_group_path(path: str) -> Tuple[Optional[str], Optional[str]]:
-        """
-        解析群共享空间路径到 COS key（工具层解析，VFS 不感知）
-
-        /mnt/group/{gid}/xxx → feclaw/groups/{gid}/xxx
-        /mnt/group/{gid}/    → feclaw/groups/{gid}/         (目录前缀)
-        /mnt/group/{alias}/xxx → 自动按 GROUP_ALIASES 替换为真实 UUID
-
-        Returns:
-            (cos_key, error_msg)
-        """
-        if not path.startswith("/mnt/group/"):
-            return (None, f"Error: 不是群共享空间路径: {path}")
-        parts = path.strip("/").split("/")
-        # parts = ["mnt", "group", "{gid}", ...]
-        if len(parts) < 3 or not parts[2]:
-            return (None, "Error: /mnt/group/ 路径必须包含 group_id，格式为 /mnt/group/{group_id}/...")
-        if parts[2] in GROUP_ALIASES:
-            parts[2] = GROUP_ALIASES[parts[2]]
-        gid = parts[2]
-        if ".." in gid or "/" in gid or not gid.strip():
-            return (None, "Error: group_id 非法")
-        rest = "/".join(parts[3:])
-        if ".." in rest:
-            return (None, "Error: 路径不允许 .. 穿越")
-        if rest:
-            return (f"feclaw/groups/{gid}/{rest}", None)
-        return (f"feclaw/groups/{gid}/", None)
+        """兼容入口：转调模块级唯一实现 resolve_group_path（T03a）。"""
+        return resolve_group_path(path)
 
     def _resolve_path(self, path: str) -> Tuple[Optional[str], Optional[str]]:
         """

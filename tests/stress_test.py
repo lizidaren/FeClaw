@@ -2,7 +2,13 @@
 """
 FUSE 性能压测
 对比 FUSE 直通（COS 直操作） vs VFS 仿真（mock/unlock）的延迟
+
+注意：这是手工压测脚本，不是 pytest 用例。模块级会建目录/初始化 VFS，
+pytest 收集时会因路径不存在直接 FileNotFoundError（预存在的收集期错误）。
+`__test__ = False` 让 pytest 跳过收集，同时不妨碍 `python tests/stress_test.py` 运行。
 """
+__test__ = False
+
 import os, sys, time, threading, subprocess, json
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 

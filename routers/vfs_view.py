@@ -37,8 +37,14 @@ async def view_vfs_file(
         path: VFS 路径，如 /workspace/images/temp_123.png
     """
     # 路径安全检验
-    sanitized = os.path.normpath(path).lstrip("/")
-    if ".." in sanitized or sanitized.startswith(".."):
+    # FIX-W1（T03/T18a 交叉）：Windows 上 os.path.normpath 会把 "/" 归一成 "\"，
+    # 于是 "agents\x\workspace" 的下面的租户校验（按 "/" 切分）整体失效 ——
+    # 攻击者只要把 path 里的 "/" 写成 "\"（或 %5C）就能跳过 user_owns_agent 检查。
+    # 先归一成 POSIX 分隔符再切分，并对反斜杠路径本身保持拒绝。
+    if "\\" in path:
+        raise HTTPException(status_code=400, detail="Invalid path")
+    sanitized = os.path.normpath(path).replace("\\", "/").lstrip("/")
+    if ".." in sanitized.split("/"):
         raise HTTPException(status_code=400, detail="Invalid path")
 
     # Q19/H13：租户隔离 —— agents/<hash>/ 必须属于当前用户；user_workspaces/<uid>/ 必须是自己

@@ -1,0 +1,197 @@
+# =============================================================================
+# FeClaw locked dependencies (exact versions, single source of truth)
+#
+# Layering:  requirements.txt      = declaration layer (deps + ranges, reviewable)
+#            requirements.lock     = lock layer (verified exact versions, reproducible)
+#            requirements-dev.txt  = test group declaration  (lock group: test)
+#            requirements-fuse.txt = FUSE group declaration  (lock group: fuse)
+# Installing only from this file cannot drift from the tested matrix, so there is
+# exactly one lock and no second contradictory pin list.
+#
+# Baseline: repo e2adb08, Python 3.12.9 (Windows); full pytest run passed on this
+# venv. Versions come from that venv's `pip freeze` -- nothing is pinned blind.
+#
+# How this file was produced (T19a):
+#   1) static audit of real imports (AST over 345 .py files; module-level vs
+#      function-level vs guarded) reconciled against requirements*.txt;
+#   2) `pip freeze` of the verified venv;
+#   3) manual grouping (core / optional / fuse / test); everything frozen beyond
+#      the direct deps goes to `transitive`;
+#   4) explicit exclusions for unused/uninstallable packages (see tail of file).
+#
+# Reproduce in a clean venv:
+#   python -m venv .venv-clean
+#   .venv-clean/Scripts/python -m pip install -U pip
+#   .venv-clean/Scripts/python -m pip install -r requirements.lock
+#   .venv-clean/Scripts/python -m pip check        # expect: No broken requirements
+#   .venv-clean/Scripts/python -m pip freeze       # compare with this file
+# Core-only install: copy this file's `core` group into a constraints file,
+#   e.g.  pip install -r <(sed -n '/group: core/,/^$/p' requirements.lock)
+#
+# Group semantics:
+#   core       required to start and serve (module-level imports / framework runtime)
+#   optional   feature-on-demand (lazy or ImportError-guarded import); missing =>
+#              that feature reports unavailable, the app still starts
+#   fuse       FUSE mounting only; core/optional must never contain these
+#   test       test framework
+#   transitive verified transitive closure of the above (keeps parity with the
+#              tested venv)
+#
+# Names use canonical PyPI spelling; normalize [-_.] -> '-' and lowercase before
+# comparing. Every pin is `==`; this file contains no `>=` / `~=` / `*`.
+#
+# Known limits (out of scope for T19a):
+#   * no `--hash` entries yet, so Dockerfile cannot use `--require-hashes`; adding
+#     hashes needs a reproducible wheel cache (T19b).
+#   * openai / pyfuse3 are not installable on this host -> no verified version,
+#     so they are declared but NOT locked (see `pending` at the tail).
+#   * the clean-venv install matrix (no FUSE / missing helpers / missing model
+#     key / missing Redis) is T19b; this file does not claim it.
+# =============================================================================
+
+# === group: core ===
+fastapi==0.115.14                                   # Web framework
+starlette==0.41.3                                   # main.py imports directly; upper bound from fastapi 0.115.x <0.47.0
+uvicorn[standard]==0.54.0                           # ASGI server
+SQLAlchemy==2.1.6                                   # ORM
+PyMySQL==1.2.3                                      # driver for mysql+pymysql://
+pydantic==2.14.1
+pydantic-settings==2.16.1
+python-jose[cryptography]==3.5.0                    # agent_jwt_service JWT
+cryptography==50.0.2                                # wechatbot_sdk/crypto.py imports directly
+PyJWT==2.15.1                                       # routers/feclaw_domain.py
+bcrypt==5.0.0                                       # password hashing
+httpx[http2]==0.27.2                                # outbound HTTP
+aiohttp==3.14.5                                     # routers/wechat.py etc.
+Jinja2==3.1.6                                       # template engine
+python-multipart==0.0.32                            # framework runtime requirement for UploadFile/File()/Form()
+nest-asyncio==1.6.0
+APScheduler==3.11.3                                 # scheduled tasks
+redis==8.1.0
+pyotp==2.10.0                                       # services/totp_service.py module-level import
+numpy==2.5.4                                        # vector_search_service module-level import
+psutil==7.2.2                                       # system metrics
+certifi==2026.10.23
+python-dotenv==1.2.4                                # load_dotenv
+requests==2.34.2                                    # cos_patch exception path
+cos-python-sdk-v5==1.9.44                           # COS SDK
+qcloud-python-sts==3.1.6                            # COS STS temp credentials
+anyio==4.15.1                                       # starlette/httpx dependency; pytest plugin used by tests
+
+# === group: optional ===
+PyMuPDF==2.0                                        # fitz: PDF (universal_parser try/except)
+python-docx==1.2.0                                  # docx
+python-pptx==1.0.2                                  # pptx
+openpyxl==3.1.5                                     # xlsx
+opencv-python-headless==5.0.0.93                    # cv2
+pillow==13.0.0                                      # PIL
+qrcode[pil]==8.2                                    # utils/qr.py (try/except guard)
+aiofiles==25.1.0                                    # async file IO (image_describer lazy import)
+pydub==0.25.1                                       # TTS audio concat (try/except)
+dashscope==2.0.1                                    # Bailian SDK: TTS/ASR/Omni
+CairoSVG==2.9.1                                     # NB: libcairo missing on this host -> import OSError
+svglib==2.3.2                                       # SVG
+reportlab==5.1.0                                    # PDF/graphics
+dnspython==2.9.0                                    # static_site_service CNAME check
+playwright==1.64.1                                  # browser automation (web tools/tests/scripts)
+
+# === group: fuse ===
+trio==0.34.0                                        # pyfuse3 event loop; FUSE group is incomplete without it
+
+# === group: test ===
+pytest==8.4.2                                       # test framework
+pytest-asyncio==0.24.0
+
+# === group: transitive ===
+aiohappyeyeballs==2.7.1
+aiosignal==1.4.0
+annotated-doc==0.0.5
+annotated-types==0.8.0
+attrs==26.1.0
+cairocffi==1.7.1
+cffi==2.1.1
+charset-normalizer==3.5.2
+click==8.5.0
+colorama==0.4.6
+crcmod==1.7
+cssselect2==0.10.1
+defusedxml==0.7.1
+ecdsa==0.19.2
+et_xmlfile==2.0.0
+flatbuffers==25.12.19
+frozenlist==1.8.0
+greenlet==3.5.6
+h11==0.16.0
+h2==4.4.1
+hpack==4.2.0
+httpcore==1.0.9
+httptools==0.9.0
+httpx-sse==0.4.3
+hyperframe==6.1.0
+idna==3.20
+iniconfig==2.3.1
+lxml==6.1.3
+markdown-it-py==4.2.0
+MarkupSafe==3.0.4
+mdurl==0.1.2
+multidict==7.2.0
+networkx==3.7
+onnxruntime==1.31.0
+opentelemetry-api==1.45.1
+opentelemetry-sdk==1.45.1
+opentelemetry-semantic-conventions==0.66b1
+outcome==1.3.0.post0
+packaging==26.3
+pluggy==1.7.0
+propcache==0.5.4
+protobuf==7.36.2
+pyasn1==0.6.4
+pycparser==3.12
+pycryptodome==4.2.0
+pydantic_core==2.50.1
+pyee==14.0.0
+Pygments==2.21.0
+pymupdf4llm==2.0
+pymupdf_layout==2.0
+PyYAML==6.0.3
+regex==2026.9.29
+rich==15.0.0
+rsa==4.9.1
+shellingham==1.5.4
+six==1.17.0
+sniffio==1.3.1
+sortedcontainers==2.4.0
+tabulate==0.10.0
+tenacity==9.2.1
+tiktoken==0.14.0
+tinycss2==1.5.1
+typer==0.27.3
+typing-inspection==0.4.4
+typing_extensions==4.16.0
+tzdata==2026.5
+tzlocal==5.4.5
+urllib3==2.8.0
+watchfiles==1.3.0
+webencodings==0.6.1
+websocket-client==1.9.2
+websockets==17.3
+xlsxwriter==3.3.0
+xmltodict==1.0.4
+yarl==1.25.1
+
+# --- excluded (deliberately NOT locked; decision + rationale only) ---
+# sse-starlette: zero imports in the repo (no sse_starlette / EventSourceResponse),
+#   and 3.5.1 requires starlette>=0.49.1 which conflicts with fastapi 0.115.14's
+#   starlette<0.47.0 (the only `pip check` conflict). Not installing it removes the
+#   conflict without touching application code.
+# eval_type_backport: zero imports; pydantic 2.14.1 does not require it; only needed
+#   for runtime annotation evaluation on Python<3.10 while requires-python>=3.12.
+# setuptools / wheel: pip bootstrap tooling, not application dependencies.
+
+# --- pending (declared but unverifiable on this host => not pinned) ---
+# openai      -- declared in requirements.txt as >=1.0.0; imported lazily by
+#                services/tools/ai_tools.py.
+# pyfuse3     -- declared in requirements-fuse.txt as >=1.4.0; no /dev/fuse on
+#                Windows, cannot install.
+# Both must be pinned after a clean-environment verification (T19b).
+

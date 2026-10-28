@@ -105,11 +105,11 @@ async def generate_persona(
         + current_context
         + "\n用户希望对配置进行以下修改：\n" + user_description + "\n\n"
         + "请生成更新后的三段内容，用 ===SOUL=== ===IDENTITY=== ===USER=== 分隔。\n\n"
-        + "SOUL.md (Agent 的性格、身份、行为准则):\n"
+        + "soul.md (Agent 的性格、身份、行为准则):\n"
         + "- 身份定位\n- 性格特质\n- 行为准则\n- 沟通风格\n\n"
-        + "IDENTITY.md (Agent 的身份卡):\n"
+        + "identity.md (Agent 的身份卡):\n"
         + "- 名称\n- 目标\n- 职责\n- 行为准则\n\n"
-        + "USER.md (用户画像):\n"
+        + "user.md (用户画像):\n"
         + "- 用户背景信息\n- 学习/使用偏好\n- 用户对 Agent 的期望\n\n"
         + "风格要求：简洁、实用，中文。"
         + _PERSONA_SAFETY_LINES
@@ -191,11 +191,11 @@ async def generate_persona_stream(
         + current_context
         + "\n用户希望对配置进行以下修改：\n" + user_description + "\n\n"
         + "请生成更新后的三段内容，用 ===SOUL=== ===IDENTITY=== ===USER=== 分隔。\n\n"
-        + "SOUL.md (Agent 的性格、身份、行为准则):\n"
+        + "soul.md (Agent 的性格、身份、行为准则):\n"
         + "- 身份定位\n- 性格特质\n- 行为准则\n- 沟通风格\n\n"
-        + "IDENTITY.md (Agent 的身份卡):\n"
+        + "identity.md (Agent 的身份卡):\n"
         + "- 名称\n- 目标\n- 职责\n- 行为准则\n\n"
-        + "USER.md (用户画像):\n"
+        + "user.md (用户画像):\n"
         + "- 用户背景信息\n- 学习/使用偏好\n- 用户对 Agent 的期望\n\n"
         + "风格要求：简洁、实用，中文。"
         + _PERSONA_SAFETY_LINES

@@ -12,6 +12,18 @@ _project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
+# T19/T01：以下不是 pytest 用例，而是需要真实服务/参数的“手工 E2E 脚本”，
+# 它们在**模块级**就执行 argparse 或发起 HTTP 请求 —— pytest 一收集就会
+# SystemExit / 连不上 localhost:8080 / 依赖缺失，导致整套测试无法收集。
+# 显式跳过收集；手工运行方式写在各自文件头部。
+collect_ignore = [
+    "stress_test.py",              # FUSE 手工压测（模块级建目录）
+    "test_zentrim_api.py",         # 模块级 argparse + 对运行中服务发请求
+    "test_subagent_presets.py",    # 依赖 PRESET_ROLES（运行期配置）
+    "test_subagent_presets_api.py",
+    "test_subagent_summary.py",
+]
+
 
 @pytest.fixture
 def real_db():
@@ -45,7 +57,9 @@ def real_db():
     from models.agent_buffer import AgentBuffer  # noqa: F401
     from models.group import Group, GroupMember, GroupMessage, GroupMoments  # noqa: F401
     from models.fehub import FePublish, AppData  # noqa: F401
+    from models.organization import Organization  # noqa: F401
     from models.zentrim import ZentrimEntry, ZentrimTimeline, ZentrimTimelineEntry, ZentrimReference  # noqa: F401
+    from models.kaoxiang_models import KaoxiangKaodian  # noqa: F401
 
     engine = create_engine(
         "sqlite:///:memory:",
@@ -59,12 +73,32 @@ def real_db():
     def session_factory():
         return TestSessionLocal()
 
-    # Patch 所有 import SessionLocal 的位置（与服务模块级 import 兼容）
-    with patch("models.database.SessionLocal", session_factory):
-        with patch("services.llm_service.SessionLocal", session_factory):
-            with patch("services.permission_service.SessionLocal", session_factory):
-                with patch("services.agent_executor.SessionLocal", session_factory):
-                    yield session_factory
+    # Patch 所有 import SessionLocal 的位置（与服务模块级 import 兼容）。
+    # T19a：仓库里 40+ 个模块在 import 时把 SessionLocal 绑到本地名字上，只 patch
+    # 三五个模块会让其余模块（如 routers/*）继续连真实 MySQL —— 在无 MySQL 的
+    # 环境里表现为 ConnectionRefused / 0 行导致 404。这里扫描 sys.modules，把
+    # 所有本仓库模块上的 `SessionLocal` 名字统一替换成测试工厂。
+    import sys as _sys
+    from contextlib import ExitStack
+
+    _repo_prefix = _project_root.replace("\\", "/").lower() + "/"
+    with ExitStack() as stack:
+        for _name, _mod in list(_sys.modules.items()):
+            if _mod is None or _name.startswith(("tests", "_pytest", "pytest")):
+                continue
+            _file = getattr(_mod, "__file__", None)
+            if not _file:
+                continue
+            _norm = _file.replace("\\", "/").lower()
+            if _repo_prefix not in _norm:
+                continue
+            if getattr(_mod, "SessionLocal", None) is None:
+                continue
+            try:
+                stack.enter_context(patch.object(_mod, "SessionLocal", session_factory))
+            except Exception:  # 只读属性/异常模块跳过，不影响其余 patch
+                continue
+        yield session_factory
 
 
 @pytest.fixture
@@ -164,3 +198,73 @@ def mock_httpx_client():
 
     with patch("httpx.AsyncClient", return_value=mock_client):
         yield container
+
+
+# ── pytest 标记与真实 MySQL fixture（T19a/T20a 的门禁基础）───────────────────
+
+_MARKERS = {
+    "unit": "纯单元测试，不依赖外部服务",
+    "integration": "跨模块/接口集成测试",
+    "real_db": "使用真实 SQL（SQLite in-memory），不是 MagicMock 会话",
+    "mysql": "需要真实 MySQL（并发/行锁/迁移语义）；缺 TEST_DATABASE_URL 时 skip",
+    "browser": "需要浏览器（Playwright + 已安装的 Edge）",
+    "slow": "耗时较长，可单独排除",
+    "network": "需要出网（默认不应在离线环境跑）",
+}
+
+
+def pytest_configure(config):
+    """注册标记，消除 `PytestUnknownMarkWarning`（基线里 20+ 条噪声）。"""
+    for name, description in _MARKERS.items():
+        config.addinivalue_line("markers", f"{name}: {description}")
+
+
+def _mysql_url():
+    """取真实 MySQL 测试库地址；未配置返回空串。
+
+    优先 `TEST_DATABASE_URL`（测试专用库），其次 `DATABASE_URL`（本地开发库）。
+    两者都必须是 mysql/mariadb，避免把 SQLite 当成 MySQL 门禁。
+    """
+    for key in ("TEST_DATABASE_URL", "DATABASE_URL"):
+        value = (os.environ.get(key) or "").strip()
+        if value.startswith(("mysql", "mariadb")):
+            return value
+    return ""
+
+
+@pytest.fixture(scope="session")
+def mysql_engine():
+    """真实 MySQL 引擎（session 级）。
+
+    用途：T04/T09/T20 的并发、行锁、唯一约束、迁移语义 —— 这些不能拿 SQLite 冒充。
+    缺配置时 **skip 而不是伪造通过**；调用方应在报告里标注 "MySQL 未验证"。
+    """
+    url = _mysql_url()
+    if not url:
+        pytest.skip("需要 TEST_DATABASE_URL/DATABASE_URL 指向真实 MySQL（mysql/mariadb）")
+
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from models.database import Base, load_all_models
+
+    load_all_models()
+    engine = create_engine(url, pool_pre_ping=True, pool_size=5, max_overflow=5)
+    Base.metadata.create_all(bind=engine)
+    try:
+        yield engine
+    finally:
+        engine.dispose()
+
+
+@pytest.fixture()
+def mysql_session(mysql_engine):
+    """真实 MySQL 上的独立会话（用例结束回滚未提交内容并关闭）。"""
+    from sqlalchemy.orm import sessionmaker
+
+    session = sessionmaker(bind=mysql_engine)()
+    try:
+        yield session
+    finally:
+        session.rollback()
+        session.close()

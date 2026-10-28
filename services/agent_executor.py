@@ -16,6 +16,17 @@ from services.llm_service import llm_service
 from services.smart_router import SmartRouter, RouteDecision
 from services.agent_tools_service import AgentToolsService, Step
 from services.message_compactor import MessageCompactor
+# T03a：工具名归一化（历史别名 → 标准名）。registry 是唯一权威，
+# 必须在 blocked_tools 比较与 enabled/disabled 过滤之前调用，否则禁用标准名
+# 仍可借旧别名调用（或反过来说，旧配置启用旧名却拿不到 schema）。
+from services.tool_registry import normalize_tool_name
+
+# T04：唯一执行授权入口。调用于 execute_tool 内、任何 special-case/方法查找之前。
+from services.execution_policy import (
+    AuthorizationDecision,
+    ExecutionContext,
+    authorize_tool,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -56,22 +67,52 @@ SUBAGENT_BLOCKED_TOOLS = SUBAGENT_PERMISSION_SETS[SubagentPermission.READONLY]["
 class AgentExecutor:
     """Agent 执行器：处理 LLM 对话、工具调用循环、上下文管理"""
 
-    def __init__(self, agent_hash: str, tools: AgentToolsService, blocked_tools: Optional[List[str]] = None):
+    def __init__(self, agent_hash: str, tools: AgentToolsService, blocked_tools: Optional[List[str]] = None,
+                 execution_context: Optional[ExecutionContext] = None,
+                 context_factory=None):
         """
         Args:
             agent_hash: Agent 的 4 位 hash
             tools: AgentToolsService 实例
             blocked_tools: 禁用的工具名称列表（用于 subagent 安全限制）
+            execution_context: T04 执行上下文（不可变身份/权限）。None 时由
+                `context_factory` 惰性构造；两者都为 None 时保持旧行为（测试/脚本）
+            context_factory: 零参可调用，返回 ExecutionContext；惰性求值，避免
+                构造 executor 时提前打 DB
         """
         self.agent_hash = agent_hash
         self.tools = tools
-        self.blocked_tools = set(blocked_tools or [])
+        # T03a：blocked 集合也归一化 —— 这样「禁掉标准名」= 「禁掉旧别名」，
+        # 不会因调用方传哪一个名字而绕过。
+        self.blocked_tools = {normalize_tool_name(n) for n in (blocked_tools or [])}
+        self._execution_context: Optional[ExecutionContext] = execution_context
+        self._context_factory = context_factory
         self._user_id = None
         self._agent_profile = None
         self._skip_compact = False  # 防止 pre_compact 递归调用 compact
         self._skip_smart_router = False  # 递归调用时跳过 SR 阶段
         self._typing_callback = None  # Set by caller for typing refresh
         self._cached_persona = None  # soul.md 缓存，减少 VFS I/O
+
+    # T04：执行授权上下文（唯一判定入口是 services.execution_policy.authorize_tool）
+    def set_execution_context(self, context: Optional[ExecutionContext]) -> None:
+        """由渠道层（ChatService / 群聊 / 子助手）在每次 run 前注入。"""
+        self._execution_context = context
+
+    def _authorization_context(self) -> Optional[ExecutionContext]:
+        """返回执行上下文；配置了工厂但构造失败时向上抛（调用方 fail closed）。
+
+        只有「既没显式上下文、也没工厂」的纯测试/脚本场景才返回 None（保持旧行为）。
+        """
+        if self._execution_context is None and self._context_factory is not None:
+            self._execution_context = self._context_factory()
+        return self._execution_context
+
+    @staticmethod
+    def _denial_message(decision: AuthorizationDecision) -> str:
+        """把稳定 reason 映射成给用户看的短句（不回显参数，不暴露内部细节）。"""
+        from services.execution_context import denial_message
+        return denial_message(decision)
 
     @property
     def user_id(self) -> str:
@@ -734,6 +775,10 @@ class AgentExecutor:
         """执行工具调用，并统一持久化完整结果。"""
         from services.tool_registry import get_tool
 
+        # T03a：先把别名归一化为标准名。必须在 blocked_tools 检查之前，
+        # 否则「禁用 create_cron_job」可以通过调用旧名 schedule_reminder 绕过。
+        tool_name = normalize_tool_name(tool_name)
+
         async def finalize(value, tool_args=None) -> str:
             result_str = value if isinstance(value, str) else json.dumps(value)
             return await self.tools._truncate_tool_result(
@@ -742,6 +787,25 @@ class AgentExecutor:
                 tool_args=tool_args or {},
                 call_id=call_id,
             )
+
+        # T04：唯一执行授权入口。必须在 blocked_tools、special-case、方法查找之前，
+        # 否则「禁用/未授权」会被特殊分支或旧配置绕过。
+        try:
+            _auth_ctx = self._authorization_context()
+        except Exception as exc:  # 身份无法证明 → fail closed
+            logger.error(
+                "[AgentExecutor] execution context unavailable hash=%s: %s",
+                self.agent_hash, exc,
+            )
+            return await finalize("Error: 无法确认执行身份，工具调用被拒绝")
+        if _auth_ctx is not None:
+            _decision = authorize_tool(_auth_ctx, tool_name, arguments)
+            if not _decision.allowed:
+                logger.warning(
+                    "[AgentExecutor] tool denied hash=%s tool=%s reason=%s",
+                    self.agent_hash, tool_name, _decision.reason,
+                )
+                return await finalize(f"Error: {self._denial_message(_decision)}")
 
         # 检查禁用工具
         if tool_name in self.blocked_tools:
@@ -806,7 +870,13 @@ class AgentExecutor:
         return compressed
 
     def _get_enabled_tools(self) -> Optional[set]:
-        """从 AgentConfig 读取启用的工具列表。无配置时返回 None（不过滤）。"""
+        """从 AgentConfig 读取启用的工具列表。
+
+        语义（T04）：
+        * 无配置行 → `None`（兼容旧部署：不过滤，沿用默认工具集）
+        * 显式 `enabled: []` → 空集（没有任何工具），不是“全工具”
+        * 解析失败/结构坏 → **空集 + 告警**（fail closed），绝不回退成“全工具”
+        """
         import json
         from models.database import SessionLocal, AgentConfig
         db = SessionLocal()
@@ -817,11 +887,29 @@ class AgentExecutor:
             ).first()
             if row:
                 val = json.loads(row.value)
-                return set(val.get("enabled", []))
+                if not isinstance(val, dict):
+                    logger.warning(
+                        "[AgentExecutor] tools 配置不是 object（%s），按“无工具”处理",
+                        type(val).__name__,
+                    )
+                    return set()
+                enabled = val.get("enabled", [])
+                if not isinstance(enabled, list):
+                    logger.warning(
+                        "[AgentExecutor] tools.enabled 不是 list（%s），按“无工具”处理",
+                        type(enabled).__name__,
+                    )
+                    return set()
+                # T03a：配置里的名字也要归一化，否则旧配置（写的是历史别名）
+                # 会匹配不到标准名 schema，工具静默消失。
+                return {normalize_tool_name(str(n)) for n in enabled}
             return None
         except Exception as e:
-            logger.warning(f"[AgentExecutor] _get_enabled_tools failed for {self.agent_hash}: {e}")
-            return None
+            logger.warning(
+                "[AgentExecutor] _get_enabled_tools failed for %s: %s —— 按“无工具”处理（fail closed）",
+                self.agent_hash, e,
+            )
+            return set()
         finally:
             db.close()
 

@@ -353,6 +353,62 @@ async def get_agent(
     })
 
 
+@router.patch("/agents/by-hash/{agent_hash}/settings")
+async def update_agent_settings_by_hash(
+    agent_hash: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user)
+):
+    """按 hash 更新 Agent 显示设置（重命名的唯一 HTTP 契约在 console 侧的实现）。
+
+    T03a 第 6 条：设置页「保存」过去调用 `/api/agent/initialize` 来改名 ——
+    对已初始化 Agent 直接 400，或者把 persona 当初始化参数重写一遍。
+    改名只能走显示名字段 `alias`（与 `PATCH /api/user/agents/{hash}/settings`
+    同一语义），由 `agent_init_service.rename_agent` 唯一实现：
+    只改 name/updated_at，**不动** persona、tools、config、status、initialized_at。
+
+    Body:
+        {"alias": "新名字"}   # 只接受 alias；初始化/人格字段一律拒绝
+    """
+    agent = _get_owned_agent(db, agent_hash=agent_hash, user_id=user.id)
+
+    body = await request.json() if request.headers.get("content-length") else {}
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="body 必须是 JSON object")
+
+    allowed = {"alias"}
+    rejected = sorted(set(body) - allowed)
+    if rejected:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"仅支持 alias 字段（收到 {rejected}）。"
+                f"改名不要用初始化接口：人格/工具/初始化状态请走各自的配置接口。"
+            ),
+        )
+    if "alias" not in body:
+        raise HTTPException(status_code=400, detail="alias 必填")
+
+    try:
+        agent_init_service.rename_agent(db, agent, body["alias"])
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    return JSONResponse(content={
+        "status": "ok",
+        "agent": {
+            "id": agent.id,
+            "hash": agent.hash,
+            "name": agent.name,
+            "status": agent.status,
+            "updated_at": agent.updated_at.isoformat() if agent.updated_at else None,
+        },
+        "updated": ["alias"],
+        "initialization_state_unchanged": True,
+    })
+
+
 @router.put("/agents/{agent_id}")
 async def update_agent(
     agent_id: int,
@@ -362,6 +418,8 @@ async def update_agent(
 ):
     """
     更新 Agent 配置
+
+    改名走 `agent_init_service.rename_agent`（只改显示名）；status 单独校验后写入。
     """
     agent = _get_owned_agent(db, agent_id=agent_id, user_id=user.id)
 
@@ -370,7 +428,10 @@ async def update_agent(
 
     # 更新允许的字段
     if "name" in body:
-        agent.name = body["name"]
+        try:
+            agent_init_service.rename_agent(db, agent, body["name"])
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
 
     if "status" in body:
         # 只允许特定状态
@@ -902,7 +963,9 @@ async def get_available_tools(user: User = Depends(get_current_user)):
             "id": "session",
             "name": "会话管理",
             "tools": [
-                {"id": "schedule_reminder", "name": "定时提醒", "description": "设置定时提醒"},
+                # T03a：提醒的标准注册名是 create_cron_job；历史旧名只在
+                # services/tool_registry.py 里作为兼容别名，工具目录只暴露标准名。
+                {"id": "create_cron_job", "name": "定时提醒", "description": "设置定时提醒（标准工具名）"},
                 {"id": "list_reminders", "name": "列出提醒", "description": "列出所有提醒"},
                 {"id": "cancel_reminder", "name": "取消提醒", "description": "取消定时提醒"},
                 {"id": "end_conversation", "name": "结束对话", "description": "结束当前对话"},

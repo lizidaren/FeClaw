@@ -34,6 +34,7 @@ from utils.agent_access import (
     resolve_user_id_from_token,
     agent_belongs_to_user,
 )
+from utils.csrf import csrf_protect, check_ws_origin
 
 
 router = APIRouter(tags=["FeClaw Chat"])
@@ -199,6 +200,7 @@ async def chat_stream(
     request: ChatRequest,
     req: Request,
     user_id: int = Depends(get_agent_scoped_user_id),
+    _csrf: None = Depends(csrf_protect),
     db: Session = Depends(get_db),
     agent_hash: Optional[str] = Query(None),
 ):
@@ -216,6 +218,10 @@ async def chat_stream(
 
     P0-2 fix: 新增 `group_id` 字段。传 group_id 时走群聊流式逻辑（保存用户消息 + LLM 流式回复 + 保存 Agent 回复）；
     不传时仍走原私聊逻辑（完全不变）。
+
+    T18a：加 `csrf_protect`（Origin + 双提交 token）。依赖顺序保证匿名仍是 401
+    （`get_agent_scoped_user_id` 在前）；移动端/桌面端的显式 Bearer 请求自动
+    跳过 token 校验，不受影响。
 
     SSE 事件:
     - event: token, data: {"content": "..."}
@@ -495,6 +501,77 @@ def _parse_sse(sse_str: str):
     return event_type, data
 
 
+# ========== T18a：WS 认证与逐条消息复核 ==========
+
+def _ws_extract_token(websocket: WebSocket, agent_hash: str, browser: bool):
+    """从 WS 握手提取凭据，返回 `(token, source)`。
+
+    顺序（T18a）：
+      1. `Authorization: Bearer` —— 非浏览器客户端的显式凭据（浏览器 WS 无法设置）
+      2. `feclaw_jwt` cookie      —— 浏览器会话（HttpOnly，JS 读不到但会自动携带）
+      3. `feclaw_jwt_totp_{hash}` —— Agent 作用域 TOTP 会话
+      4. `?token=` 仅当握手**不带 Origin**（= 非浏览器）时接受，且记录弃用告警。
+         带 Origin 的浏览器握手一律忽略 query token：URL 里的 JWT 会进
+         Referer / 访问日志 / 历史记录，spec T18 明确要求不使用。
+    """
+    auth_header = websocket.headers.get("authorization", "")
+    if auth_header.startswith("Bearer ") and len(auth_header) > 7:
+        return auth_header[7:].strip(), "bearer"
+
+    try:
+        cookies = websocket.cookies
+    except Exception:  # pragma: no cover
+        cookies = {}
+    token = cookies.get("feclaw_jwt")
+    if token:
+        return token, "cookie"
+    if agent_hash:
+        totp_token = cookies.get(f"feclaw_jwt_totp_{agent_hash}")
+        if totp_token:
+            return totp_token, "cookie_totp"
+
+    if not browser:
+        query_token = (websocket.query_params.get("token") or "").strip()
+        if query_token:
+            logging.getLogger(__name__).warning(
+                "[WS] DEPRECATED: 非浏览器客户端用 ?token= 认证；请改用 Authorization: Bearer"
+                "（下一版本移除 query token 支持）"
+            )
+            return query_token, "query_deprecated"
+    return None, "none"
+
+
+def _ws_identity_still_valid(db: Session, token: str, agent_hash: str, expected_user_id: int):
+    """连接建立后**每条消息**前的复核：吊销 / scope / 归属。
+
+    返回 `(ok, error_code, message)`。任何一项不成立都要求断开 ——
+    否则「登出后旧 WS 仍能继续对话」「TOTP 令牌越界」这类问题会一直存在。
+    """
+    try:
+        # 清 identity map，确保读到的是库里的最新 jwt_version（吊销检查依赖它）
+        db.expire_all()
+    except Exception:  # pragma: no cover - 事务状态异常时仍继续复核
+        pass
+
+    user_id = resolve_user_id_from_token(token, db=db)
+    if user_id is None:
+        return False, "AUTH_ERROR", "会话已失效（已登出或过期），请重新登录"
+    if int(user_id) != int(expected_user_id):
+        return False, "AUTH_ERROR", "身份已变更，请重新登录"
+
+    scope = totp_scoped_agent_hash(token)
+    if scope is not None and scope != agent_hash:
+        return False, "FORBIDDEN", "Token scoped to a different agent"
+
+    from models.agent_profile import AgentProfile
+    agent = db.query(AgentProfile).filter(AgentProfile.hash == agent_hash).first()
+    if agent is None:
+        return False, "AGENT_NOT_FOUND", "Agent 不存在"
+    if not agent_belongs_to_user(agent, expected_user_id):
+        return False, "FORBIDDEN", "无权访问此 Agent"
+    return True, "", ""
+
+
 @router.websocket("/api/chat/ws")
 async def chat_websocket(websocket: WebSocket):
     """
@@ -511,7 +588,12 @@ async def chat_websocket(websocket: WebSocket):
       {"type": "done", "session_id": "...", "usage": {...}}
       {"type": "error", "code": "...", "message": "..."}
 
-    认证方式: header Authorization: Bearer xxx 或 query ?token=xxx
+    认证方式（T18a）：
+      1. **浏览器**：服务端 HttpOnly 会话 cookie（`feclaw_jwt` / `feclaw_jwt_totp_<hash>`）。
+         浏览器无法给 WS handshake 加自定义头，cookie 是唯一可行的浏览器凭据。
+      2. **非浏览器客户端**：显式 `Authorization: Bearer <token>`（推荐）。
+      3. `?token=` 仅保留给**非浏览器**老客户端过渡（不带 Origin 的握手），
+         带 Origin 的浏览器握手会忽略它并记录弃用告警 —— 下一版本移除。
     """
     logger = logging.getLogger(__name__)
     await websocket.accept()
@@ -528,17 +610,24 @@ async def chat_websocket(websocket: WebSocket):
     except Exception:
         pass
 
-    # JWT 认证
-    token = None
-    auth_header = websocket.headers.get("authorization", "")
-    if auth_header.startswith("Bearer "):
-        token = auth_header[7:]
-    if not token:
-        token = websocket.query_params.get("token", "")
-
-    if not token:
-        await websocket.send_json({"type": "error", "code": "AUTH_ERROR", "message": "未提供认证令牌"})
-        await websocket.close(code=4001)
+    # ── T18a：来源校验（Origin 允许列表）──────────────────────────────
+    # 浏览器 WS 握手**一定**带 Origin；跨站页面能开 WS 但 Origin 是攻击者域。
+    # Origin 校验不是认证替代（下面仍要验 token），但它是唯一能挡住
+    # 「跨站 WS 劫持 + 浏览器自动携带 cookie」的防线。
+    _ws_origin = websocket.headers.get("origin")
+    _origin_ok, _origin_reason = check_ws_origin(
+        _ws_origin,
+        websocket.headers.get("host"),
+        websocket.headers.get("x-forwarded-proto"),
+        websocket.headers.get("x-forwarded-host"),
+    )
+    if not _origin_ok:
+        logger.warning(
+            "[WS] Origin rejected: reason=%s origin=%r host=%r",
+            _origin_reason, (_ws_origin or "")[:200], (websocket.headers.get("host") or "")[:200],
+        )
+        await websocket.send_json({"type": "error", "code": "ORIGIN_REJECTED", "message": "请求来源不被允许"})
+        await websocket.close(code=4003)
         return
 
     # 从 Host header 提取子域名 agent_hash（必须显式指定）
@@ -552,6 +641,13 @@ async def chat_websocket(websocket: WebSocket):
     if not agent_hash:
         await websocket.send_json({"type": "error", "code": "AGENT_REQUIRED", "message": "必须通过 Agent 子域名访问 WebSocket"})
         await websocket.close(code=4004)
+        return
+
+    # ── T18a：token 来源（cookie 优先；Bearer 显式；query 仅非浏览器过渡）──
+    token, token_source = _ws_extract_token(websocket, agent_hash, browser=bool(_ws_origin))
+    if not token:
+        await websocket.send_json({"type": "error", "code": "AUTH_ERROR", "message": "未提供认证令牌"})
+        await websocket.close(code=4001)
         return
 
     db = SessionLocal()
@@ -588,6 +684,11 @@ async def chat_websocket(websocket: WebSocket):
         await websocket.close(code=4003)
         return
 
+    logger.info(
+        "[WS] authenticated: user_id=%s agent=%s token_source=%s origin=%r",
+        user_id, agent_hash, token_source, (_ws_origin or "")[:120],
+    )
+
     async def heartbeat():
         """每 30 秒 ping 一次保持连接，首次立即发送"""
         try:
@@ -616,6 +717,20 @@ async def chat_websocket(websocket: WebSocket):
                 logger.warning(f"[WS_DEBUG] Received message from user={user_id}: keys={list(data.keys())}, content_len={len(data.get('content','') or '')}, session_id={data.get('session_id')}")
             except WebSocketDisconnect:
                 logger.warning(f"[WS_DEBUG] user={user_id} disconnected (WebSocketDisconnect on receive)")
+                break
+
+            # T18a：每条消息前复核吊销 / scope / 归属（登出后立即断流）
+            _ok, _err_code, _err_msg = _ws_identity_still_valid(db, token, agent_hash, user_id)
+            if not _ok:
+                logger.warning(
+                    "[WS] identity recheck failed user_id=%s agent=%s code=%s",
+                    user_id, agent_hash, _err_code,
+                )
+                try:
+                    await websocket.send_json({"type": "error", "code": _err_code, "message": _err_msg})
+                    await websocket.close(code=4001 if _err_code == "AUTH_ERROR" else 4003)
+                except Exception:
+                    pass
                 break
 
             content = data.get("content", "")

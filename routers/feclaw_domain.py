@@ -40,7 +40,7 @@ from utils.auth import (
     user_id_from_payload,
     is_token_revoked,
 )
-from utils.auth_cookies import clear_auth_cookies
+from utils.auth_cookies import clear_auth_cookies, clear_session_cookies
 from models.database import User as DbUser
 from utils.qr import generate_qr_data_url
 from services.file_storage import create_file_storage as s
@@ -209,7 +209,9 @@ async def logout_api(request: Request):
             revoked = bump_user_jwt_version(user_id_from_payload(payload))
 
     resp = JSONResponse(content={"status": "ok", "message": "已退出登录", "revoked": revoked})
-    clear_auth_cookies(resp)
+    # T18a：登出必须清干净全部会话 cookie（含 CSRF 与 TOTP 的 per-agent cookie），
+    # 否则登出后旧 CSRF token 还能配新会话、旧 TOTP cookie 仍可复用。
+    clear_session_cookies(resp, request=request)
     return resp
 
 
@@ -1537,9 +1539,9 @@ async def initialize_agent_api(request: Request, body: InitializeRequest, user: 
 
         from services.agent_init_service import agent_init_service
 
-        # 更新 Agent 名称和描述
-        if body.name:
-            agent.name = body.name
+        # T03a：重命名不再走 initialize（避免用“初始化”顺手改显示名/人格）。
+        # 只允许在此写描述这类初始化资料；显示名请用
+        # `PATCH /api/user/agents/{hash}/settings {"alias": ...}`。
         if body.description:
             agent.description = body.description
 

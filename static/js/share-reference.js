@@ -6,10 +6,9 @@
  */
 (function () {
     "use strict";
-    if (typeof SHARE_HASH === "undefined" || typeof VFS_PATH === "undefined") return;
+    if (typeof SHARE_HASH === "undefined") return;
 
     var SHARE_HASH_VAL = SHARE_HASH;
-    var VFS_PATH_VAL = VFS_PATH;
     var rawMd = window._RAW_MD || "";
     var toolbar = null;
     var toastEl = null;
@@ -178,7 +177,6 @@
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
                 share_hash: SHARE_HASH_VAL,
-                vfs_path: VFS_PATH_VAL,
                 selected_text: selText,
                 context_before: contextBefore.substring(0, 500),
                 context_after: contextAfter.substring(0, 500),

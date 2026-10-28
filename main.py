@@ -3,6 +3,7 @@ FeClaw 智能体网关平台
 FastAPI 应用入口
 """
 
+import asyncio
 import logging
 import os
 
@@ -82,49 +83,21 @@ from routers.setup import router as setup_router
 
 
 def migrate_wechat_binding_supersede() -> list:
-    """Q2-A/D 幂等迁移：同一微信号（openid）只保留最近活跃的一条 active，其余置 superseded。
+    """兼容入口：去重逻辑已迁到 `services/wechat_binding_repair.py`（T20a）。
 
-    为什么：iLink「一个微信同时只能跟一个聊天」，用户「取消绑定 → 绑新的」时
-    解绑旧的是**无通知的**，库里因此会积累多条同 openid 的 active 行；
-    查询按 id desc 会命中已死的旧行，把入站/出站路由到错误的 Agent
-    （§AA「没有消息可存档」· §AC「出站 session timeout」· §AH「招呼被 e45a 回了」的根因）。
+    正常启动**不再调用**本函数；显式迁移请用：
+        python scripts/migrate_learning_runtime.py --wechat-supersede --plan
+        python scripts/migrate_learning_runtime.py --wechat-supersede --apply
 
-    幂等：无重复直接跳过；不删行、不动凭证（回退 = 一条 UPDATE 改回 active）。
-    选保留者：(last_msg_at desc, id desc) —— 最近真正活跃的那条才是当前会话。
-
-    Returns: 被取代的 [(id, user_id, agent_hash), ...]（便于自证脚本断言）
+    Returns: 被取代的 [(id, user_id, agent_hash), ...]
     """
-    from datetime import datetime as _dt
-    from models.database import WeChatBinding as _WCB
-    changed = []
+    from services.wechat_binding_repair import supersede_duplicate_bindings
+
     db = SessionLocal()
     try:
-        actives = db.query(_WCB).filter(_WCB.status == "active").all()
-        groups = {}
-        for b in actives:
-            key = (b.wx_openid or "").strip()
-            if not key:
-                continue
-            groups.setdefault(key, []).append(b)
-        for key, rows in groups.items():
-            if len(rows) < 2:
-                continue
-            rows.sort(key=lambda r: (r.last_msg_at is not None, r.last_msg_at or _dt.min, r.id), reverse=True)
-            for loser in rows[1:]:
-                changed.append((loser.id, loser.user_id, loser.agent_hash))
-                loser.status = "superseded"
-        if changed:
-            db.commit()
-            logger.warning(
-                "Q2-A: superseded {} duplicate active wechat binding(s) "
-                "(id, user_id, agent_hash)={}".format(len(changed), changed)
-            )
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Q2-A: wechat binding supersede migration failed: {e}")
+        return supersede_duplicate_bindings(db, dry_run=False)
     finally:
         db.close()
-    return changed
 
 
 @asynccontextmanager
@@ -182,39 +155,31 @@ async def lifespan(app: FastAPI):
         logger.critical("JWT_SECRET 未配置！请在 .env 中设置 JWT_SECRET")
         raise RuntimeError("JWT_SECRET is required but not set")
 
-    # 旧版 banner：admin 密码（保留向后兼容，正常启动时若 DB 里已有 admin 则不重置）
-    try:
-        from services.setup_service import (
-            create_or_reset_admin,
-            generate_admin_password,
-            is_setup_complete,
-            print_admin_banner,
-        )
-        db_setup = SessionLocal()
-        try:
-            if not is_setup_complete(db_setup):
-                _new_pwd = generate_admin_password(16)
-                create_or_reset_admin(db_setup, _new_pwd)
-                _host = settings.HOST if settings.HOST not in ("0.0.0.0",) else "localhost"
-                print_admin_banner(_new_pwd, host=_host, port=settings.PORT)
-                logger.warning(
-                    "[Setup] 检测到配置不完整，已生成随机 admin 密码并打印到终端"
-                )
-            else:
-                logger.info("[Setup] 配置完整，跳过首次启动向导")
-        finally:
-            db_setup.close()
-    except Exception as _e:
-        logger.warning(f"[Setup] 首次启动检测异常（非致命）: {_e}")
+    # T20a：启动期不再检测配置后自动创建/重置 admin，也不再打印口令。
+    # 首次部署用 scripts/bootstrap_admin.py --create（显式、只打印一次）。
+    logger.info("[Setup] 启动期不创建/重置管理员；如需引导请运行 "
+                "scripts/bootstrap_admin.py --create")
 
-    # 初始化数据库（导入 Group 模型以确保 create_all 覆盖新表）
-    from models.group import Group, GroupMember, GroupMessage, GroupMoments  # noqa: F401
-    from models.fehub import FePublish, AppData  # noqa: F401
-    from models.agent_buffer import AgentBuffer  # noqa: F401  (Agent V2 ReplyBuffer)
-    from models.zentrim import ZentrimEntry, ZentrimTimeline, ZentrimTimelineEntry, ZentrimReference  # noqa: F401  (Zentrim 格物所)
-    from models.organization import Organization  # noqa: F401  (P4: 组织)
+    # 初始化数据库：init_db 只建缺失的表（新部署），**不**升级既有表；
+    # 所有模型注册由 models.database.load_all_models() 统一负责。
     init_db()
     logger.info("Database initialized")
+
+    # T20a：只读版本提示 —— 启动期不修库；版本不符时 /ready 返回 503，
+    # 由运维显式跑迁移（--plan 预览 / --apply 执行）。
+    try:
+        from services.schema_version import SCHEMA_VERSION, current_version
+        _schema_ver = current_version(engine)
+        if _schema_ver is None or int(_schema_ver) < int(SCHEMA_VERSION):
+            logger.warning(
+                "[Schema] 数据库 schema 版本=%s，期望=%s；请运行 "
+                "`python scripts/migrate_learning_runtime.py --plan` 预览后 --apply",
+                _schema_ver, SCHEMA_VERSION,
+            )
+        else:
+            logger.info("[Schema] version=%s", _schema_ver)
+    except Exception as _e:  # 缺表/连不上时不阻塞启动，交给 /ready
+        logger.warning("[Schema] 版本检查失败（不阻塞启动）: %s", _e)
 
     # WSL DNS 预热：提前解析常用 LLM API 域名 + 安装全局 fallback
     from utils.dns_fallback import pre_resolve, install_global_fallback
@@ -228,260 +193,23 @@ async def lifespan(app: FastAPI):
     install_global_fallback()
     logger.info("DNS cache warmed + global fallback installed")
 
-    # 数据库迁移：检查并添加 email 列
-    from sqlalchemy import text
-    with engine.connect() as conn:
-        # 检查 users 表是否有 email 列
-        result = conn.execute(text(
-            "SELECT COLUMN_NAME FROM information_schema.COLUMNS "
-            "WHERE TABLE_NAME = 'users' AND TABLE_SCHEMA = DATABASE()"
-        ))
-        columns = [row[0] for row in result.fetchall()]
-        if 'email' not in columns:
-            conn.execute(text("ALTER TABLE users ADD COLUMN email VARCHAR(128)"))
-            conn.commit()
-            logger.info("Added email column to users table")
+    # T20a：启动期不再做 ALTER/MODIFY/数据回填。
+    # 旧库升级必须显式执行：
+    #     python scripts/migrate_learning_runtime.py --plan    # 只读预览
+    #     python scripts/migrate_learning_runtime.py --apply   # 执行 expand
+    # T20a：微信多绑定去重不在启动期执行（数据回填属显式迁移）：
+    #   python scripts/migrate_learning_runtime.py --wechat-supersede --plan
+    #   python scripts/migrate_learning_runtime.py --wechat-supersede --apply
 
-        # 检查 agent_profiles 表是否有 sr_enabled 列
-        result = conn.execute(text(
-            "SELECT COLUMN_NAME FROM information_schema.COLUMNS "
-            "WHERE TABLE_NAME = 'agent_profiles' AND TABLE_SCHEMA = DATABASE()"
-        ))
-        columns = [row[0] for row in result.fetchall()]
-        if 'sr_enabled' not in columns:
-            conn.execute(text("ALTER TABLE agent_profiles ADD COLUMN sr_enabled BOOLEAN DEFAULT 0"))
-            conn.commit()
-            logger.info("Added sr_enabled column to agent_profiles table")
-
-        # 检查 agent_profiles 表是否有 agent_mode 列
-        result = conn.execute(text(
-            "SELECT COLUMN_NAME FROM information_schema.COLUMNS "
-            "WHERE TABLE_NAME = 'agent_profiles' AND COLUMN_NAME = 'agent_mode' AND TABLE_SCHEMA = DATABASE()"
-        ))
-        columns = [row[0] for row in result.fetchall()]
-        if 'agent_mode' not in columns:
-            conn.execute(text("ALTER TABLE agent_profiles ADD COLUMN agent_mode VARCHAR(20) DEFAULT 'classic'"))
-            conn.commit()
-            logger.info("Added agent_mode column to agent_profiles table (V2 self-driven mode)")
-
-        # P0.4 bcrypt 迁移：检查 users 表是否有 password_version 列
-        result = conn.execute(text(
-            "SELECT COLUMN_NAME FROM information_schema.COLUMNS "
-            "WHERE TABLE_NAME = 'users' AND COLUMN_NAME = 'password_version' AND TABLE_SCHEMA = DATABASE()"
-        ))
-        if not result.fetchone():
-            conn.execute(text(
-                "ALTER TABLE users ADD COLUMN password_version INT NOT NULL DEFAULT 1"
-            ))
-            conn.commit()
-            logger.info("Added password_version column to users table (P0.4 bcrypt migration)")
-
-        # 检查 users 表是否有 tier 列
-        result = conn.execute(text(
-            "SELECT COLUMN_NAME FROM information_schema.COLUMNS "
-            "WHERE TABLE_NAME = 'users' AND COLUMN_NAME = 'tier' AND TABLE_SCHEMA = DATABASE()"
-        ))
-        if not result.fetchone():
-            conn.execute(text(
-                "ALTER TABLE users ADD COLUMN tier VARCHAR(20) DEFAULT 'pro'"
-            ))
-            conn.commit()
-            logger.info("Added tier column to users table")
-
-        # Q1 登出吊销：users.jwt_version（登出 +1 ⇒ 旧 token 立即失效）
-        # 幂等：先查 information_schema，已存在则跳过。默认 0 ⇒ 不强制登出现有用户。
-        result = conn.execute(text(
-            "SELECT COLUMN_NAME FROM information_schema.COLUMNS "
-            "WHERE TABLE_NAME = 'users' AND COLUMN_NAME = 'jwt_version' AND TABLE_SCHEMA = DATABASE()"
-        ))
-        if not result.fetchone():
-            conn.execute(text(
-                "ALTER TABLE users ADD COLUMN jwt_version INT NOT NULL DEFAULT 0"
-            ))
-            conn.commit()
-            logger.info("Added jwt_version column to users table (Q1 logout revocation)")
-
-        # P0.4 bcrypt 迁移：放宽 salt 列允许 NULL（bcrypt 用户不需要 salt）
-        result = conn.execute(text(
-            "SELECT IS_NULLABLE FROM information_schema.COLUMNS "
-            "WHERE TABLE_NAME = 'users' AND COLUMN_NAME = 'salt' AND TABLE_SCHEMA = DATABASE()"
-        ))
-        row = result.fetchone()
-        if row and row[0] == 'NO':
-            conn.execute(text("ALTER TABLE users MODIFY COLUMN salt VARCHAR(64) NULL"))
-            conn.commit()
-            logger.info("Relaxed users.salt to nullable for bcrypt migration")
-
-        # P1.3 agent_hash 列宽统一：扩到 VARCHAR(8)（MySQL 无损扩列，老数据不动）
-        # 老 agent hash（4 位如 5656、8d85）保持不变 —— 涉及子域名 URL 兼容性
-        _tables_with_agent_hash = [
-            "wechat_binding", "wechat_messages", "file_permissions",
-            "agent_config", "agent_usage_log", "share_mappings",
-            "share_references", "chat_history", "sandbox_tokens",
-        ]
-        for _tbl in _tables_with_agent_hash:
-            try:
-                conn.execute(text(
-                    f"ALTER TABLE {_tbl} MODIFY COLUMN agent_hash VARCHAR(8)"
-                ))
-                logger.info(f"P1.3: widened {_tbl}.agent_hash to VARCHAR(8)")
-            except Exception as _e:
-                logger.debug(f"P1.3: {_tbl}.agent_hash alter skipped: {_e}")
-        # agent_profiles.hash（特殊列名，不是 agent_hash）
-        try:
-            conn.execute(text("ALTER TABLE agent_profiles MODIFY COLUMN hash VARCHAR(8)"))
-            logger.info("P1.3: widened agent_profiles.hash to VARCHAR(8)")
-        except Exception as _e:
-            logger.debug(f"P1.3: agent_profiles.hash alter skipped: {_e}")
-        try:
-            conn.commit()
-        except Exception:
-            pass
-
-        # FIX-E/P0-1：group_messages.sender_hash 曾为 VARCHAR(4)，写入方可能传 8 位
-        # agent hash（agent_profiles.hash 允许 4 或 8 位），MySQL 静默截断 ⇒ 群消息
-        # 归属错人。扩到 VARCHAR(8)（无损扩列，幂等可重复跑）。
-        try:
-            conn.execute(text(
-                "ALTER TABLE group_messages MODIFY COLUMN sender_hash VARCHAR(8) NULL"
-            ))
-            logger.info("FIX-E: widened group_messages.sender_hash to VARCHAR(8)")
-        except Exception as _e:
-            logger.debug(f"FIX-E: group_messages.sender_hash alter skipped: {_e}")
-
-        # FIX-E/P0-1：share_mappings.share_hash 模型已声明 unique=True（Q20/H19），但
-        # create_all 不会给已存在的表补唯一索引 ⇒ 补迁移。⚠️ 加唯一索引前先查重复值，
-        # 有重复则只告警不硬加（避免迁移在脏数据上失败 / 掩盖既有跨租户解析串味）。
-        try:
-            _dup = conn.execute(text(
-                "SELECT share_hash FROM share_mappings "
-                "GROUP BY share_hash HAVING COUNT(*) > 1 LIMIT 1"
-            )).fetchone()
-            _has_unique = conn.execute(text(
-                "SELECT INDEX_NAME FROM information_schema.STATISTICS "
-                "WHERE TABLE_NAME='share_mappings' AND TABLE_SCHEMA=DATABASE() "
-                "AND COLUMN_NAME='share_hash' AND NON_UNIQUE=0 LIMIT 1"
-            )).fetchone()
-            if _dup is not None:
-                logger.warning(
-                    "FIX-E: share_mappings.share_hash has duplicate value(s) "
-                    f"(e.g. {_dup[0]}); skipping unique index — needs manual dedup"
-                )
-            elif _has_unique is None:
-                conn.execute(text(
-                    "ALTER TABLE share_mappings "
-                    "ADD UNIQUE INDEX uq_share_mappings_share_hash (share_hash)"
-                ))
-                logger.info("FIX-E: added unique index uq_share_mappings_share_hash")
-            else:
-                logger.debug("FIX-E: share_mappings.share_hash unique index already present")
-        except Exception as _e:
-            logger.debug(f"FIX-E: share_mappings.share_hash unique index migration skipped: {_e}")
-        try:
-            conn.commit()
-        except Exception:
-            pass
-
-        # P4: groups.organization_id 列 + 索引（外键 use_alter 避免循环依赖）
-        try:
-            org_cols = [r[0] for r in conn.execute(text(
-                "SELECT COLUMN_NAME FROM information_schema.COLUMNS "
-                "WHERE TABLE_NAME='groups' AND TABLE_SCHEMA=DATABASE()"
-            )).fetchall()]
-            if 'organization_id' not in org_cols:
-                conn.execute(text(
-                    "ALTER TABLE groups ADD COLUMN organization_id INT NULL"
-                ))
-                conn.execute(text(
-                    "CREATE INDEX idx_groups_organization_id ON groups(organization_id)"
-                ))
-                conn.commit()
-                logger.info("P4: added groups.organization_id column + index")
-        except Exception as _e:
-            logger.debug(f"P4: groups.organization_id migration skipped: {_e}")
-
-        # P1.x: group_members 新增 3 列（job_description/status/allow_dm）
-        # 与 models/group.py 的 GroupMember 对齐；缺列会导致群成员相关接口 500。
-        try:
-            gm_cols = [r[0] for r in conn.execute(text(
-                "SELECT COLUMN_NAME FROM information_schema.COLUMNS "
-                "WHERE TABLE_NAME='group_members' AND TABLE_SCHEMA=DATABASE()"
-            )).fetchall()]
-            _gm_added = []
-            if 'job_description' not in gm_cols:
-                conn.execute(text("ALTER TABLE group_members ADD COLUMN job_description TEXT NULL"))
-                _gm_added.append('job_description')
-            if 'status' not in gm_cols:
-                conn.execute(text("ALTER TABLE group_members ADD COLUMN status VARCHAR(16) DEFAULT 'dormant'"))
-                _gm_added.append('status')
-            if 'allow_dm' not in gm_cols:
-                conn.execute(text("ALTER TABLE group_members ADD COLUMN allow_dm BOOLEAN DEFAULT 1"))
-                _gm_added.append('allow_dm')
-            if _gm_added:
-                conn.commit()
-                logger.info(f"P1.x: added group_members columns: {', '.join(_gm_added)}")
-        except Exception as _e:
-            logger.debug(f"P1.x: group_members columns migration skipped: {_e}")
-
-        # Q7/DEPLOY-GATE: 补缺列幂等迁移 —— 与 models/database.py 对齐
-        # conversation_sessions.channel + chat_history.tool_call_id/tool_name/tool_args
-        # 旧库升级时 create_all 不会给已存在的表加列，缺列会导致相关接口 500。
-        try:
-            _missing_cols = {
-                "conversation_sessions": {"channel": "VARCHAR(32) NULL"},
-                "chat_history": {
-                    "tool_call_id": "VARCHAR(64) NULL",
-                    "tool_name": "VARCHAR(64) NULL",
-                    "tool_args": "JSON NULL",
-                },
-            }
-            for _tbl, _cols in _missing_cols.items():
-                _existing = [r[0] for r in conn.execute(text(
-                    "SELECT COLUMN_NAME FROM information_schema.COLUMNS "
-                    f"WHERE TABLE_NAME='{_tbl}' AND TABLE_SCHEMA=DATABASE()"
-                )).fetchall()]
-                _added = [c for c in _cols if c not in _existing]
-                for _col in _added:
-                    conn.execute(text(f"ALTER TABLE {_tbl} ADD COLUMN {_col} {_cols[_col]}"))
-                if _added:
-                    conn.commit()
-                    logger.info(f"Q7: added {_tbl} columns: {', '.join(_added)}")
-        except Exception as _e:
-            logger.debug(f"Q7: missing-column migration skipped: {_e}")
-
-    # Q2-A/D：微信多绑定根治（逻辑见 migrate_wechat_binding_supersede，便于自证脚本复用它）
-    migrate_wechat_binding_supersede()
-
-    # 创建默认管理员用户（如果不存在）
-    db = SessionLocal()
-    try:
-        admin = db.query(User).filter(User.username == "admin").first()
-        if not admin:
-            import os as _os, secrets
-            _random_pwd = secrets.token_hex(12)
-            _final_pwd = _os.environ.get("FECLAW_ADMIN_PASSWORD", _random_pwd)
-            admin = User(
-                username="admin",
-                password_hash=hash_password(_final_pwd),
-                salt=None,
-                password_version=2,
-                is_admin=True
-            )
-            db.add(admin)
-            db.commit()
-            logger.info("=" * 60)
-            logger.info("  🚀 初始管理员账户已创建")
-            logger.info(f"  用户名: admin")
-            # Q21/L4：口令不再写入应用日志（日志聚合/告警系统会长期留存凭据），
-            # 改走 stdout 打印一次（与 print_admin_banner 同源，仅供终端查看）。
-            print(f"  [FeClaw] 初始管理员密码: {_final_pwd}")
-            logger.info("  ⚠️ 密码仅在终端显示一次，请立即登录并修改！")
-            logger.info("=" * 60)
-
-        # Q19/H12：不再自动创建 `test` 账号 —— 口令由源码决定（sha256("test")），
-        # 任何部署都会有一个可推导凭据的账号，构成在野风险。已删除该创建逻辑。
-    finally:
-        db.close()
+    # T20a：管理员账号**不在启动期**创建或重置（旧实现会在配置不完整时
+    # 自动生成口令、重置既有密码并打印到终端/日志）。首次部署请显式执行：
+    #     python scripts/bootstrap_admin.py --create
+    # 既有口令重置必须人工确认：
+    #     python scripts/bootstrap_admin.py --reset --confirm-reset
+    logger.info(
+        "[Setup] 启动期不创建/重置管理员账号；如需要请运行 "
+        "scripts/bootstrap_admin.py --create（或 --reset --confirm-reset）"
+    )
 
     # 创建默认 Agent 5178（如果不存在）
     try:
@@ -528,8 +256,21 @@ async def lifespan(app: FastAPI):
     # 启动 FUSE 守护进程
     fuse_mounted = False
     if settings.FUSE_ENABLED:
-        from services.vfs_fuse_daemon import check_fuse_available
-        if check_fuse_available():
+        # T19：FUSE 的 import 本身也可能因缺 trio/pyfuse3 失败，
+        # 必须和挂载逻辑一起放在 guard 里，否则 FUSE_AUTO_FALLBACK 救不了启动。
+        try:
+            from services.vfs_fuse_daemon import check_fuse_available
+            _fuse_import_error = None
+        except Exception as _fuse_exc:  # noqa: BLE001
+            check_fuse_available = None
+            _fuse_import_error = _fuse_exc
+        if _fuse_import_error is not None:
+            if settings.FUSE_AUTO_FALLBACK:
+                logger.warning("FUSE 依赖不可用（%s），回退到仿真模式", _fuse_import_error)
+            else:
+                logger.error("FUSE 依赖不可用：%s", _fuse_import_error)
+                raise RuntimeError("FUSE is required but dependency import failed")
+        elif check_fuse_available():
             try:
                 from services.vfs_fuse_daemon import start_fuse_background, unmount_fuse
                 from services.virtual_filesystem import VirtualFileSystem
@@ -670,11 +411,30 @@ async def lifespan(app: FastAPI):
 
 
 # 创建应用
+# T18a/F8：Swagger / ReDoc / OpenAPI 默认不暴露（生产会泄露全部路由与 schema）；
+# 只有 DEBUG 或显式 FECLAW_EXPOSE_DOCS=1 时才挂载，供本地调试使用。
+def _docs_enabled() -> bool:
+    """是否暴露 /docs、/redoc、/openapi.json（T18a/F8）。
+
+    默认关闭；`FECLAW_EXPOSE_DOCS=true` 或 `DEBUG=true` 时打开。
+    走 config（pydantic-settings）而不是直接读 os.environ，保证配置单一权威、
+    `.env` 与测试都能覆盖。
+    """
+    return bool(getattr(settings, "FECLAW_EXPOSE_DOCS", False)) or bool(
+        getattr(settings, "DEBUG", False)
+    )
+
+
+_EXPOSE_DOCS = _docs_enabled()
+
 app = FastAPI(
     title="FeClaw Gateway",
     description="FeClaw 智能体网关平台",
     version="1.0.0",
-    lifespan=lifespan
+    lifespan=lifespan,
+    docs_url="/docs" if _EXPOSE_DOCS else None,
+    redoc_url="/redoc" if _EXPOSE_DOCS else None,
+    openapi_url="/openapi.json" if _EXPOSE_DOCS else None,
 )
 
 # 配置 CORS — 动态根据 FECLAW_PUBLIC_URL 设置
@@ -700,11 +460,310 @@ app.add_middleware(
 # 防止 CDN 缓存
 app.add_middleware(NoCacheMiddleware)
 
-# 健康检查端点（必须在所有路由之前）
+
+# T18a/F7：统一安全响应头（对所有响应生效，包括 4xx/5xx 与静态页）。
+# 说明：CSP 先上 Report-Only —— 现有模板大量内联脚本/样式，直接强制会打挂页面；
+# 这里只收集违规报告，不改变现有行为。
+@app.middleware("http")
+async def _security_headers(request, call_next):
+    response = await call_next(request)
+    headers = response.headers
+    headers.setdefault("X-Content-Type-Options", "nosniff")
+    headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+    headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    headers.setdefault(
+        "Permissions-Policy",
+        "geolocation=(), microphone=(), camera=(), payment=()",
+    )
+    proto = (request.headers.get("x-forwarded-proto") or request.url.scheme or "").lower()
+    if proto == "https":
+        headers.setdefault(
+            "Strict-Transport-Security", "max-age=31536000; includeSubDomains",
+        )
+    headers.setdefault(
+        "Content-Security-Policy-Report-Only",
+        "default-src 'self'; "
+        "script-src 'self' 'unsafe-inline' 'unsafe-eval' https:; "
+        "style-src 'self' 'unsafe-inline' https:; "
+        "img-src 'self' data: blob: https:; "
+        "font-src 'self' data: https:; "
+        "connect-src 'self' https: wss:; "
+        "frame-ancestors 'self'; base-uri 'self'; form-action 'self'",
+    )
+    return response
+
+
+# ───────────────────────────────────────────────────────────
+# 健康检查：/health = 轻量 liveness；/ready = 真实依赖 readiness（T02）
+#
+# 设计约束（规格 §5 T02 / §9 A22）：
+#   • /health 保持轻量：不碰 DB/存储/模型，只证明事件循环还能响应。
+#   • /ready 检查 DB 连接、目标 schema（版本 + 关键表）、存储配置可用；
+#     失败一律 HTTP 503，成功 200 且 JSON status == "ready"（deploy.sh 精确判这个字段）。
+#   • 只读：不做 DDL、不建表、不修数据、不重置 admin —— 这一点很重要，
+#     因为 T20 会把这些启动期 ALTER/重置从 lifespan 拆走；/ready 不能反过来依赖它们。
+#     因此这里用 SQLAlchemy inspector 读已有表/列，而不是假设某次 ALTER 已经跑过。
+#   • 不泄露：响应只含 ok 布尔、后端名、异常**类名**；绝不回显 DSN/口令/堆栈。
+# ───────────────────────────────────────────────────────────
+
+from fastapi.responses import JSONResponse
+
+# 关键表：缺任何一个 ⇒ 这个进程无法正确服务业务，ready 必须为 false。
+READY_REQUIRED_TABLES = (
+    "users",
+    "agent_profiles",
+    "agent_config",
+    "chat_history",
+    "conversation_sessions",
+    "file_permissions",
+    "scheduled_tasks",
+)
+
+# schema_version 由 T20（独立版本迁移）落地。T20a 后这里读 services.schema_version
+# 的 SCHEMA_VERSION / CRITICAL_COLUMNS 作单一权威；表尚未落地时仍是**可选**检查：
+# /ready 会如实报告 version_state="absent"，结构（关键表/关键列）仍然判定。
+READY_SCHEMA_VERSION_TABLE = "schema_version"
+READY_MIN_SCHEMA_VERSION = 1
+
+# /ready 总预算：DB 不可达时不能把探活请求挂死，也不能让 load balancer 误判为健康。
+READY_TIMEOUT_SECONDS = 5.0
+
+
+def _schema_meta_module():
+    """T20a 的 schema 元数据模块（SCHEMA_VERSION / CRITICAL_COLUMNS / 版本读取）。"""
+    try:
+        import importlib
+        return importlib.import_module("services.schema_version")
+    except Exception:  # noqa: BLE001 —— 模块缺失也不该让 /ready 500
+        return None
+
+
+def _ready_engine():
+    """返回要检查的数据库引擎（测试可替换）。"""
+    from models.database import engine as _engine
+    return _engine
+
+
+def _check_database(engine) -> dict:
+    """DB 连接检查：只发 SELECT 1，异常只回类名。"""
+    from sqlalchemy import text as _sql_text
+    try:
+        with engine.connect() as conn:
+            conn.execute(_sql_text("SELECT 1"))
+        return {"ok": True}
+    except Exception as exc:  # noqa: BLE001 —— 只报告类型，不回显异常文本
+        return {"ok": False, "error": type(exc).__name__}
+
+
+def _raw_schema_versions(engine) -> list:
+    """兜底读取 schema_version 记录（T20a 模块不可用时的最小实现）。"""
+    from sqlalchemy import text as _sql_text
+    with engine.connect() as conn:
+        rows = conn.execute(_sql_text(
+            f"SELECT version FROM {READY_SCHEMA_VERSION_TABLE}"
+        )).fetchall()
+    return [{"version": r[0]} for r in rows]
+
+
+def _check_schema(engine) -> dict:
+    """目标 schema 检查：关键表 + 关键列（T20a 单一权威）+ 已记录的版本下限。
+
+    判定规则（诚实分层，避免“结构坏了却只看版本号”）：
+      • 关键表缺失            ⇒ 不 ready（核心功能直接不可用）
+      • 关键列缺失            ⇒ 不 ready（相关接口必 500，等 migrate --apply）
+      • schema_version 表缺失 ⇒ 可选（T20 尚未落地）：报告 absent，不据此失败
+      • 表存在但无记录        ⇒ 报告 unrecorded：版本门禁尚未建立，结构检查仍生效
+      • 记录版本 < 目标版本   ⇒ 不 ready（要求 operator 显式 migration）
+    """
+    from sqlalchemy import inspect as _sa_inspect
+
+    sv = _schema_meta_module()
+    target = int(getattr(sv, "SCHEMA_VERSION", READY_MIN_SCHEMA_VERSION)) if sv else READY_MIN_SCHEMA_VERSION
+    report: dict = {"ok": False, "target_version": target}
+    try:
+        insp = _sa_inspect(engine)
+        tables = set(insp.get_table_names())
+    except Exception as exc:  # noqa: BLE001
+        report.update({"error": type(exc).__name__, "version_state": "unknown"})
+        return report
+
+    missing = [t for t in READY_REQUIRED_TABLES if t not in tables]
+    report.update({
+        "required_tables": list(READY_REQUIRED_TABLES),
+        "missing_tables": missing,
+    })
+    ok = not missing
+
+    # 关键列：T20a CRITICAL_COLUMNS 是唯一清单，缺列=相关接口 500。
+    critical = dict(getattr(sv, "CRITICAL_COLUMNS", {}) or {}) if sv else {}
+    missing_columns: dict = {}
+    for table, columns in critical.items():
+        if table not in tables:
+            missing_columns[table] = list(columns)
+            continue
+        try:
+            have = {c["name"] for c in insp.get_columns(table)}
+        except Exception:  # noqa: BLE001
+            missing_columns[table] = list(columns)
+            continue
+        missing_for_table = [c for c in columns if c not in have]
+        if missing_for_table:
+            missing_columns[table] = missing_for_table
+    report["critical_columns_missing"] = missing_columns
+    if missing_columns:
+        ok = False
+
+    if READY_SCHEMA_VERSION_TABLE not in tables:
+        report.update({
+            "version_state": "absent",
+            "version": None,
+            "version_note": (
+                "schema_version 表尚未落地（T20 迁移未执行）：本次按结构（关键表/关键列）判定；"
+                "落地后此处会比较已记录版本与目标版本"
+            ),
+        })
+        report["ok"] = ok
+        return report
+
+    try:
+        if sv is not None and hasattr(sv, "schema_version_rows"):
+            rows = sv.schema_version_rows(engine)
+        else:
+            rows = _raw_schema_versions(engine)
+        versions = [int(r["version"]) for r in rows if r.get("version") is not None]
+        current = max(versions) if versions else None
+    except Exception as exc:  # noqa: BLE001
+        report.update({"version_state": "unreadable", "error": type(exc).__name__})
+        report["ok"] = False
+        return report
+
+    if current is None:
+        report.update({
+            "version_state": "unrecorded",
+            "version": None,
+            "version_note": (
+                "schema_version 表存在但没有任何迁移记录；结构检查仍生效，"
+                "版本门禁需 `scripts/migrate_learning_runtime.py --apply` 记录后启用"
+            ),
+        })
+    else:
+        report.update({"version_state": "present", "version": current})
+        if current < target:
+            ok = False
+    report["ok"] = ok
+    return report
+
+
+def _storage_backend_name() -> str:
+    mode = str(getattr(settings, "STORAGE_MODE", "auto") or "auto").lower()
+    if mode in ("local", "cos"):
+        return mode
+    cos_configured = all([
+        getattr(settings, "TENCENT_COS_SECRET_ID", None),
+        getattr(settings, "TENCENT_COS_SECRET_KEY", None),
+        getattr(settings, "TENCENT_COS_BUCKET", None),
+    ])
+    return "cos" if cos_configured else "local"
+
+
+def _check_storage() -> dict:
+    """存储可用性：local 检查目录可写；cos 检查必要配置存在。
+
+    两种都**不创建目录、不写对象、不发网络请求**（/ready 会被高频探活，
+    不做计费/有副作用的调用）；返回值只含后端名与布尔。
+    """
+    backend = _storage_backend_name()
+    if backend == "local":
+        root = os.path.abspath(str(getattr(settings, "LOCAL_STORAGE_ROOT", "./feclaw-storage")))
+        exists = os.path.isdir(root)
+        writable = os.access(root, os.W_OK) if exists else os.access(
+            os.path.dirname(root) or ".", os.W_OK
+        )
+        return {
+            "ok": bool(writable),
+            "backend": "local",
+            "root_present": bool(exists),
+            "writable": bool(writable),
+            # 明确声明 /ready 没有制造副作用
+            "created": False,
+        }
+
+    config_present = {
+        "TENCENT_COS_SECRET_ID": bool(getattr(settings, "TENCENT_COS_SECRET_ID", None)),
+        "TENCENT_COS_SECRET_KEY": bool(getattr(settings, "TENCENT_COS_SECRET_KEY", None)),
+        "TENCENT_COS_BUCKET": bool(getattr(settings, "TENCENT_COS_BUCKET", None)),
+    }
+    return {
+        "ok": all(config_present.values()),
+        "backend": "cos",
+        "config_present": config_present,
+        "network_probe": "skipped",
+        "note": "只验证配置存在；存储连通性由独立低频巡检观察，避免每次探活都发远端请求",
+    }
+
+
+def collect_readiness() -> dict:
+    """汇总 readiness 检查（纯只读，可在任何进程内调用/测试）。"""
+    engine = _ready_engine()
+    checks = {
+        "database": _check_database(engine),
+    }
+    # DB 不通时 schema 检查必然失败，分开报告以便定位（但同样只回类名）
+    checks["schema"] = _check_schema(engine) if checks["database"]["ok"] else {
+        "ok": False, "version_state": "unknown", "skipped": True,
+        "reason": "database-unavailable",
+    }
+    checks["storage"] = _check_storage()
+    return checks
+
+
+def _ready_payload(checks: dict) -> dict:
+    ok = all(bool(c.get("ok")) for c in checks.values())
+    payload = {"status": "ready" if ok else "unhealthy", "checks": checks}
+    if not bool(getattr(settings, "SETUP_COMPLETE", False)):
+        # 诊断提示：冷启动进程本来就不该 ready（DB/schema/存储检查也会失败）。
+        # 只加字段帮助运维区分「没配置」与「配置了但依赖坏了」，不改变门禁语义。
+        payload["setup_state"] = "cold-start"
+    return payload
+
+
 @app.get("/health")
 async def health_check() -> dict:
-    """健康检查"""
+    """轻量 liveness：不碰 DB / 存储 / 模型，只说明进程还能响应。"""
     return {"status": "healthy"}
+
+
+@app.get("/ready")
+async def readiness_check() -> JSONResponse:
+    """/ready：真实依赖就绪检查（DB 连接 + 目标 schema + 存储配置）。
+
+    失败返回 503，成功 200 且 body.status == "ready"。
+    """
+    try:
+        checks = await asyncio.wait_for(
+            asyncio.to_thread(collect_readiness), READY_TIMEOUT_SECONDS
+        )
+    except asyncio.TimeoutError:
+        payload = {
+            "status": "unhealthy",
+            "checks": {"readiness": {"ok": False, "error": "timeout",
+                                     "budget_seconds": READY_TIMEOUT_SECONDS}},
+        }
+        return JSONResponse(payload, status_code=503,
+                            headers={"Cache-Control": "no-store"})
+    except Exception as exc:  # noqa: BLE001 —— 不把内部异常文本回给探活方
+        payload = {
+            "status": "unhealthy",
+            "checks": {"readiness": {"ok": False, "error": type(exc).__name__}},
+        }
+        return JSONResponse(payload, status_code=503,
+                            headers={"Cache-Control": "no-store"})
+
+    payload = _ready_payload(checks)
+    status_code = 200 if payload["status"] == "ready" else 503
+    return JSONResponse(payload, status_code=status_code,
+                        headers={"Cache-Control": "no-store"})
+
 
 # 静态文件服务（必须在 static_site_public.router 之前）
 app.mount("/static", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "static")), name="static")
@@ -821,6 +880,10 @@ else:
     app.include_router(metrics_internal_router)  # P1.5: 最小 metrics endpoint（admin-only），必须在 static_site_public 前注册（后者有 catch-all）
     app.include_router(zentrim_router)  # Zentrim（格物所）API — 必须在 static_site_public 前面，避免 catch-all 拦截
     app.include_router(upload_general_router)  # 通用文件上传 (P0-1)：POST /api/upload
+    # P0（S8 发现）：`upload_router` 一直被 import 但**从未挂载** —— 手机端 COS 直传
+    # `/api/desktop/upload_session`、`/api/desktop/upload_done` 全 405（被静态站
+    # catch-all 吃掉），而日志仍打印 "registered"。这里补上挂载。
+    app.include_router(upload_router)  # Desktop 上传会话：/api/desktop/upload_session|upload_done
     app.include_router(static_site_public.router)  # 静态网站公开访问
     logger.info("Upload session router registered")
 
@@ -839,10 +902,18 @@ else:
 if __name__ == "__main__":
     import sys as _sys
 
-    # CLI: --reset-admin —— 启动前重置 admin 密码并打印 banner
+    # CLI: --reset-admin —— 兼容入口；T20a 起必须显式确认，避免误触发口令重置
     if "--reset-admin" in _sys.argv:
         _idx = _sys.argv.index("--reset-admin")
         _sys.argv.pop(_idx)
+        if "--confirm-reset-admin" not in _sys.argv:
+            print(
+                "ERROR: --reset-admin 现在必须显式确认。请改用：\n"
+                "  python scripts/bootstrap_admin.py --reset --confirm-reset\n"
+                "（该命令会生成新口令并只打印一次；确认已获授权后再执行）"
+            )
+            sys.exit(2)
+        _sys.argv.pop(_sys.argv.index("--confirm-reset-admin"))
         # 冷启动时数据库尚未初始化，无法重置 admin
         if not bool(settings.SETUP_COMPLETE):
             print(

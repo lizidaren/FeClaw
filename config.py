@@ -15,6 +15,9 @@ class Settings(BaseSettings):
     HOST: str = "0.0.0.0"
     PORT: int = 8080
     DEBUG: bool = False
+    # T18a/F8：/docs、/redoc、/openapi.json 默认不挂载（生产会暴露全部路由/schema）。
+    # 仅调试或显式打开时暴露；DEBUG=true 也会间接开启。
+    FECLAW_EXPOSE_DOCS: bool = False
 
     # JWT 配置
     JWT_SECRET: str = ""  # ⚠️ 必须设置！用于 JWT 签名的密钥。首次启动会提示设置。  # 必须通过 .env 设置，否则启动时报错
@@ -167,9 +170,101 @@ class Settings(BaseSettings):
     REDIS_PASSWORD: str = ""
     REDIS_DB: int = 0
 
-    @property
-    def REDIS_ENABLED(self) -> bool:
-        return bool(self.REDIS_PASSWORD) or bool(self.REDIS_USERNAME)
+    # T18a：Redis 显式开关。
+    #   - `REDIS_ENABLED=true`  → 启用（**即使没有用户名/密码**，本地无鉴权 Redis 也能用）
+    #   - `REDIS_ENABLED=false` → 禁用（即使配了密码也不用）
+    #   - 不设置（None）        → 保持历史行为：有 REDIS_USERNAME / REDIS_PASSWORD 即启用
+    #
+    # ⚠️ 旧实现是 `@property` 由「有密码/用户名」推导 ⇒ 无法在无密码的本地 Redis 上启用，
+    # 也无法显式关闭。现改为「字段 + 构造时解析」：`Settings()` 之后
+    # `settings.REDIS_ENABLED` 仍是一个普通 bool，所有既有调用点
+    # （services/redis_client.py、services/active_tracker.py、services/sandbox/concurrency.py）
+    # 语义不变，不需要改动。
+    REDIS_ENABLED: Optional[bool] = None
+
+    # ─── 限流（T18a）────────────────────────────────────────────────
+    # 后端可切换：
+    #   "memory" —— 进程内（默认；单 worker / 测试 / 无 Redis 部署）
+    #   "redis"  —— 跨 worker 集中计数（多 worker 部署必须用这个，否则阈值被放大 N 倍）
+    RATE_LIMIT_BACKEND: str = "memory"
+    # Redis 后端不可用时的行为：
+    #   "open"   —— 放行（记录 WARNING；等同降级为无限流，只在明确接受风险时使用）
+    #   "closed" —— 拒绝并返回 503（默认；spec T18「Redis 不可用不能静默放无限」）
+    RATE_LIMIT_FAIL_MODE: str = "closed"
+    # Redis 计数键前缀（拼在 services/redis_client.KEY_PREFIX 之后）
+    RATE_LIMIT_REDIS_PREFIX: str = "ratelimit:"
+    # 单次 Redis 操作超时（秒）—— 避免限流把请求拖死
+    RATE_LIMIT_REDIS_TIMEOUT: float = 0.5
+
+    # 登录：IP+username 双维度（与历史 10/300s 一致）
+    RATE_LIMIT_LOGIN_ATTEMPTS: int = 10
+    RATE_LIMIT_LOGIN_WINDOW: int = 300
+    # 登录：IP 单桶（防用户名喷洒；历史 100/300s）
+    RATE_LIMIT_LOGIN_IP_ATTEMPTS: int = 100
+    # 注册：IP 单桶（防批量注册；默认 5/小时）
+    RATE_LIMIT_REGISTER_ATTEMPTS: int = 5
+    RATE_LIMIT_REGISTER_WINDOW: int = 3600
+    # 改密：IP+user 双维度
+    RATE_LIMIT_PASSWORD_ATTEMPTS: int = 10
+    RATE_LIMIT_PASSWORD_WINDOW: int = 300
+    # TOTP verify：IP+agent_hash（与历史 10/300s 一致）
+    RATE_LIMIT_TOTP_ATTEMPTS: int = 10
+    RATE_LIMIT_TOTP_WINDOW: int = 300
+
+    # ─── 注册门禁（T18a）────────────────────────────────────────────
+    #   "open"   —— 任何人可注册
+    #   "invite" —— 必须带正确邀请码（默认；spec T18「local registration 默认 invite」）
+    #   "closed" —— 一律 403（本地账号由管理员开通）
+    # invite 模式下若 REGISTRATION_INVITE_CODE 为空，按 closed 处理（fail-closed，
+    # 不出现「配了 invite 但谁都能注册」的假门禁）。
+    REGISTRATION_MODE: str = "invite"
+    REGISTRATION_INVITE_CODE: str = ""
+    # ⚠️ 「注册后等待管理员审批」需要 `users.is_active` 列，当前模型没有该列；
+    # 在 T20a 增加列 + 迁移之前不提供该模式（见 T18a 报告的跨界请求）。
+    # 新注册用户的默认档位。None → 使用 models.database.User.tier 的列默认值。
+    # 设为 "free" 表示新用户不再默认无限 pro（spec T18「新学生不自动 pro 无限额度」）。
+    REGISTRATION_DEFAULT_TIER: Optional[str] = "free"
+
+    # ─── CSRF / Origin（T18a）──────────────────────────────────────
+    # 总开关。关闭只应用于「已确认所有客户端都是非浏览器」的场景。
+    CSRF_ENABLED: bool = True
+    # 双提交 token：可读 cookie 名 + 请求头名（服务端校验两者相等）
+    CSRF_COOKIE_NAME: str = "feclaw_csrf"
+    CSRF_HEADER_NAME: str = "X-CSRF-Token"
+    # 额外允许的 Origin（除 FECLAW_PUBLIC_URL / 请求自身 Host 之外的来源，
+    # 例如独立的前端域名）。逗号分隔或 JSON 列表。
+    CSRF_EXTRA_ORIGINS: List[str] = []
+    # True：既无 Origin 也无 Referer 的不安全请求一律拒绝（完全禁止非浏览器
+    # cookie 客户端）。默认 False —— 非浏览器客户端（curl / 桌面 / 移动）
+    # 本来就不会被 CSRF 利用，靠双提交 token 已能覆盖浏览器场景。
+    CSRF_REQUIRE_ORIGIN: bool = False
+
+    # ─── WebSocket 来源允许列表（T18a）─────────────────────────────
+    # 额外允许的 Origin。默认自动允许 FECLAW_PUBLIC_URL 与请求自身 Host（同源）。
+    WS_EXTRA_ORIGINS: List[str] = []
+    # True：WS 握手缺少 Origin 头一律拒绝（会挡住非浏览器 WS 客户端，默认关闭）
+    WS_REQUIRE_ORIGIN: bool = False
+
+    # ─── 文件分享（T17a 由 S3 接线；此处只提供字段，S3 全部用 getattr 读取）──
+    SHARE_ACTIVE_ORIGIN: str = ""        # 独立 cookie-free 分享域；空 = 主动内容只下载
+    SHARE_ALLOW_PERMANENT: bool = False  # 是否允许永久分享链接（默认否）
+    SHARE_DEFAULT_EXPIRES_HOURS: int = 24
+    SHARE_MAX_EXPIRES_HOURS: int = 0     # 0 = 不限制最长有效期
+    SHARE_UNLOCK_TTL_SECONDS: int = 600  # share 密码解锁 proof 的有效期
+
+    def model_post_init(self, __context) -> None:
+        """解析派生配置（pydantic v2 在字段校验后调用一次）。
+
+        `REDIS_ENABLED` 的 None → 历史自动推导（保留无密码场景不启用、
+        有密码/用户名即启用的旧行为），显式 true/false 则原样生效。
+        """
+        if self.REDIS_ENABLED is None:
+            self.REDIS_ENABLED = bool(self.REDIS_PASSWORD) or bool(self.REDIS_USERNAME)
+
+        # 枚举值归一化（不合法值在各自 resolve 处再 fail-closed，不在这里抛）
+        self.RATE_LIMIT_BACKEND = (self.RATE_LIMIT_BACKEND or "memory").strip().lower()
+        self.RATE_LIMIT_FAIL_MODE = (self.RATE_LIMIT_FAIL_MODE or "closed").strip().lower()
+        self.REGISTRATION_MODE = (self.REGISTRATION_MODE or "invite").strip().lower()
 
     # 缓存配置
     CACHE_TTL: int = 300  # 搜索结果缓存 TTL（秒）

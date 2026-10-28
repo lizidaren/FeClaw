@@ -980,6 +980,14 @@ class WebToolsMixin(AgentToolsServiceBase):
         """
         网页搜索工具，支持三级搜索服务（已弃用，请使用 web_search）
         """
+        # P0（S8 发现）：级别词汇表已统一为 quick/balanced/deep，但这里的分派
+        # 还在用旧名 minimal/advanced/research —— `level="auto"` 自动选出新名后会
+        # 100% 落到 else 返回“未知的搜索级别”，自动级别搜索完全不可用。
+        # 这里同时接受旧名（向后兼容）与新名（自动选择的结果）。
+        _level_alias = {"minimal": "quick", "advanced": "balanced", "research": "deep"}
+        level = str(level or "auto").strip().lower()
+        level = _level_alias.get(level, level)
+
         if level == "auto":
             level = self._auto_select_search_level(query)
 
@@ -990,17 +998,17 @@ class WebToolsMixin(AgentToolsServiceBase):
 
         start_time = time.time()
 
-        if level == "minimal":
+        if level == "quick":
             result = self._search_tencent_sync(query, count)
             service_name = "腾讯搜狗"
-        elif level == "advanced":
+        elif level == "balanced":
             result = self._search_kimi_sync(query)
             service_name = "Kimi"
-        elif level == "research":
+        elif level == "deep":
             result = self._search_baidu_sync(query)
             service_name = "百度千帆"
         else:
-            return f"Error: 未知的搜索级别 '{level}'，可选: minimal, advanced, research, auto"
+            return f"Error: 未知的搜索级别 '{level}'，可选: quick, balanced, deep, auto"
 
         elapsed_ms = int((time.time() - start_time) * 1000)
         elapsed_sec = elapsed_ms / 1000

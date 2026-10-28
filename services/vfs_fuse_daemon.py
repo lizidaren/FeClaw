@@ -24,6 +24,46 @@ except ImportError:
     _PYFUSE3_AVAILABLE = False
     pyfuse3 = None  # type: ignore[assignment]
 
+# trio 延迟导入（T19a）：pyfuse3 基于 Trio 事件循环，但缺 trio **不能**阻塞本模块导入。
+# 否则 main.py:532 / services/sandbox_manager.py / tests/test_fuse_mount.py 的
+# `from services.vfs_fuse_daemon import ...` 会在启动期抛 ImportError，
+# 于是「FUSE 关闭」也起不来。缺依赖只降级为 _TRIO_AVAILABLE = False。
+try:
+    import trio
+    _TRIO_AVAILABLE = True
+except ImportError:
+    _TRIO_AVAILABLE = False
+    trio = None  # type: ignore[assignment]
+
+# FUSE 完整可用 = pyfuse3 + trio 都就绪。
+# 真实挂载另需系统层 /dev/fuse 与 fusermount3，由 check_fuse_available() 追加判断。
+_FUSE_AVAILABLE = _PYFUSE3_AVAILABLE and _TRIO_AVAILABLE
+
+# FUSE 缺失时的统一错误文案/原因（供挂载入口与 per-file 锁复用，不含任何密钥）
+FUSE_UNAVAILABLE_HINT = (
+    "FUSE 功能不可用：安装 requirements-fuse.txt 并确认系统有 /dev/fuse 与 fusermount3"
+)
+
+
+def fuse_unavailable_reason() -> str:
+    """返回 FUSE 不可用的具体原因（用于日志/错误信息，不含任何密钥）"""
+    missing = []
+    if not _PYFUSE3_AVAILABLE:
+        missing.append("pyfuse3")
+    if not _TRIO_AVAILABLE:
+        missing.append("trio")
+    if missing:
+        return f"缺少 Python 依赖: {', '.join(missing)}"
+    return "缺少系统依赖: /dev/fuse 或 fusermount3"
+
+
+def _new_file_lock():
+    """per-file RMW 锁；缺 trio 时给明确错误（而不是 NoneType 属性错误）"""
+    if not _TRIO_AVAILABLE:
+        raise RuntimeError(f"{FUSE_UNAVAILABLE_HINT}（{fuse_unavailable_reason()}）")
+    return trio.Lock()
+
+
 logger = logging.getLogger(__name__)
 
 # 根目录 inode
@@ -33,10 +73,10 @@ FH_START = 2
 
 
 def check_fuse_available() -> bool:
-    """检查 FUSE 是否可用"""
+    """检查 FUSE 是否可用（Python 依赖 pyfuse3+trio 与系统层都就绪）"""
     import shutil
     try:
-        if not _PYFUSE3_AVAILABLE:
+        if not _FUSE_AVAILABLE:
             return False
         if not os.path.exists("/dev/fuse"):
             return False
@@ -795,7 +835,7 @@ class VFSFuseDaemon(_FUSE_BASE):  # type: ignore[valid-type,misc]
 
         # per-file 锁，只对同一个 cos_key 互斥
         if cos_key not in self._file_locks:
-            self._file_locks[cos_key] = trio.Lock()
+            self._file_locks[cos_key] = _new_file_lock()
         async with self._file_locks[cos_key]:
             if offset > 0:
                 # 非 offset=0 写入：需要先读后写
@@ -1066,12 +1106,21 @@ class VFSFuseDaemon(_FUSE_BASE):  # type: ignore[valid-type,misc]
 
 # ── 后台启动 / 卸载 ──────────────────────────────────────────────
 
-import trio
+# trio 已在模块顶部 guard 导入（见 _TRIO_AVAILABLE / _FUSE_AVAILABLE），
+# 错误文案见模块顶部的 FUSE_UNAVAILABLE_HINT / fuse_unavailable_reason()。
 
 
 def start_fuse_background(vfs, mount_dir, cache_ttl=60, cos_prefix="feclaw/",
                           agent_hash=None):
-    """在后台线程启动 FUSE 守护进程"""
+    """在后台线程启动 FUSE 守护进程
+
+    Raises:
+        RuntimeError: pyfuse3/trio 缺失时抛出明确错误（而不是 NameError），
+            调用方（main.py / sandbox_manager）据此走 FUSE 关闭/仿真回退。
+    """
+    if not _FUSE_AVAILABLE:
+        raise RuntimeError(f"{FUSE_UNAVAILABLE_HINT}（{fuse_unavailable_reason()}）")
+
     import threading
     import subprocess
 

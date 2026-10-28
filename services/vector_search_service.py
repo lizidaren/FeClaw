@@ -9,7 +9,6 @@ import contextlib
 import functools
 import json
 import logging
-import fcntl
 import os
 import re
 import socket
@@ -23,6 +22,7 @@ import numpy as np
 
 from config import settings
 from services.model_registry import resolve as _reg_resolve
+from services.portable_lock import lock_exclusive, lock_shared, unlock
 
 logger = logging.getLogger(__name__)
 
@@ -575,11 +575,11 @@ class NumpyVecStorage(VectorStorage):
         fd = None
         try:
             fd = self._open_lock(index)
-            fcntl.flock(fd, fcntl.LOCK_SH)
+            lock_shared(fd)
             yield
         finally:
             if fd is not None:
-                fcntl.flock(fd, fcntl.LOCK_UN)
+                unlock(fd)
                 os.close(fd)
 
     @contextlib.contextmanager
@@ -587,10 +587,10 @@ class NumpyVecStorage(VectorStorage):
         """写入时：独占锁。阻止读写。"""
         fd = self._open_lock(index)
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
+            lock_exclusive(fd)
             yield
         finally:
-            fcntl.flock(fd, fcntl.LOCK_UN)
+            unlock(fd)
             os.close(fd)
 
     def _open_lock(self, index: str) -> int:

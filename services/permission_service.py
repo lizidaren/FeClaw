@@ -109,21 +109,21 @@ class PermissionService:
             ".env",
             "*/.env",
             "*/*.env",
-            "IDENTITY.md",
-            "*/IDENTITY.md",
-            "*/*/IDENTITY.md",
-            "SOUL.md",
-            "*/SOUL.md",
-            "*/*/SOUL.md",
-            "SECRET*",
-            "*/SECRET*",
-            "PASSWORD*",
-            "*/PASSWORD*",
+            "identity.md",
+            "*/identity.md",
+            "*/*/identity.md",
+            "soul.md",
+            "*/soul.md",
+            "*/*/soul.md",
+            "secret*",
+            "*/secret*",
+            "password*",
+            "*/password*",
         ]
 
         import fnmatch
         for pattern in sensitive_patterns:
-            if fnmatch.fnmatch(file_path, pattern):
+            if fnmatch.fnmatch(normalized.lower(), pattern):
                 return Permission.READ  # 敏感文件默认只读
 
         return Permission.READWRITE

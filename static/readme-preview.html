@@ -15,8 +15,14 @@ blockquote { border-left:3px solid #569cd6; margin:0; padding:8px 16px; backgrou
 </style></head>
 <body><div id="content"></div>
 <script src="/static/marked.min.js"></script>
+<script src="/static/vendor/dompurify.min.js"></script>
+<script src="/static/js/safe-render.js"></script>
 <script>
 fetch('/static/readme.md').then(r=>r.text()).then(md=>{
-    document.getElementById('content').innerHTML = marked.parse(md);
+    // T16：与聊天/文件/分享同一边界，禁止把 markdown 输出直接塞进 innerHTML
+    var html = (window.FeClawSafeRender && FeClawSafeRender.isAvailable())
+        ? FeClawSafeRender.renderMarkdownSafe(md)
+        : md.replace(/[&<>"']/g, function (c) { return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; });
+    document.getElementById('content').innerHTML = html;
 });
 </script></body></html>

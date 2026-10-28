@@ -62,7 +62,7 @@ FeClaw实现了VFS和沙箱执行环境（bubblewrap 沙箱，**主机未安装 
 
 ### Harness基础设施特色：Gen 2 - IM Agent
 
-Gen 1 传统 Agent 虽轻量快速，但在复杂协作时，有 **TOCTOU（消息处理期间状态变化）竞态问题**导致混乱。为此，我在FeClaw中提出 <mark>Gen 2 - IM Agent</mark>，借鉴人类使用 IM 工作流程，将所有新消息以 IRQ 中断形式注入所有可介入节点（如工具调用结果），同时通过回复缓冲区（write/edit/flush）确保发送动作近乎原子化，从而彻底规避竞态。
+Gen 1 传统 Agent 虽轻量快速，但在复杂协作时，有 **TOCTOU（消息处理期间状态变化）竞态问题**导致混乱。为此，我在FeClaw中提出 <mark>Gen 2 - IM Agent</mark>，借鉴人类使用 IM 工作流程，将所有新消息以 IRQ 中断形式注入所有可介入节点（如工具调用结果），同时通过回复缓冲区（write/edit/flush）缩小发送动作的竞态窗口。**说明**：这套机制降低并发冲突概率，但不承诺“彻底消除竞态”——缓冲区版本 CAS、持久任务投递与取消语义仍在分阶段落地，实际边界以代码与测试为准。
 全局仅单个 Agent 实例在线，天然实现跨单聊、群聊的上下文一致性，将 Classic Agent 升级为异步、连贯且状态安全的下一代 **"IM-Native" Agent**。
 
 <details><summary>完整介绍</summary>
@@ -243,7 +243,20 @@ MAIN_TEXT_MODEL=deepseek-flash       # 主模型切到 DeepSeek
 python -m uvicorn main:app --host 0.0.0.0 --port 8080 --reload
 ```
 
-首次启动时系统自动创建 MySQL 数据库表和管理员账号（密码为**随机生成**并仅打印到启动终端一次；可通过 `python -m uvicorn main:app --reset-admin` 重新生成）。
+首次启动只创建缺失的数据表，**不会**自动创建管理员账号、也不会把口令写进日志。请显式引导：
+
+```bash
+python scripts/bootstrap_admin.py --create     # 只在不存在时创建，随机口令仅打印一次
+```
+
+已有数据库升级必须显式迁移（启动期不再偷偷 `ALTER`，也不重置密码）：
+
+```bash
+python scripts/migrate_learning_runtime.py --plan     # 只读预览会补哪些列/索引
+python scripts/migrate_learning_runtime.py --apply    # 执行 expand（幂等，可中断续跑）
+```
+
+服务是否真的可用看 `/ready`：返回 `200` 且 JSON `status=="ready"` 才算就绪；旧库缺列/缺 schema 版本时返回 `503` 并提示先迁移（`deploy.sh` 已按此门禁）。
 
 打开 http://localhost:8080 ，用默认账号登录控制台，创建 Agent 后即可使用。系统会自动创建一个示例 Agent。
 
@@ -365,7 +378,8 @@ python main.py
 | MySQL 连不上 | MySQL 未运行或密码不对 | 运行 `sudo bash scripts/dev_init.sh` 用 Docker 启动 |
 | `Docker permission denied` | 用户不在 docker 组 | `sudo usermod -aG docker $USER` 后重新登录或 `newgrp docker` |
 | `pyfuse3` 安装失败 | 缺少 `fuse3 libfuse3-dev` | `apt install fuse3 libfuse3-dev`（或直接忽略，pyfuse3 可选） |
-| `eval_type_backport` 相关错误 | Python 3.9 运行时类型注解 | `pip install eval_type_backport`（requirements.txt 已包含） |
+| `eval_type_backport` 相关错误（旧版本） | 旧版本曾在 Python 3.9 下使用；当前要求 Python ≥3.12，依赖已移除 | 用 Python 3.12+ 重建 venv：`python -m venv .venv && .venv/Scripts/pip install -r requirements.lock` |
+| `/docs`、`/openapi.json` 打不开 | 生产默认关闭（避免暴露全部路由/schema） | 本地调试设 `FECLAW_EXPOSE_DOCS=1` 或 `DEBUG=true` 后重启 |
 | `datetime.UTC` ImportError | Python 3.9 / 3.10 不兼容 | 代码已自动处理，更新至最新版本即可 |
 | 浏览器登录死循环 | 缓存过期 JWT token | 清除站点数据（cookie + localStorage）或换无痕窗口 |
 

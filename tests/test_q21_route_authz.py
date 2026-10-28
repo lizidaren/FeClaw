@@ -34,6 +34,7 @@ def client():
 ANON_WHITELIST = [
     # --- 存活探针 / 健康检查（无需鉴权，仅返回进程状态）---
     ({"GET"}, "/health", "liveness probe（main.py 显式定义，返回 {'status':'healthy'}）"),
+    ({"GET"}, "/ready", "readiness probe（DB/schema/存储只读检查；失败 503，不回凭证，deploy.sh 门禁用）"),
 
     # --- 公开的非敏感配置（Q19/C6 白名单化，绝不回显 *_URL/*_TOKEN/*_KEY）---
     ({"GET"}, "/api/console/public-config", "显式白名单，仅公开特性开关/模型名/域名"),
@@ -63,6 +64,11 @@ ANON_WHITELIST = [
     # --- 分享链接（slug/token 本身就是凭据；密码门禁 H18）---
     ({"GET"}, "/s/{slug}", "公开分享短链，token 即凭据 + 可选密码（H18）"),
     ({"GET"}, "/share/{token}", "公开分享 token 链接，token 即凭据 + 可选密码（H18）"),
+    # T17a 新增密码解锁入口：凭据是 slug/token + 分享密码本身，只换一枚短时
+    # HttpOnly 解锁 cookie（不返回文件内容）；按 IP+slug 限流，错误密码不计入
+    # 成功路径，未授权时仅返回 401/404。
+    ({"POST"}, "/s/{slug}/unlock", "分享密码换短时解锁 cookie（凭据即分享密码，限流）"),
+    ({"POST"}, "/share/{token}/unlock", "同上（token 路由）"),
     ({"POST"}, "/api/share/reference", "创建分享引用令牌即凭据，按 IP 限流（需合法 share_hash）"),
     ({"GET"}, "/api/share/reference/{ref_hash}", "按引用令牌拉取片段（token 即凭据）"),
 
@@ -434,6 +440,19 @@ class TestCrossTenantResource403:
         resp = client.get("/api/vfs/view", params={"path": "agents/abcd/workspace/soul.md"},
                           headers={"Authorization": f"Bearer {token}"})
         assert resp.status_code == 403
+
+    def test_vfs_view_backslash_path_cannot_bypass_tenant_check(self, real_db, client):
+        """回归：Windows 上 "\\" 归一化会让按 "/" 切分的租户校验失效（见 routers/vfs_view.py）。"""
+        from models.database import SessionLocal
+        db = SessionLocal()
+        owner_id, attacker_id = _make_owner_and_attacker(db)
+        db.close()
+        token = _attacker_token(attacker_id)
+        resp = client.get("/api/vfs/view",
+                          params={"path": "agents\\abcd\\workspace\\soul.md"},
+                          headers={"Authorization": f"Bearer {token}"})
+        # 反斜杠路径直接 400 拒绝；绝不能落到 404/200（那说明校验被绕过）
+        assert resp.status_code == 400
 
     def test_schedule_entry_other_user_denied(self, real_db, client):
         """日程（Zentrim 条目）：非 owner 走存在性隐藏，返回 404（deny，不泄存在性）。"""

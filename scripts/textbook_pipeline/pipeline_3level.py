@@ -52,16 +52,13 @@ def read_md(zp):
         return z.read('full.md').decode('utf-8')
 
 def add_numbers(text):
-    lines = text.split('
-')
-    return '
-'.join(f'L{i+1:05d}:{line}' for i, line in enumerate(lines)), lines
+    lines = text.split('\n')
+    return '\n'.join(f'L{i+1:05d}:{line}' for i, line in enumerate(lines)), lines
 
 def extract_json(text):
     js_s = text.find('```json')
     if js_s >= 0:
-        js_s = text.find('
-', js_s) + 1
+        js_s = text.find('\n', js_s) + 1
         js_e = text.rfind('```')
     else:
         js_s = text.find('{')

@@ -223,22 +223,32 @@ class TestLocalStorageSymlinkProtection:
 # ============================================================================
 
 class TestLocalStorageWindowsPath:
-    """测试 Windows 反斜杠转换为正斜杠"""
+    """测试 Windows 反斜杠转换为正斜杠
+
+    `_resolve()` 的契约是**把 key 里的反斜杠等价成斜杠**（`key.replace("\\\\","/")`），
+    而不是「返回的绝对路径里不能有反斜杠」——后者在 Windows 上永远不成立
+    （原生分隔符就是 `\\`）。断言改成平台无关的「等价 key 解析到同一路径」，
+    Linux/Windows 都能跑，且仍能抓住 normalize 回归。
+    """
 
     def test_backslash_converted_to_forward_slash(self, local_storage):
-        """Windows 反斜杠路径被转换为正斜杠"""
-        path = local_storage._resolve("test\\dir\\file.txt")
-        assert "test" in path
-        assert "dir" in path
-        # 路径中不应有反斜杠
-        assert "\\" not in path.replace("\\\\", "")  # 排除 Windows 盘符
+        """key 中的反斜杠与正斜杠解析为同一路径"""
+        back = local_storage._resolve("test\\dir\\file.txt")
+        fwd = local_storage._resolve("test/dir/file.txt")
+
+        assert back == fwd
+        # 归一化后仍是 expected 相对层级（父目录 + 文件）
+        assert os.path.basename(back) == "file.txt"
+        assert os.path.basename(os.path.dirname(back)) == "dir"
+        assert os.path.basename(os.path.dirname(os.path.dirname(back))) == "test"
 
     def test_mixed_slashes_normalized(self, local_storage):
-        """混合斜杠路径被规范化"""
-        # 注意：原始 key 中的反斜杠会被替换
-        path = local_storage._resolve("a\\b/c\\d/file.txt")
-        # 所有反斜杠被替换为正斜杠后拼接
-        assert os.sep not in path or os.sep == "/"
+        """混合斜杠路径与全正斜杠路径解析为同一路径"""
+        mixed = local_storage._resolve("a\\b/c\\d/file.txt")
+        fwd = local_storage._resolve("a/b/c/d/file.txt")
+
+        assert mixed == fwd
+        assert os.path.basename(mixed) == "file.txt"
 
     def test_windows_style_path_with_backslash(self, local_storage, temp_root):
         """Windows 风格路径可以正常写入"""

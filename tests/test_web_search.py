@@ -14,6 +14,8 @@ import unittest
 from unittest.mock import patch, MagicMock
 import time
 
+import pytest
+
 # 导入被测试类
 from services.agent_tools_service import AgentToolsService
 
@@ -113,38 +115,42 @@ class TestSearchCache(unittest.TestCase):
 
 
 class TestAutoSelectSearchLevel(unittest.TestCase):
-    """级别自动选择逻辑测试"""
+    """级别自动选择逻辑测试
 
-    def test_short_query_selects_minimal(self):
-        """短查询（<20字符）应选择 minimal"""
-        self.assertEqual(AgentToolsService._auto_select_search_level(None, "天气"), "minimal")
-        self.assertEqual(AgentToolsService._auto_select_search_level(None, "Python"), "minimal")
+    现行契约（services/tools/web_tools.py::_auto_select_search_level）返回的
+    规范级别名是 **quick / balanced / deep**；旧的 minimal / advanced / research
+    只是 `_try_fallback_search` 里的兼容别名（level_map），自动选择不再产出它们。
+    """
 
-    def test_research_keywords_select_research(self):
-        """研究关键词应选择 research"""
-        self.assertEqual(AgentToolsService._auto_select_search_level(None, "深度分析这个问题"), "research")
-        self.assertEqual(AgentToolsService._auto_select_search_level(None, "比较两个框架的优缺点"), "research")
-        self.assertEqual(AgentToolsService._auto_select_search_level(None, "Research this topic"), "research")
-        self.assertEqual(AgentToolsService._auto_select_search_level(None, "Deep dive into..."), "research")
+    def test_short_query_selects_quick(self):
+        """短查询（<10字符）应选择 quick"""
+        self.assertEqual(AgentToolsService._auto_select_search_level(None, "天气"), "quick")
+        self.assertEqual(AgentToolsService._auto_select_search_level(None, "Python"), "quick")
 
-    def test_minimal_keywords_select_minimal(self):
-        """极简关键词应选择 minimal"""
-        self.assertEqual(AgentToolsService._auto_select_search_level(None, "Python是什么"), "minimal")
-        self.assertEqual(AgentToolsService._auto_select_search_level(None, "What is async"), "minimal")
-        self.assertEqual(AgentToolsService._auto_select_search_level(None, "快速回答"), "minimal")
+    def test_research_keywords_select_deep(self):
+        """研究关键词应选择 deep"""
+        self.assertEqual(AgentToolsService._auto_select_search_level(None, "深度分析这个问题"), "deep")
+        self.assertEqual(AgentToolsService._auto_select_search_level(None, "比较两个框架的优缺点"), "deep")
+        self.assertEqual(AgentToolsService._auto_select_search_level(None, "Research this topic"), "deep")
+        self.assertEqual(AgentToolsService._auto_select_search_level(None, "Deep dive into..."), "deep")
 
-    def test_long_query_selects_research(self):
-        """长查询（>100字符）应选择 research"""
+    def test_minimal_keywords_select_quick(self):
+        """极简关键词应选择 quick"""
+        self.assertEqual(AgentToolsService._auto_select_search_level(None, "Python是什么"), "quick")
+        self.assertEqual(AgentToolsService._auto_select_search_level(None, "What is async"), "quick")
+        self.assertEqual(AgentToolsService._auto_select_search_level(None, "快速回答"), "quick")
+
+    def test_long_query_selects_deep(self):
+        """长查询（>100字符）应选择 deep"""
         long_query = "请详细分析一下当前人工智能领域的发展趋势，包括大语言模型、多模态模型、具身智能等方面的最新进展"
-        self.assertEqual(AgentToolsService._auto_select_search_level(None, long_query), "research")
+        self.assertEqual(AgentToolsService._auto_select_search_level(None, long_query), "deep")
 
-    def test_medium_query_without_keywords(self):
-        """中等复杂查询（无关键词）应选择 advanced"""
-        # 这个查询 > 20 字符，没有 research 关键词
+    def test_medium_query_without_keywords_selects_balanced(self):
+        """中等复杂查询（无关键词、<100字符、无问号）应选择 balanced"""
+        # 这个查询 > 10 字符，没有 research/quick 关键词，也不含问号
         query = "推荐几个好用的 Python 异步框架"
         result = AgentToolsService._auto_select_search_level(None, query)
-        # 实际逻辑可能因为关键词返回 minimal，测试实际行为
-        self.assertIn(result, ["minimal", "advanced"])
+        self.assertEqual(result, "balanced")
 
 
 class TestFallbackMechanism(unittest.TestCase):
@@ -233,13 +239,29 @@ class TestMultiWebSearch(unittest.TestCase):
         """测试无效级别"""
         mock_service = MagicMock()
         mock_service._get_cached_search = MagicMock(return_value=None)
-        mock_service._auto_select_search_level = MagicMock(return_value="minimal")
+        mock_service._auto_select_search_level = MagicMock(return_value="quick")
         mock_service._search_tencent_sync = MagicMock(return_value="Error: 失败")
-        
-        # invalid 级别应该返回错误
+
+        # invalid 级别应该明确返回「未知级别」错误，而不是静默降级
         result = AgentToolsService.multi_web_search(mock_service, "测试", level="invalid", use_cache=False)
-        # 实际实现可能不返回 Error，而是尝试默认级别
-        self.assertIsNotNone(result)
+        self.assertIn("未知的搜索级别", result)
+
+    def test_multi_web_search_auto_level_is_dispatched(self):
+        """level='auto' 必须把自动选出的级别分派给对应后端。
+
+        回归锁（S8 发现、主 agent 已修）：分派分支曾用旧级别名 minimal/advanced/
+        research，而自动选择返回 quick/balanced/deep，导致 auto 100% 失败。
+        """
+        mock_service = MagicMock()
+        mock_service._get_cached_search = MagicMock(return_value=None)
+        # 真实实现返回 quick/balanced/deep 之一
+        mock_service._auto_select_search_level = lambda q: "quick"
+        mock_service._search_tencent_sync = MagicMock(return_value="腾讯自动结果")
+
+        result = AgentToolsService.multi_web_search(mock_service, "天气", level="auto", use_cache=False)
+
+        self.assertNotIn("未知的搜索级别", result)
+        self.assertIn("腾讯自动结果", result)
 
 
 class TestBingFallbackSearch(unittest.TestCase):
@@ -346,12 +368,18 @@ class TestBingFallbackSearch(unittest.TestCase):
 
 
 class TestAPIKeyMissing(unittest.TestCase):
-    """API Key 缺失测试"""
+    """API Key 缺失测试
+
+    `services/agent_tools_service.py` 只是 `services.tools` 的再导出壳，
+    模块上并没有 `settings` 名字；这些方法实际定义在
+    `services/tools/web_tools.py`，所以 patch 目标必须是
+    `services.tools.web_tools.settings`。
+    """
 
     def test_tencent_no_api_key(self):
         """腾讯搜索缺少 API Key"""
         mock_service = MagicMock()
-        with patch('services.agent_tools_service.settings') as mock_settings:
+        with patch("services.tools.web_tools.settings") as mock_settings:
             mock_settings.TENCENT_SEARCH_API_KEY = ""
             result = AgentToolsService._search_tencent_sync(mock_service, "测试")
             self.assertIn("Error", result)
@@ -360,7 +388,7 @@ class TestAPIKeyMissing(unittest.TestCase):
     def test_kimi_no_api_key(self):
         """Kimi 搜索缺少 API Key"""
         mock_service = MagicMock()
-        with patch('services.agent_tools_service.settings') as mock_settings:
+        with patch("services.tools.web_tools.settings") as mock_settings:
             mock_settings.KIMI_API_KEY = ""
             result = AgentToolsService._search_kimi_sync(mock_service, "测试")
             self.assertIn("Error", result)
@@ -369,7 +397,7 @@ class TestAPIKeyMissing(unittest.TestCase):
     def test_baidu_no_api_key(self):
         """百度搜索缺少 API Key"""
         mock_service = MagicMock()
-        with patch('services.agent_tools_service.settings') as mock_settings:
+        with patch("services.tools.web_tools.settings") as mock_settings:
             mock_settings.BAIDU_SEARCH_API_KEY = ""
             result = AgentToolsService._search_baidu_sync(mock_service, "测试")
             self.assertIn("Error", result)
@@ -386,10 +414,10 @@ class TestEdgeCases(unittest.TestCase):
     def test_very_long_query(self):
         """超长查询测试"""
         long_query = "测试" * 500  # 1000 字符
-        
-        # 静态方法测试
+
+        # 静态方法测试（>100 字符 → deep）
         level = AgentToolsService._auto_select_search_level(None, long_query)
-        self.assertEqual(level, "research")
+        self.assertEqual(level, "deep")
 
     def test_cache_with_unicode(self):
         """测试 Unicode 查询的缓存"""

@@ -3,7 +3,16 @@ name = "feclaw"
 version = "1.0.0"
 description = "A living guide for every student — AI learning platform"
 requires-python = ">=3.12"
+# 依赖声明分层（T19a）：
+#   * 运行时依赖**不在**这里重复声明 —— 唯一权威是 requirements.lock（精确版本）
+#     与 requirements.txt（范围声明层），避免出现两份互相矛盾的依赖清单。
+#   * 本文件只把 lock 的 FUSE 分组暴露成 `pip install -e .[fuse]`，方便按 extra 安装。
+#   * extras 里的版本必须与 requirements.lock 的 `fuse` 分组**逐字一致**；
+#     tests/test_optional_dependencies.py 会校验，防止两处漂移。
 dependencies = []
+
+[project.optional-dependencies]
+fuse = ["trio==0.34.0"]
 
 [build-system]
 requires = ["setuptools>=64.0"]

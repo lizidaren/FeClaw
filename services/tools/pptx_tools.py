@@ -131,11 +131,14 @@ class PptxToolsMixin(AgentToolsServiceBase):
             share_result = None
             try:
                 from services.share_service import create_share_link
+                # T17a：分享链接默认 24 小时（不再默认永久）；数值由
+                # services/share_service.py 的 _DEFAULT_EXPIRES_HOURS 统一控制，
+                # 这里显式传 None 表示“用服务端默认值”。
                 share_result = create_share_link(
                     vfs_path=f"/{vfs_output_path}",
                     mode="share",
                     user_id=self.user_id,
-                    expires_hours=0,
+                    expires_hours=None,
                     agent_hash=self.agent_hash,
                 )
             except Exception as e:
@@ -210,9 +213,14 @@ class PptxToolsMixin(AgentToolsServiceBase):
             shutil.rmtree(slides_dir, ignore_errors=True)
             return False
 
-        # python-pptx 嵌入截图
-        from pptx import Presentation
-        from pptx.util import Inches, Emu
+        # python-pptx 嵌入截图（T19：可选依赖，缺包时降级为失败而不是 ImportError）
+        try:
+            from pptx import Presentation
+            from pptx.util import Inches, Emu
+        except ImportError:
+            logger.warning("python-pptx 未安装，无法嵌入截图（依赖 requirements 的 optional 组）")
+            shutil.rmtree(slides_dir, ignore_errors=True)
+            return False
         prs = Presentation()
         prs.slide_width = Emu(12192000)   # 1280px @ 96dpi
         prs.slide_height = Emu(6858000)   # 720px @ 96dpi

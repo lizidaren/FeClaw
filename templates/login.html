@@ -8,6 +8,8 @@
 {% if is_subdomain %}
     {# 子域名：旧版 TOTP #}
     <script>window.ROOT_DOMAIN = "{{ feclaw_domain }}";</script>
+    {# T18a：token-sync 负责同源 mutation 的 CSRF 头注入（登录页也有 TOTP 等 POST） #}
+    <script src="/static/js/token-sync.js"></script>
     <script src="/static/js/auth.js"></script>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -106,13 +108,13 @@
         }
 
         // 检查 Platform 用户是否拥有此 Agent
+        // T18a：会话在服务端 HttpOnly cookie 里，前端不再读 localStorage token、
+        // 也不再手拼 `Authorization: Bearer`（cookie 由浏览器自动携带）。
         (async function checkOwnership() {
             if (!strictOwnership || !agentHash) return;
-            var token = (typeof Auth !== 'undefined') ? Auth.getToken() : localStorage.getItem('feclaw_jwt');
-            if (!token) return;  // 没有 Platform 会话，正常显示 TOTP
             try {
-                var res = await fetch('/api/agent/info?agent_hash=' + agentHash, {
-                    headers: { 'Authorization': 'Bearer ' + token }
+                var res = await fetch('/api/agent/info?agent_hash=' + encodeURIComponent(agentHash), {
+                    credentials: 'same-origin'
                 });
                 if (!res.ok && res.status === 403) {
                     // 此 Agent 不属于当前用户
@@ -158,13 +160,16 @@
             try {
                 var res = await fetch('/api/totp/verify', {
                     method: 'POST',
+                    credentials: 'same-origin',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ agent_hash: hash, code: code })
                 });
                 var data = await res.json();
                 if (res.ok && data.token) {
-                    Auth.setToken(data.token);
-                    window.location.href = '/chat/';
+                    // T18a：不把 token 写 localStorage。服务端已经种了 HttpOnly cookie，
+                    // 这里只做「地址栏 / 目标页」跳转。
+                    await Auth.adoptSessionToken(data.token);
+                    window.location.href = Auth.safeInternalPath('/chat/', '/chat/');
                 } else {
                     document.getElementById('errorMsg').textContent = data.detail || '验证失败';
                     btn.disabled = false; btn.textContent = '验证并登录';
@@ -177,6 +182,10 @@
     </script>
 {% else %}
     {# 根域名：OAuth 已配置时跳转，未配置时显示本地登录 #}
+    {# T18a：root 分支也需要 auth.js —— 登录后跳转白名单、cookie 会话探测都走它 #}
+    <script>window.ROOT_DOMAIN = "{{ feclaw_domain }}";</script>
+    <script src="/static/js/token-sync.js"></script>
+    <script src="/static/js/auth.js"></script>
     <link rel="stylesheet" href="/static/css/base.css">
     <link rel="stylesheet" href="/static/css/glass.css">
     <link rel="stylesheet" href="/static/css/components.css">
@@ -336,23 +345,22 @@
     </div>
 
     <script>
-        // 已登录时跳 dashboard（但需验证 token 有效性，避免 localStorage 脏数据导致死循环）
+        // 已登录时跳 dashboard（T18a：用**服务端 cookie 会话**探测，不再读 localStorage）
+        // 旧实现「localStorage 有字符串就 Bearer 探测」会：① 升级后新登录用户没有
+        // localStorage token ⇒ 永远看不到「已登录」；② 陈旧 token ⇒ 探测 401 后页面
+        // 停在登录页。现在统一问 `/api/oauth/me`（cookie 自动携带），失败就安静显示表单。
         (function() {
             var params = new URLSearchParams(window.location.search);
-            if (params.has('error') || params.has('totp') || params.has('code')) return;
-            var tk = localStorage.getItem('feclaw_jwt') || '';
-            if (!tk) {
-                var m = document.cookie.match(/(?:^|;\\s*)feclaw_jwt=([^;]+)/);
-                if (m) tk = m[1];
-            }
-            if (tk) {
-                fetch('/api/oauth/me', { headers: { 'Authorization': 'Bearer ' + tk } })
-                    .then(function(r) {
-                        if (r.ok) window.location.href = '/dashboard';
-                    })
-                    .catch(function() {});
-                return;
-            }
+            if (params.has('error') || params.has('totp') || params.has('code') || params.has('token')) return;
+            if (window.location.hash && window.location.hash.indexOf('#token=') === 0) return;
+            fetch('/api/oauth/me', { credentials: 'same-origin', cache: 'no-store' })
+                .then(function(r) {
+                    if (r.ok) {
+                        var target = params.get('redirect_to');
+                        window.location.href = Auth.safeInternalPath(target, '/dashboard');
+                    }
+                })
+                .catch(function() {});
         })();
 
         var oauthEnabled = {{ 'true' if oauth_enabled else 'false' }};
@@ -390,6 +398,8 @@
         }
 
         // 本地登录
+        // T18a：成功后**不写 localStorage**（会话在服务端 HttpOnly cookie 里），
+        // 跳转目标走 `Auth.safeInternalPath`（与后端同一套白名单规则）。
         async function doLocalLogin(event) {
             event.preventDefault();
             var username = document.getElementById('usernameInput').value.trim();
@@ -407,27 +417,28 @@
             errorDiv.textContent = '';
 
             try {
+                var params = new URLSearchParams(window.location.search);
+                var payload = { username: username, password: password };
+                var redirectTo = params.get('redirect_to');
+                if (redirectTo) payload.redirect_to = redirectTo;
+
                 var res = await fetch('/api/user/login', {
                     method: 'POST',
+                    credentials: 'same-origin',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ username: username, password: password })
+                    body: JSON.stringify(payload)
                 });
-                var data = await res.json();
-                if (res.ok && data.token) {
-                    // 保存 token
-                    try {
-                        localStorage.setItem('feclaw_jwt', data.token);
-                    } catch(e) {}
-                    // 跳转
-                    var params = new URLSearchParams(window.location.search);
-                    var redirect = data.redirect || params.get('redirect_to') || '/dashboard';
-                    window.location.href = redirect;
+                var data = await res.json().catch(function() { return {}; });
+                if (res.ok) {
+                    // 服务端已种 HttpOnly cookie + CSRF cookie；token 字段仅兼容旧客户端，
+                    // 浏览器路径不保存它。
+                    Auth.redirectAfterLogin(data);
                 } else {
                     var errMsg = data.detail;
                     if (typeof errMsg === 'object' && errMsg !== null) {
                         errMsg = errMsg.message || errMsg.error || JSON.stringify(errMsg);
                     }
-                    errorDiv.textContent = errMsg || '登录失败';
+                    errorDiv.textContent = errMsg || data.message || '登录失败';
                     btn.disabled = false;
                     btn.textContent = '登录';
                 }

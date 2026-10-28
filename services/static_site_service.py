@@ -700,7 +700,18 @@ class StaticSiteService:
         Raises:
             ValueError: 站点不存在或未设置 custom_cname
         """
-        import dns.resolver
+        # T19：dnspython 属于可选依赖；缺包时明确返回“无法校验”，
+        # 不能抛 ImportError 让接口 500。
+        try:
+            import dns.resolver
+        except ImportError:
+            logger.warning("[StaticSite] dnspython 未安装，无法校验 CNAME")
+            return {
+                "verified": False,
+                "expected_cname": None,
+                "actual_cname": None,
+                "error": "dnspython 未安装，无法校验 CNAME（可选依赖缺失）",
+            }
 
         # 获取站点信息
         site = self.get_site(site_id, user_id)

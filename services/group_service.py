@@ -47,7 +47,7 @@ GROUP_ALLOWED_TOOLS: Set[str] = {
     # 文件读取
     "file_read", "file_list",
     # 文件写入
-    "file_write", "file_edit",
+    "file_write", "edit",
     # 知识库
     "knowledge_search", "knowledge_get",
     # 文本处理（无副作用）
@@ -842,6 +842,11 @@ class GroupDispatchService:
         """执行单个群聊工具调用，带超时、权限过滤和统一结果日志。"""
         tools_service = await self._get_or_create_tools(agent_hash, group_id)
 
+        # T03a：工具名先归一化（别名 → registry 标准名），再查 registry / getattr，
+        # 与 AgentExecutor 用同一套名称规则，避免群里和私聊里同一个工具行为不同。
+        from services.tool_registry import get_tool, normalize_tool_name
+        tool_name = normalize_tool_name(tool_name)
+
         async def finalize(value, tool_args=None) -> str:
             result_str = value if isinstance(value, str) else json.dumps(
                 value, ensure_ascii=False
@@ -853,13 +858,39 @@ class GroupDispatchService:
                 call_id=call_id,
             )
 
+        # T04：群聊与私聊必须走同一个执行授权入口（否则同一工具在群里/私聊行为不同）。
+        from services.execution_context import build_context, denial_message
+        from services.execution_policy import authorize_tool
+
+        try:
+            auth_context = build_context(
+                tools_service.user_id,
+                agent_hash,
+                "group",
+                session_id=group_id,
+                allowed_resource_scopes={"agent", "group", "public"},
+            )
+        except Exception as exc:  # 身份解析失败 = 无法证明授权 → 拒绝
+            logger.warning(
+                "[GroupService] execution context unavailable hash=%s group=%s: %s",
+                agent_hash, group_id, exc,
+            )
+            return await finalize("Error: 无法确认执行身份，工具调用被拒绝")
+
+        auth_decision = authorize_tool(auth_context, tool_name, args)
+        if not auth_decision.allowed:
+            logger.warning(
+                "[GroupService] tool denied hash=%s group=%s tool=%s reason=%s",
+                agent_hash, group_id, tool_name, auth_decision.reason,
+            )
+            return await finalize(f"Error: {denial_message(auth_decision)}")
+
         # 权限过滤：不允许的工具直接拒绝
         if tool_name not in GROUP_ALLOWED_TOOLS:
             return await finalize(f"Error: 工具 {tool_name} 不允许在群聊中使用")
 
         valid_args: Dict[str, Any] = {}
         try:
-            from services.tool_registry import get_tool
             tool_entry = get_tool(tool_name)
             if not tool_entry:
                 return await finalize(f"Error: 未知工具 {tool_name}")
@@ -875,17 +906,22 @@ class GroupDispatchService:
                 if key in args:
                     valid_args[key] = args[key]
 
-            # 异步/同步分派
-            coro_or_result = method(**valid_args)
-            if inspect.iscoroutine(coro_or_result):
-                result = await asyncio.wait_for(coro_or_result, timeout=timeout)
+            # 异步/同步分派 —— 必须先 inspect 再调用，**只调用一次**。
+            # 旧实现 `coro_or_result = method(**valid_args)` 先同步执行一遍，发现不是
+            # coroutine 又在线程池里 `method(**valid_args)` 执行第二遍 ⇒ 有副作用的同步
+            # 工具（file_write / create_cron_job / create_share_link …）在群里被执行两次。
+            loop = asyncio.get_event_loop()
+            if inspect.iscoroutinefunction(method):
+                result = await asyncio.wait_for(method(**valid_args), timeout=timeout)
             else:
-                # 同步工具放入默认执行器
-                loop = asyncio.get_event_loop()
                 result = await asyncio.wait_for(
                     loop.run_in_executor(None, lambda: method(**valid_args)),
                     timeout=timeout,
                 )
+                # 少数同步包装器返回 coroutine（ThreadPoolExecutor 封装），只 await，
+                # 不再调用一次。
+                if inspect.iscoroutine(result):
+                    result = await asyncio.wait_for(result, timeout=timeout)
 
             return await finalize(result, valid_args)
 

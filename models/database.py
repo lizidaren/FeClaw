@@ -45,7 +45,10 @@ class User(Base):
     # 校验时与库中比对；登出 +1 ⇒ 旧 token 立即失效。默认 0（不强制登出现有用户）。
     jwt_version = Column(Integer, nullable=False, default=0, server_default="0")
     is_admin = Column(Boolean, default=False)
-    tier = Column(String(20), default="pro")  # "pro" | "enterprise"
+    # T18a/T20a：邀请制注册 + 停用账号所需；默认启用，既有数据由迁移补默认值 1。
+    is_active = Column(Boolean, nullable=False, default=True, server_default="1")
+    # T18a：新用户默认 free（旧行的值不自动改写；服务端默认值由迁移调整）。
+    tier = Column(String(20), default="free")  # "free" | "pro" | "enterprise"
     created_at = Column(DateTime, default=datetime.utcnow)
 
     # 关系
@@ -494,11 +497,78 @@ class AgentTemplate(Base):
     updated_at  = Column(DateTime)
 
 
+class SchemaVersion(Base):
+    """Schema 版本（T20a）。
+
+    每次显式迁移（`scripts/migrate_learning_runtime.py --apply`）按步骤写入一行；
+    `/ready` 读 `MAX(version)` 与 `READY_MIN_SCHEMA_VERSION` 比对。正常启动**不**
+    写这张表之外的 DDL，也不做数据回填。
+    """
+    __tablename__ = "schema_version"
+
+    version = Column(Integer, primary_key=True, nullable=False)
+    step_name = Column(String(128), primary_key=True, nullable=False)
+    applied_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    note = Column(String(255), nullable=True)
+
+
 # 创建所有表
+def load_all_models() -> None:
+    """把所有 model 模块 import 一遍，确保 `Base.metadata` 里的 FK 目标表齐全。
+
+    `create_all` 只认识已经注册到 Base 的表；例如 `groups.organization_id` 的 FK
+    指向 `organizations`，不 import `models.organization` 就会抛
+    `NoReferencedTableError`。main.py 历史上是手工逐个 import 的，这里收敛成一处，
+    供 `init_db()`、迁移脚本与测试复用。
+    """
+    import importlib
+
+    for name in (
+        "agent_profile", "agent_buffer", "chat", "chat_input", "fehub", "group",
+        "kaoxiang_models", "organization", "zentrim",
+    ):
+        try:
+            importlib.import_module(f"models.{name}")
+        except Exception as exc:  # pragma: no cover - 可选模型缺失不阻塞启动
+            logger.debug("model module models.%s not loaded: %s", name, exc)
+
+
 def init_db() -> None:
-    """初始化数据库"""
+    """初始化数据库（只建缺失的表，**不**升级既有表）。
+
+    T20a：
+    * 新部署：`create_all` 建出全部表（含 `schema_version`）。
+    * 既有库：`create_all` 只补缺失的表，不会给老表加列 —— 升级必须跑
+      `scripts/migrate_learning_runtime.py --apply`（`--plan` 只读预览）。
+    """
+    from sqlalchemy import inspect as _inspect
+
+    load_all_models()
+
+    fresh = False
+    try:
+        fresh = "users" not in _inspect(engine).get_table_names()
+    except Exception:  # pragma: no cover - 连不上库时让 create_all 自己报错
+        fresh = False
+
     Base.metadata.create_all(bind=engine)
     logger.info("Database tables created")
+
+    # 全新库：表结构由当前模型直接建出，登记一版 baseline，/ready 才不会误报
+    # “版本缺失”。既有库绝不在这里补版本 —— 那等于用启动过程冒充迁移。
+    if fresh:
+        try:
+            from services.schema_version import SCHEMA_VERSION
+
+            with SessionLocal() as _db:
+                exists = _db.query(SchemaVersion).first()
+                if exists is None:
+                    _db.add(SchemaVersion(version=SCHEMA_VERSION, step_name="baseline",
+                                          note="fresh install created from models"))
+                    _db.commit()
+                    logger.info("Schema baseline version %s recorded", SCHEMA_VERSION)
+        except Exception as _e:  # pragma: no cover - 版本登记失败不阻塞启动
+            logger.warning("Schema baseline recording failed: %s", _e)
 
 
 # 获取数据库会话

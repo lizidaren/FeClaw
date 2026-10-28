@@ -715,7 +715,15 @@ async def _generate_greeting_message(user_id: str, agent_hash: str = None) -> st
             greeting_system += f"\n【用户最近几次会话摘要】\n{recent_context}\n\n你可以参考这些来打招呼，也可忽略。"
 
         from services.agent_tools_service import AgentToolsService
+
         _tools = AgentToolsService(agent_hash)
+
+        # T04：问候路径同样走执行授权（身份来自入参 user_id / agent_hash，服务端事实）。
+        def _greeting_context():
+            from services.execution_context import build_context
+
+            return build_context(user_id, agent_hash, "wechat")
+
         _executor = AgentExecutor(
             agent_hash,
             _tools,
@@ -724,7 +732,8 @@ async def _generate_greeting_message(user_id: str, agent_hash: str = None) -> st
                            "file_write", "file_delete", "edit", "bash",
                            "create_share_link", "generate_totp",
                            "end_conversation", "list_conversations", "load_conversation",
-                           "search_sessions", "auto_suggest_session", "generate_summary"]
+                           "search_sessions", "auto_suggest_session", "generate_summary"],
+            context_factory=_greeting_context,
         )
         _executor._skip_smart_router = True
 

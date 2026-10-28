@@ -1068,7 +1068,12 @@ def _extract_pdf_context_images(pdf_path: str, dpi: int = 150) -> Tuple[List[str
     Returns:
         (image_paths, has_meaningful) — JPEG 路径列表，是否有意义图片
     """
-    import fitz
+    # T19：PyMuPDF 属可选依赖，缺包时返回“没有可用图片”而不是 ImportError
+    try:
+        import fitz
+    except ImportError:
+        logger.warning("PyMuPDF(fitz) 未安装，跳过 PDF 图片上下文提取")
+        return [], False
     image_paths: List[str] = []
     has_meaningful = False
     try:
@@ -1295,8 +1300,15 @@ class ParseFileMixin(AgentToolsServiceBase):
 
                 # 智能视觉决策：质量门控 + LLM 意图判断
                 needs_vlm_ocr = False
+                # T19：PyMuPDF 属可选依赖；缺包时跳过 PDF 视觉增强，文字提取照常
+                _fitz = None
                 if ext == "pdf":
-                    import fitz
+                    try:
+                        import fitz as _fitz
+                    except ImportError:
+                        logger.warning("PyMuPDF(fitz) 未安装，跳过 PDF 视觉增强")
+                if ext == "pdf" and _fitz is not None:
+                    fitz = _fitz
                     garbled_ratio = text.count("\ufffd") / max(len(text), 1) if text else 1.0
 
                     if garbled_ratio > 0.10:

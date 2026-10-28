@@ -54,11 +54,11 @@ DEFAULT_BOOTSTRAP = """# BOOTSTRAP.md - 让我们进行一些初始化
 ## 2. 初始化：文件写入任务
 按顺序执行以下步骤，并将结果写入对应的持久化文件。
 
-### 2.1 写入 `IDENTITY.md`
+### 2.1 写入 `identity.md`
 在与用户讨论后，创建该文件，并按照讨论结果填充内容。样例：
 
 ```markdown
-# IDENTITY.md - 身份卡
+# identity.md - 身份卡
 
 - **名称**：Fe
 - **目标**：帮助用户掌握知识、提高学习效率、建立长期学习习惯
@@ -93,7 +93,7 @@ DEFAULT_BOOTSTRAP = """# BOOTSTRAP.md - 让我们进行一些初始化
 4. **学习计划**：以天/周为单位进行规划，结合遗忘曲线等科学理论为用户主动推送复习内容
 ```
 
-### 2.3 写入 USER.md（用户偏好）
+### 2.3 写入 user.md（用户偏好）
 先询问用户，例如：
 
 你目前处于什么学段（小学/初中/高中/大学）？
@@ -102,7 +102,7 @@ DEFAULT_BOOTSTRAP = """# BOOTSTRAP.md - 让我们进行一些初始化
 你希望我主要提供什么帮助（例.答疑、整理错题、提醒复习）？
 你喜欢详细的解释还是简洁的要点？"
 
-将用户的回答整理成 Markdown 格式，写入 USER.md。
+将用户的回答整理成 Markdown 格式，写入 user.md。
 
 
 ## 3. 异常处理
@@ -119,15 +119,32 @@ class AgentInitService:
     """Agent 初始化服务"""
 
     # 可用工具列表（用于验证）
+    # T03a：提醒工具的标准名是 create_cron_job；schedule_reminder 仅是历史别名，
+    # 仍留在白名单里（否则老配置校验会直接报 Invalid tool name），但新默认值只用标准名。
     AVAILABLE_TOOLS = [
         "file_read", "file_write", "file_list", "file_delete",
         "bash", "python_background", "python_task_list", "python_task_stop", "python_task_output",
-        "web_search", "schedule_reminder", "list_reminders", "cancel_reminder",
+        "web_search", "create_cron_job", "schedule_reminder", "list_reminders", "cancel_reminder",
         "end_conversation", "list_conversations", "load_conversation",
         "generate_summary", "search_sessions", "auto_suggest_session",
         "edit", "spawn_subagent", "list_subagent_roles", "create_share_link", "generate_totp",
         "text_summarize", "text_translate", "image_generate", "html_render"
     ]
+
+    # 兼容别名 → 标准名的映射**不在这里**：唯一权威是
+    # services/tool_registry.py 的 TOOL_NAME_ALIASES + normalize_tool_name()。
+    # （旧名仍留在 AVAILABLE_TOOLS 里只是为了 accept 已存在的旧配置，不产生第二套映射。）
+
+    # 新 Agent 的默认启用工具（单一来源：initialize_agent 与测试都读这里）。
+    # 提醒工具用标准名 create_cron_job；旧名只作 registry 别名。
+    DEFAULT_ENABLED_TOOLS = (
+        "file_read", "file_write", "file_list", "file_delete",
+        "bash", "web_search", "spawn_subagent",
+        "create_share_link", "edit", "list_conversations",
+        "load_conversation", "create_cron_job", "generate_totp",
+        "python_background", "python_task_list", "python_task_output",
+        "get_group_history",
+    )
 
     # 回复风格选项
     VALID_STYLES = ["professional", "friendly", "casual", "formal", "creative"]
@@ -232,7 +249,7 @@ class AgentInitService:
             user_id: 用户 ID
             name: Agent 名称
             description: Agent 描述
-            hash_value: 指定的 4 位 hash（可选）
+            hash_value: 指定的 8 位 hex hash（可选，例如 'ab12cd34'）
             agent_mode: V2 Agent 模式 "classic" | "im"（默认 classic）
 
         Returns:
@@ -245,7 +262,8 @@ class AgentInitService:
             AgentProfile.user_id == user_id
         ).scalar() or 0
         if agent_count >= 100:
-            raise ValueError("每个用户最多创建 50 个 Agent")
+            # 阈值与文案必须一致（历史文案写 50，实际判定 100，用户会被误导）
+            raise ValueError("每个用户最多创建 100 个 Agent")
 
         # 生成唯一的 8 位 hash（收敛到 utils.agent_access.generate_agent_hash 唯一入口）
         if not hash_value:
@@ -295,6 +313,73 @@ class AgentInitService:
 
         return agent
 
+    # ========== 工具名 / 别名归一化（转调 registry 唯一权威） ==========
+
+    @classmethod
+    def normalize_tool_name(cls, name: str) -> str:
+        """把历史别名映射到标准工具名（实现见 tool_registry.TOOL_NAME_ALIASES）。"""
+        from services.tool_registry import normalize_tool_name as _normalize
+        return _normalize(name)
+
+    # ========== 重命名（唯一实现） ==========
+
+    @staticmethod
+    def normalize_alias(alias: str) -> str:
+        """校验并规范化显示名（AgentProfile.name 是 String(100)）。"""
+        if not isinstance(alias, str):
+            raise ValueError("alias 必须是字符串")
+        cleaned = alias.strip()
+        if not cleaned:
+            raise ValueError("alias 不能为空")
+        if len(cleaned) > 100:
+            raise ValueError("alias 过长（最多 100 个字符）")
+        return cleaned
+
+    def rename_agent(self, db: Session, agent: AgentProfile, alias: str) -> AgentProfile:
+        """唯一的重命名实现：只改显示名。
+
+        T03a 第 6 条：设置页重命名过去用 `/api/agent/initialize` 代替 —— 对已初始化
+        Agent 会 400（already initialized），或者在可重入路径上把 persona 当初始化参数
+        重写。重命名只能走这里（HTTP 层是 `PATCH /api/user/agents/{hash}/settings`
+        的 `alias` 字段，或 console 侧同契约的 PATCH）：
+
+        只写 name / updated_at，不动 persona、tools、config、status、initialized_at，
+        也不创建/覆盖任何 VFS 文件，不触发协处理器或模板绑定。
+        """
+        agent.name = self.normalize_alias(alias)
+        agent.updated_at = datetime.utcnow()
+        db.add(agent)
+        db.commit()
+        try:
+            db.refresh(agent)
+        except Exception:  # noqa: BLE001 —— 刷新失败不影响已提交结果
+            pass
+        logger.info(f"Renamed agent hash={agent.hash} -> {agent.name!r}（未改人格/初始化状态）")
+        return agent
+
+    # ========== 初始化人格写入判定（可测试的纯逻辑） ==========
+
+    @staticmethod
+    def resolve_init_persona(existing_persona: Optional[str],
+                             requested_persona: Optional[str],
+                             template_persona: Optional[str],
+                             fallback_persona: Optional[str]) -> Tuple[Optional[str], bool]:
+        """决定 initialize_agent 是否写 persona。
+
+        Returns:
+            (内容, 是否写入)
+
+        规则：
+        - 已有非空 persona（重复初始化 / retry / 前端误用初始化当重命名）⇒ 不写，
+          返回已有内容。这是「retry 初始化不改 custom files」与「重命名不改人格」的
+          共同保证。
+        - 否则按 请求 > 模板 > 内置默认 的优先级取内容写入（首次初始化）。
+        """
+        if existing_persona is not None and str(existing_persona).strip():
+            return existing_persona, False
+        chosen = requested_persona or template_persona or fallback_persona
+        return chosen, True
+
     def initialize_agent(
         self,
         db: Session,
@@ -327,15 +412,22 @@ class AgentInitService:
         agent_hash = agent.hash
         user_id = agent.user_id
 
-        # 1. 解析 persona：优先级 persona > template_id > 内置 default 模板
-        persona_content = persona
-        if not persona_content and template_id:
+        # 1. 解析 persona（T03a/T10：初始化不是重命名/重配人格的通道）
+        #    已有 persona 时**不再重写** —— 否则「用初始化代替重命名」的旧前端一保存
+        #    就会把用户的人格覆盖成内置默认文本。
+        existing_persona = self._read_config_db(agent_hash, "persona", db=db)
+        template_persona = None
+        if template_id:
             from services.template_manager import TemplateManager
-            persona_content = TemplateManager.get_persona(db, template_id)
-        if not persona_content:
-            # 回退到内置 default 模板
+            template_persona = TemplateManager.get_persona(db, template_id)
+        fallback_persona = None
+        if not (existing_persona and str(existing_persona).strip()):
             from services.template_manager import TemplateManager
-            persona_content = TemplateManager.get_persona(db, "internal::default")
+            fallback_persona = TemplateManager.get_persona(db, "internal::default")
+
+        persona_content, should_write_persona = self.resolve_init_persona(
+            existing_persona, persona, template_persona, fallback_persona,
+        )
 
         # 记录 template_id 到 AgentProfile（如提供）
         if template_id:
@@ -345,20 +437,14 @@ class AgentInitService:
             if tpl:
                 agent.template_version = tpl.version
 
-        # 保存 persona 到数据库
-        self._write_config_db(agent_hash, "persona", persona_content)
+        # 保存 persona 到数据库（仅首次初始化/配置缺失时；见 resolve_init_persona）
+        if should_write_persona:
+            self._write_config_db(agent_hash, "persona", persona_content)
 
         # 2. 保存 tools 配置到数据库（仅当不存在时写入默认值）
         # IM Agent 默认启用 get_group_history（IM 模式主要在群聊中工作，需要读群历史）
         default_tools = {
-            "enabled": [
-                "file_read", "file_write", "file_list", "file_delete",
-                "bash", "web_search", "spawn_subagent",
-                "create_share_link", "edit", "list_conversations",
-                "load_conversation", "schedule_reminder", "generate_totp",
-                "python_background", "python_task_list", "python_task_output",
-                "get_group_history",
-            ],
+            "enabled": list(self.DEFAULT_ENABLED_TOOLS),
             "disabled": []
         }
         tools_content = tools_config or default_tools

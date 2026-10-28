@@ -136,7 +136,20 @@ class ChatService:
             self.tools = AgentToolsService(agent_hash=agent_hash, group_id=group_id)
         else:
             self.tools = AgentToolsService(agent_hash=agent_hash)
-        self.executor = AgentExecutor(agent_hash, self.tools)
+
+        # T04：执行授权上下文由本渠道构造（身份/渠道是服务端事实，模型无法影响）。
+        # 惰性求值：user_id 是懒加载属性，构造 ChatService 时不应额外打 DB。
+        def _execution_context():
+            from services.execution_context import build_context
+            return build_context(
+                self.user_id,
+                self.agent_hash,
+                self.channel or "api",
+                session_id=self.session_id,
+            )
+
+        self.executor = AgentExecutor(agent_hash, self.tools,
+                                      context_factory=_execution_context)
         self.workspace_root = get_agent_workspace_root(agent_hash)
 
         self.vfs = VirtualFileSystem(agent_hash=agent_hash)
@@ -885,29 +898,51 @@ class ChatService:
         return msgs
 
     async def _resolve_references(self, text: str) -> str:
-        """自动解析消息中的 [reference:xxx] 引用令牌，替换为实际内容"""
+        """自动解析消息中的 [reference:xxx] 引用令牌，替换为实际内容
+
+        边界（T17a）：引用必须仍挂在**存活的**父分享下，且父分享若设了密码
+        必须已通过密码校验。父分享过期/撤销/需要密码/路径非法时一律跳过注入
+        （fail closed）—— 旧实现直接按 ref_hash 读 ShareReference，会把已撤销
+        分享里的内容继续注入模型上下文。
+        """
         import re as _re
         refs = _re.findall(r'\[reference:([a-zA-Z0-9]+)\]', text)
         if not refs:
             return text
+
         try:
-            from models.database import get_session, ShareReference
+            from services.share_service import (
+                ShareBoundaryError,
+                load_authorized_reference,
+            )
+        except Exception as e:  # pragma: no cover - 依赖缺失时不影响主对话
+            logger.warning(f"[ChatService] Reference resolution unavailable: {e}")
+            return text
+
+        try:
             with get_session() as db:
                 for ref_hash in set(refs):
-                    ref = db.query(ShareReference).filter(
-                        ShareReference.ref_hash == ref_hash
-                    ).first()
-                    if ref and ref.selected_text:
-                        insert = f"\n\n> 📖 引用内容：{ref.selected_text}"
-                        if ref.context_before or ref.context_after:
-                            ctx = ""
-                            if ref.context_before:
-                                ctx += f"...{ref.context_before[-150:]}"
-                            ctx += ref.selected_text
-                            if ref.context_after:
-                                ctx += f"{ref.context_after[:150]}..."
-                            insert += f"\n> 📖 上下文（供参考）：{ctx}"
-                        text = text + insert
+                    try:
+                        ref = load_authorized_reference(db, ref_hash)
+                    except ShareBoundaryError as boundary_err:
+                        logger.info(
+                            "[ChatService] Reference skipped: ref=%s reason=%s",
+                            ref_hash, boundary_err.reason,
+                        )
+                        continue
+                    selected = (ref.get("selected_text") or "").strip()[:2000]
+                    if not selected:
+                        continue
+                    insert = f"\n\n> 📖 引用内容：{selected}"
+                    before = (ref.get("context_before") or "")[-150:]
+                    after = (ref.get("context_after") or "")[:150]
+                    if before or after:
+                        ctx = f"...{before}" if before else ""
+                        ctx += selected
+                        if after:
+                            ctx += f"{after}..."
+                        insert += f"\n> 📖 上下文（供参考）：{ctx}"
+                    text = text + insert
         except Exception as e:
             logger.warning(f"[ChatService] Reference resolution failed: {e}")
         return text

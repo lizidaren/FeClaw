@@ -42,6 +42,10 @@
     <script src="/static/cm-addon-matchbrackets.js"></script>
     <!-- Markdown 渲染 -->
     <script src="/static/marked.min.js"></script>
+    <!-- T16：自托管 DOMPurify（锁定 3.2.4，禁止改回 CDN） -->
+    <script src="/static/vendor/dompurify.min.js"></script>
+    <!-- T16：唯一安全渲染边界 marked → DOMPurify（加载顺序不可调换） -->
+    <script src="/static/js/safe-render.js"></script>
     <!-- COS SDK (本地托管，避免 unpkg 被墙) -->
     <script src="/static/cos-js-sdk-v5.min.js"></script>
     <style>
@@ -524,9 +528,23 @@
                 var mdContent = editor.getValue();
                 var previewEl = document.getElementById('markdownPreview');
                 if (previewEl) {
-                    var renderer = window.marked || { parse: function(t) { return '<pre>' + escapeHtml(t) + '</pre>'; } };
-                    previewEl.innerHTML = renderer.parse ? renderer.parse(mdContent) : mdContent;
+                    previewEl.innerHTML = renderMarkdownSafe(mdContent);
                 }
+            }
+        }
+
+        // T16：唯一安全渲染边界（marked → DOMPurify）。
+        // 安全边界未加载时退化为纯文本，绝不注入未消毒 HTML。
+        function renderMarkdownSafe(text) {
+            var sr = window.FeClawSafeRender;
+            if (!sr || typeof sr.renderMarkdownSafe !== 'function') {
+                return escapeHtml(text || '');
+            }
+            try {
+                return sr.renderMarkdownSafe(text || '');
+            } catch (e) {
+                console.error('renderMarkdownSafe error:', e);
+                return escapeHtml(text || '');
             }
         }
 
@@ -537,7 +555,9 @@
             const tag = STORAGE_BACKEND === 'local'
                 ? ' <span style="display:inline-block;margin-left:8px;padding:2px 8px;background:#fff3cd;color:#856404;border-radius:4px;font-size:11px;">💾 本地存储</span>'
                 : ' <span style="display:inline-block;margin-left:8px;padding:2px 8px;background:#d1ecf1;color:#0c5460;border-radius:4px;font-size:11px;">☁️ COS</span>';
-            el.innerHTML = 'Agent: ' + agentHash + tag;
+            // T16：agentHash 来自 URL（不可信），只走 textContent；徽标是固定常量 HTML
+            el.textContent = 'Agent: ' + (agentHash || '');
+            el.insertAdjacentHTML('beforeend', tag);
         }
 
         function logout() {
@@ -743,8 +763,19 @@
                 updateBreadcrumb();
             }).catch(e => {
                 listSettled = true;   // 失败也算「有结果」，别被超时提示盖掉
-                document.getElementById('fileList').innerHTML =
-                    '<div class="empty-state"><div class="icon">❌</div><p>加载失败: ' + e.message + '</p></div>';
+                // T16：错误信息是纯文本，用 textContent 组装，不做 HTML 拼接
+                const listEl = document.getElementById('fileList');
+                listEl.textContent = '';
+                const wrap = document.createElement('div');
+                wrap.className = 'empty-state';
+                const icon = document.createElement('div');
+                icon.className = 'icon';
+                icon.textContent = '❌';
+                const msgEl = document.createElement('p');
+                msgEl.textContent = '加载失败: ' + ((e && e.message) || e || '未知错误');
+                wrap.appendChild(icon);
+                wrap.appendChild(msgEl);
+                listEl.appendChild(wrap);
             });
         }
 
@@ -816,17 +847,34 @@
             document.getElementById('configInfoBadge').style.display = isConfig ? 'inline' : 'none';
 
             const bc = document.getElementById('breadcrumb');
-            if (!currentPath) {
-                bc.innerHTML = '<a href="/">📁 根目录</a>';
-            } else {
+            // T16：路径名来自 VFS（可能由模型/用户创建），
+            // 旧实现用 escapeJsStr 拼 HTML 文本，<>& 不转义 → 会注入标签；
+            // 现在用 DOM 构建，文本走 textContent，点击走 addEventListener（不用 javascript: href）。
+            bc.textContent = '';
+            const rootLink = document.createElement('a');
+            rootLink.href = '#';
+            rootLink.textContent = '📁 根目录';
+            rootLink.addEventListener('click', function (e) {
+                e.preventDefault();
+                navigate('');
+            });
+            bc.appendChild(rootLink);
+            if (currentPath) {
                 const parts = currentPath.split('/').filter(p => p);
-                let html = '<a href="javascript:navigate(\'\')">📁 根目录</a>';
                 let path = '';
-                parts.forEach((part, i) => {
+                parts.forEach(function (part) {
                     path += (path ? '/' : '') + part;
-                    html += ' / <a href="javascript:navigate(\'' + escapeJsStr(path) + '\')">' + escapeJsStr(part) + '</a>';
+                    bc.appendChild(document.createTextNode(' / '));
+                    const link = document.createElement('a');
+                    link.href = '#';
+                    link.textContent = part;
+                    const target = path;
+                    link.addEventListener('click', function (e) {
+                        e.preventDefault();
+                        navigate(target);
+                    });
+                    bc.appendChild(link);
                 });
-                bc.innerHTML = html;
             }
         }
 
@@ -983,7 +1031,8 @@
                 if (saveBtn) saveBtn.textContent = '保存';
                 var msg = '保存失败' + (err && err.message ? ': ' + err.message : '');
                 var p = document.querySelector('.unsaved-dialog p');
-                if (p) p.innerHTML = msg + '<br>请重试或选择不保存';
+                // T16：错误文本只用 textContent
+                if (p) p.textContent = msg + '，请重试或选择不保存';
             });
         }
 
@@ -1035,9 +1084,11 @@
             if (!fileInfo) return;
 
             document.getElementById('dotMenuFileName').textContent = '📄 ' + fileInfo.name;
-            document.getElementById('dotMenuMeta').innerHTML =
-                '修改时间: ' + formatTime(fileInfo.updated_at) + '<br>' +
-                '文件大小: ' + formatSize(fileInfo.size);
+            // T16：文件元信息用 textContent + 固定 <br>，不拼接 innerHTML
+            const metaEl = document.getElementById('dotMenuMeta');
+            metaEl.textContent = '修改时间: ' + formatTime(fileInfo.updated_at);
+            metaEl.appendChild(document.createElement('br'));
+            metaEl.appendChild(document.createTextNode('文件大小: ' + formatSize(fileInfo.size)));
 
             // 定位面板
             const btn = event.currentTarget;
@@ -1258,7 +1309,8 @@
         function showMarkdownPreview(mdContent) {
             hideAllPanes();
             document.getElementById('editorContainer').style.display = 'none';
-            document.getElementById('markdownPreview').innerHTML = marked.parse(mdContent);
+            // T16：文件预览与聊天/群聊/persona 同一安全边界
+            document.getElementById('markdownPreview').innerHTML = renderMarkdownSafe(mdContent);
             document.getElementById('markdownPreview').classList.add('active');
             document.getElementById('editorPaneHeader').style.display = 'none';
 
@@ -1380,7 +1432,7 @@
                 } else if (type === 'number') {
                     textareaEl.style.display = 'none';
                     widgetEl.style.display = 'block';
-                    widgetEl.innerHTML = '<input type="number" value="' + rawVal.trim() + '" id="configNumberInput" aria-label="数值" ' +
+                    widgetEl.innerHTML = '<input type="number" value="' + escapeAttr(rawVal.trim()) + '" id="configNumberInput" aria-label="数值" ' +
                         'style="width:200px;padding:12px;background:#1e1e1e;color:#d4d4d4;border:1px solid #3c3c3c;border-radius:6px;font-size:14px;outline:none">';
                 } else if (type === 'json') {
                     textareaEl.style.display = 'block';

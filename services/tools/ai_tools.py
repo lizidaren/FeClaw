@@ -163,7 +163,6 @@ class AIToolsMixin(AgentToolsServiceBase):
 
     # ========== 模式切换 ==========
 
-    @tool(description="切换 Agent 工作模式", category="agent")
     # ========== 权限工具 ==========
 
     @tool(description="查询文件权限状态", category="agent")
@@ -226,7 +225,19 @@ class AIToolsMixin(AgentToolsServiceBase):
             - files_modified: list[str]
             - failure_reason: str | None
         """
-        from openai import OpenAI
+        # T19：openai 属于可选依赖，缺包时降级为“未摘要”而不是抛 ImportError
+        try:
+            from openai import OpenAI
+        except ImportError:
+            logger.warning(
+                "[spawn_subagent] openai SDK 未安装，跳过结构化摘要（返回未摘要结果）")
+            return {
+                "task_completed": True,
+                "key_results": output[:500],
+                "files_created": [],
+                "files_modified": [],
+                "failure_reason": "openai SDK 未安装，未能生成结构化摘要",
+            }
 
         summary_prompt = f"""请分析以下子 Agent 任务输出，生成结构化摘要。
 
@@ -505,10 +516,26 @@ class AIToolsMixin(AgentToolsServiceBase):
                 logger.debug(f"[SPAWN_SUBAGENT] image_base64 length={len(image_base64)}")
 
             subagent_tools = AgentToolsService(self.agent_hash)
+
+            # T04：子助手只能用**只读子上下文**（父上下文的子集；不能继承代码执行/
+            # 发布/发送能力）。身份仍绑定同一 user/agent，范围收窄到 agent。
+            def _subagent_context():
+                from services.execution_context import build_context
+                from services.execution_policy import POLICY_MODE_READONLY
+
+                return build_context(
+                    self.user_id,
+                    self.agent_hash,
+                    "subagent",
+                    policy_mode=POLICY_MODE_READONLY,
+                    allowed_resource_scopes={"agent"},
+                )
+
             executor = AgentExecutor(
                 self.agent_hash,
                 subagent_tools,
                 blocked_tools=SUBAGENT_BLOCKED_TOOLS,
+                context_factory=_subagent_context,
             )
 
             async def _run():

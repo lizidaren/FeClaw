@@ -17,7 +17,10 @@ class TestUploadServiceCreateSession:
         """create_session returns session_id and presigned_put_url"""
         svc = UploadService()
 
-        with patch("services.upload_service.CosStorage") as mock_cos:
+        # CosStorage 现在是函数内延迟导入（services/upload_service.py 里
+        # `from services.storage_service import CosStorage`），模块上并无该名字，
+        # 因此必须 patch 它的真实定义处 services.storage_service。
+        with patch("services.storage_service.CosStorage") as mock_cos:
             mock_instance = MagicMock()
             mock_cos.return_value = mock_instance
             mock_instance.generate_presigned_put_url.return_value = "https://cos.example.com/put"
@@ -32,7 +35,10 @@ class TestUploadServiceCreateSession:
         """create_session stores session in memory"""
         svc = UploadService()
 
-        with patch("services.upload_service.CosStorage") as mock_cos:
+        # CosStorage 现在是函数内延迟导入（services/upload_service.py 里
+        # `from services.storage_service import CosStorage`），模块上并无该名字，
+        # 因此必须 patch 它的真实定义处 services.storage_service。
+        with patch("services.storage_service.CosStorage") as mock_cos:
             mock_instance = MagicMock()
             mock_cos.return_value = mock_instance
             mock_instance.generate_presigned_put_url.return_value = "https://cos.example.com/put"
@@ -49,7 +55,10 @@ class TestUploadServiceCreateSession:
         """create_session generates unique IDs"""
         svc = UploadService()
 
-        with patch("services.upload_service.CosStorage") as mock_cos:
+        # CosStorage 现在是函数内延迟导入（services/upload_service.py 里
+        # `from services.storage_service import CosStorage`），模块上并无该名字，
+        # 因此必须 patch 它的真实定义处 services.storage_service。
+        with patch("services.storage_service.CosStorage") as mock_cos:
             mock_instance = MagicMock()
             mock_cos.return_value = mock_instance
             mock_instance.generate_presigned_put_url.return_value = "https://cos.example.com/put"
@@ -70,7 +79,10 @@ class TestUploadServiceConfirmUpload:
         """confirm_upload returns presigned GET URL"""
         svc = UploadService()
 
-        with patch("services.upload_service.CosStorage") as mock_cos:
+        # CosStorage 现在是函数内延迟导入（services/upload_service.py 里
+        # `from services.storage_service import CosStorage`），模块上并无该名字，
+        # 因此必须 patch 它的真实定义处 services.storage_service。
+        with patch("services.storage_service.CosStorage") as mock_cos:
             mock_instance = MagicMock()
             mock_cos.return_value = mock_instance
             mock_instance.generate_presigned_put_url.return_value = "https://cos.example.com/put"
@@ -95,7 +107,10 @@ class TestUploadServiceConfirmUpload:
         """confirm_upload returns None for expired session"""
         svc = UploadService()
 
-        with patch("services.upload_service.CosStorage") as mock_cos:
+        # CosStorage 现在是函数内延迟导入（services/upload_service.py 里
+        # `from services.storage_service import CosStorage`），模块上并无该名字，
+        # 因此必须 patch 它的真实定义处 services.storage_service。
+        with patch("services.storage_service.CosStorage") as mock_cos:
             mock_instance = MagicMock()
             mock_cos.return_value = mock_instance
             mock_instance.generate_presigned_put_url.return_value = "https://cos.example.com/put"
@@ -115,7 +130,10 @@ class TestUploadServiceConfirmUpload:
         """confirm_upload sets filename on session"""
         svc = UploadService()
 
-        with patch("services.upload_service.CosStorage") as mock_cos:
+        # CosStorage 现在是函数内延迟导入（services/upload_service.py 里
+        # `from services.storage_service import CosStorage`），模块上并无该名字，
+        # 因此必须 patch 它的真实定义处 services.storage_service。
+        with patch("services.storage_service.CosStorage") as mock_cos:
             mock_instance = MagicMock()
             mock_cos.return_value = mock_instance
             mock_instance.generate_presigned_put_url.return_value = "https://cos.example.com/put"
@@ -139,7 +157,10 @@ class TestUploadServiceGetSession:
         """get_session returns session when exists"""
         svc = UploadService()
 
-        with patch("services.upload_service.CosStorage") as mock_cos:
+        # CosStorage 现在是函数内延迟导入（services/upload_service.py 里
+        # `from services.storage_service import CosStorage`），模块上并无该名字，
+        # 因此必须 patch 它的真实定义处 services.storage_service。
+        with patch("services.storage_service.CosStorage") as mock_cos:
             mock_instance = MagicMock()
             mock_cos.return_value = mock_instance
             mock_instance.generate_presigned_put_url.return_value = "https://cos.example.com/put"
@@ -163,7 +184,10 @@ class TestUploadServiceGetSession:
         """get_session returns None and cleans up expired session"""
         svc = UploadService()
 
-        with patch("services.upload_service.CosStorage") as mock_cos:
+        # CosStorage 现在是函数内延迟导入（services/upload_service.py 里
+        # `from services.storage_service import CosStorage`），模块上并无该名字，
+        # 因此必须 patch 它的真实定义处 services.storage_service。
+        with patch("services.storage_service.CosStorage") as mock_cos:
             mock_instance = MagicMock()
             mock_cos.return_value = mock_instance
             mock_instance.generate_presigned_put_url.return_value = "https://cos.example.com/put"
@@ -218,7 +242,10 @@ class TestUploadServiceEdgeCases:
         """confirm_upload removes session from storage"""
         svc = UploadService()
 
-        with patch("services.upload_service.CosStorage") as mock_cos:
+        # CosStorage 现在是函数内延迟导入（services/upload_service.py 里
+        # `from services.storage_service import CosStorage`），模块上并无该名字，
+        # 因此必须 patch 它的真实定义处 services.storage_service。
+        with patch("services.storage_service.CosStorage") as mock_cos:
             mock_instance = MagicMock()
             mock_cos.return_value = mock_instance
             mock_instance.generate_presigned_put_url.return_value = "https://cos.example.com/put"
@@ -235,7 +262,10 @@ class TestUploadServiceEdgeCases:
         """Multiple sessions can coexist"""
         svc = UploadService()
 
-        with patch("services.upload_service.CosStorage") as mock_cos:
+        # CosStorage 现在是函数内延迟导入（services/upload_service.py 里
+        # `from services.storage_service import CosStorage`），模块上并无该名字，
+        # 因此必须 patch 它的真实定义处 services.storage_service。
+        with patch("services.storage_service.CosStorage") as mock_cos:
             mock_instance = MagicMock()
             mock_cos.return_value = mock_instance
             mock_instance.generate_presigned_put_url.return_value = "https://cos.example.com/put"
@@ -251,7 +281,10 @@ class TestUploadServiceEdgeCases:
         """COS key follows expected format"""
         svc = UploadService()
 
-        with patch("services.upload_service.CosStorage") as mock_cos:
+        # CosStorage 现在是函数内延迟导入（services/upload_service.py 里
+        # `from services.storage_service import CosStorage`），模块上并无该名字，
+        # 因此必须 patch 它的真实定义处 services.storage_service。
+        with patch("services.storage_service.CosStorage") as mock_cos:
             mock_instance = MagicMock()
             mock_cos.return_value = mock_instance
             mock_instance.generate_presigned_put_url.return_value = "https://cos.example.com/put"

@@ -13,6 +13,7 @@ CSRF 校验（P0-A-2 修复）：`/callback` 不再静默 fallback；state cooki
 """
 
 import secrets
+import re
 import time as _time
 from typing import Optional
 from urllib.parse import urlencode, urlparse
@@ -31,13 +32,21 @@ from models.database import get_db, SessionLocal, User, UserLink
 from utils.auth_dependencies import (
     get_current_user,
     get_current_token_payload,
+    safe_internal_redirect_path,
 )
 from utils.auth_cookies import (
     AUTH_COOKIE_ID_TOKEN,
     AUTH_COOKIE_JWT,
     AUTH_COOKIE_PLATFORM_TOKEN,
     clear_auth_cookies,
+    clear_session_cookies,
     set_auth_cookie,
+    set_session_cookie,
+)
+from utils.csrf import (
+    csrf_protect,
+    generate_csrf_token,
+    set_csrf_cookie,
 )
 from utils.oauth_helpers import (
     decode_refresh_token,
@@ -59,19 +68,16 @@ STATE_COOKIE_MAX_AGE = 600  # 10 分钟
 
 
 def _is_safe_redirect(url: str) -> str:
-    # Q21/L9：原实现 `url.startswith('/')` 会接受 `//evil.com`（协议相对 URL 外跳），
-    # 属埋雷。改为拒绝 `//` 前缀，其余逻辑不变。
-    if not url:
-        return '/'
-    if url.startswith('/') and not url.startswith('//'):
-        return url
-    parsed = urlparse(url)
-    if not parsed.netloc:
-        return url
-    allowed_hosts = {'localhost', '127.0.0.1', '::1'}
-    if parsed.netloc.split(':')[0] in allowed_hosts:
-        return url
-    return '/'
+    """登录后回跳的**唯一**白名单判定（T18a）。
+
+    历史实现只拒 `//`，仍接受 `\\evil.com`、`/%09//evil`、`javascript:` 等；
+    现统一委托 `utils.auth_dependencies.safe_internal_redirect_path`
+    （与 `routers/user.py:login`、`templates/login.html` 的 JS 镜像同一套向量）。
+
+    保留本函数名以兼容既有调用点/测试；语义收窄为「只接受内部规范相对路径」。
+    """
+    return safe_internal_redirect_path(url, default="/")
+
 
 
 @router.get("/login")
@@ -121,10 +127,13 @@ async def oauth_callback(
 
     # 用户取消授权
     if error:
-        logger.info(f"OAuth callback with error: {error} ({error_description})")
+        # T18a：`error` 来自 query，回显进 Location 前必须收敛字符集
+        # （否则可拼 CRLF / 额外 query 参数 / 长串污染日志）
+        safe_error = re.sub(r"[^A-Za-z0-9_.\-]{1,64}", "", str(error))[:64] or "unknown"
+        logger.info(f"OAuth callback with error: {safe_error} ({error_description})")
         domain = settings.FECLAW_PUBLIC_URL or ""
         base = f"https://{domain}"
-        redirect_url = f"{base}/login?error={error}"
+        redirect_url = f"{base}/login?error={safe_error}"
         return RedirectResponse(url=redirect_url)
 
     # 从 Cookie 读取 state，不依赖服务端内存
@@ -212,16 +221,15 @@ async def oauth_callback(
 
     # P0-2 修复：token 只走 cookie，不暴露在 URL 中
     # Q1 修复：写入统一走 auth_cookies（与登出清除共用同一 domain 推导，保证删得掉）
-    response = RedirectResponse(url=redirect_to)
+    # T18a：改为 **HttpOnly** 会话 cookie（此前 httponly=False 是因为旧前端要从
+    # document.cookie 读 token；前端已改为完全依赖 cookie，JS 不再需要读到它）。
+    response = RedirectResponse(url=_is_safe_redirect(redirect_to))
 
-    # 2026-10-02 修：前端架构（token-sync.js + 各页 localStorage.getItem('feclaw_jwt')
-    # + Authorization: Bearer）**要求 JS 能读到这个 token**；若设 HttpOnly，
-    # 前端读不到 ⇒ 页面把自己踢回 /login ⇒ SSO 登录死循环（当天线上实测）。
-    # 安全代价已记录：XSS 可窃取该 token ⇒ 后续应改「服务端注入 token」而非放宽 cookie。
-    set_auth_cookie(
-        response, AUTH_COOKIE_JWT, local_jwt,
-        httponly=False, secure=True, max_age=settings.JWT_EXPIRE_HOURS * 3600,
-    )
+    set_session_cookie(response, local_jwt)
+
+    # T18a：同时下发 CSRF token（可读 cookie），浏览器后续 mutation 直接可用，
+    # 不需要额外请求。/api/oauth/me 也会在缺 cookie 时补发。
+    set_csrf_cookie(response, generate_csrf_token())
 
     # P1-4 修复：保存 id_token 到 cookie，供 logout 时传递 id_token_hint
     if id_token:
@@ -622,14 +630,22 @@ async def oauth_mobile_login(
 
 
 @router.post("/logout")
-async def oauth_logout(request: Request):
+async def oauth_logout(
+    request: Request,
+    _csrf: None = Depends(csrf_protect),
+):
     """
     OAuth 注销 - 清除本地 cookie 并返回 Platform end_session 跳转地址
+
+    T18a：
+    - 过 `csrf_protect`（跨站 POST 只能让用户登出，属干扰而非提权，但仍要挡）；
+    - 清除逻辑统一为 `clear_session_cookies`：会话 cookie（host-only + domain 变体）
+      + Agent 作用域 TOTP cookie + CSRF cookie；否则「登出后 CSRF cookie 还能配新会话」。
     """
     from services.oauth_service import OAuthService
 
     # P1-4 修复：传递 id_token_hint，让 Platform 端正确完成 RP-Initiated Logout
-    id_token_hint = request.cookies.get("feclaw_id_token", "")
+    id_token_hint = request.cookies.get(AUTH_COOKIE_ID_TOKEN, "")
     oauth_svc = OAuthService()
     response = JSONResponse(content={
         "status": "success",
@@ -641,7 +657,7 @@ async def oauth_logout(request: Request):
     })
 
     # 清除 FeClaw 自身 cookie（Q1：统一走 auth_cookies，带上写入时的 domain）
-    clear_auth_cookies(response, names=(AUTH_COOKIE_JWT, AUTH_COOKIE_ID_TOKEN))
+    clear_session_cookies(response, request=request)
 
     return response
 
@@ -670,21 +686,32 @@ async def oauth_logout_get(
                     safe_redirect = redirect
             except Exception:
                 pass
+        # T18a：内部相对路径也走同一白名单（`//evil`、`\evil` 一律回落 /login）
+        if safe_redirect != redirect:
+            candidate = safe_internal_redirect_path(redirect, default="")
+            if candidate:
+                safe_redirect = candidate
 
     response = RedirectResponse(url=safe_redirect, status_code=302)
     # Q1：统一走 auth_cookies，带上写入时的 domain，否则删不掉
     clear_auth_cookies(response, names=(AUTH_COOKIE_JWT, AUTH_COOKIE_ID_TOKEN))
+    clear_session_cookies(response, request=request)
     return response
 
 
 @router.get("/me")
 async def oauth_me(
+    request: Request,
     user: User = Depends(get_current_user),
 ):
     """
     获取当前登录用户信息
+
+    T18a：前端用它做「cookie 会话是否有效」的**唯一**探测点
+    （不再读 localStorage token）。如果浏览器还没有 CSRF cookie，这里补发一个
+    —— 这样老会话用户（升级前登录、没有 CSRF cookie）也不需要先登出再登录。
     """
-    return JSONResponse(content={
+    response = JSONResponse(content={
         "status": "success",
         "user": {
             "id": user.id,
@@ -693,3 +720,10 @@ async def oauth_me(
             "created_at": user.created_at.isoformat() if user.created_at else None
         }
     })
+    try:
+        from utils.csrf import csrf_cookie_name
+        if not request.cookies.get(csrf_cookie_name()):
+            set_csrf_cookie(response, generate_csrf_token(), request)
+    except Exception:  # pragma: no cover - 补发失败不影响用户信息
+        logger.debug("[oauth.me] CSRF cookie 补发失败", exc_info=True)
+    return response

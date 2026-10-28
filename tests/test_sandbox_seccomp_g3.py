@@ -112,7 +112,9 @@ class TestNetnsPrivateNets:
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
             "scripts", "init_sandbox_netns.sh",
         )
-        with open(script) as f:
+        # 显式 utf-8：脚本含中文注释，Windows 默认 locale(GBK/cp936) 会 UnicodeDecodeError。
+        # 本用例只做文本 grep，不需要 Linux 能力 —— 任何平台都应能跑。
+        with open(script, encoding="utf-8") as f:
             content = f.read()
         m = re.search(r"PRIVATE_NETS=\((.*?)\)", content, re.S)
         assert m is not None, "PRIVATE_NETS not found in init_sandbox_netns.sh"

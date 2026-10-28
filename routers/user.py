@@ -1,6 +1,20 @@
 """
 用户 API 路由
 用户注册、登录等功能
+
+T18a（认证迁移 / CSRF / 注册门禁 / 限流统一）在本文件落的点：
+
+- **注册门禁**：`REGISTRATION_MODE=open|invite|closed`，默认 invite；invite 需要
+  `REGISTRATION_INVITE_CODE`，未配置邀请码按 closed 处理（fail-closed）；
+  注册接口有 IP 限流与最小审计日志。
+- **登录**：签发 **HttpOnly** 会话 cookie（`utils.auth_cookies.set_session_cookie`），
+  同时仍返回 `token` 字段给未升级的移动端 / 桌面端（一次性过渡）；
+  响应体不再隐含「前端必须把 token 存 localStorage」。
+- **CSRF**：登录/注册/改密/会话接管都过 `utils.csrf.csrf_protect`
+  （Origin/Referer + 双提交 token）；成功后下发可读 CSRF cookie。
+- **redirect_to 白名单**：只接受内部规范相对路径（`utils.auth_dependencies.safe_internal_redirect_path`）。
+- **限流统一**：登录 / 改密 / 注册全部走 `services.rate_limiter` 门面，
+  Redis 后端不可用时的 `closed` 策略映射为 503（不静默放无限）。
 """
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Query
@@ -9,6 +23,7 @@ from sqlalchemy.orm import Session
 from datetime import datetime, date
 from pydantic import BaseModel
 from typing import Optional, List
+import hmac
 import logging
 import re
 import time
@@ -16,8 +31,31 @@ import time
 from config import settings
 from models.database import get_db, User, AgentProfile, ChatHistory, FilePermission
 from models.group import GroupMoments
-from utils.auth import hash_password, verify_password, create_jwt_token, get_current_user, get_current_user_id, needs_rehash
+from utils.auth import (
+    hash_password,
+    verify_password,
+    create_jwt_token,
+    get_current_user,
+    get_current_user_id,
+    needs_rehash,
+    decode_jwt_token,
+    is_token_revoked,
+    user_id_from_payload,
+    assert_token_type,
+    bump_user_jwt_version,
+    TOKEN_TYPE_SESSION,
+)
 from utils.agent_access import agent_belongs_to_user
+from utils.auth_cookies import (
+    set_session_cookie,
+)
+from utils.auth_dependencies import safe_internal_redirect_path
+from utils.csrf import (
+    csrf_protect,
+    csrf_protect_origin_only,
+    generate_csrf_token,
+    set_csrf_cookie,
+)
 from services.agent_init_service import agent_init_service
 from services.storage_service import get_storage_service
 from services.permission_service import PermissionService
@@ -37,8 +75,107 @@ router = APIRouter(prefix="/api/user", tags=["User"])
 # 「尝试次数过多，请稍后再试」。
 # FIX-A（审计 §6 H17）：登录再补一个 **IP 单桶**（防「用户名喷洒」——(IP,username) 桶
 # 拦不住攻击者换用户名重试）。阈值放宽到 100 次/300s，避免误伤 NAT 后的多人。
-from services.rate_limiter import login_limiter as _login_limiter
-from services.rate_limiter import login_ip_limiter as _login_ip_limiter
+# T18a：门面对象（`RateLimiterGuard`）保持同名同实例 —— 既有断言
+# `routers.user._login_limiter is services.rate_limiter.login_limiter` 继续成立。
+from services.rate_limiter import (
+    RateLimitUnavailable,
+    login_limiter as _login_limiter,
+    login_ip_limiter as _login_ip_limiter,
+    password_change_limiter as _password_change_limiter,
+    register_limiter as _register_limiter,
+)
+
+
+# ==========================================
+# T18a：通用小工具（限流入口 / 审计日志 / 客户端 IP）
+# ==========================================
+
+def _client_ip(request: Request) -> str:
+    """取客户端 IP（只信任直连地址；`X-Forwarded-For` 可伪造，不参与限流键）。"""
+    try:
+        return request.client.host if request.client else "unknown"
+    except Exception:  # pragma: no cover
+        return "unknown"
+
+
+async def _enforce_rate_limit(guard, key: str, message: str) -> None:
+    """限流统一入口。
+
+    - 受限 → 429
+    - 后端不可用且 `RATE_LIMIT_FAIL_MODE=closed` → 503（**不**静默放行）
+    """
+    try:
+        limited = await guard.ais_limited(key)
+    except RateLimitUnavailable:
+        logger.error("[RateLimit] 后端不可用（fail-closed），拒绝 %s", key.split(":", 1)[0])
+        raise HTTPException(
+            status_code=503,
+            detail={"status": "temporarily_unavailable", "message": "认证服务暂时不可用，请稍后再试"},
+        )
+    if limited:
+        raise HTTPException(
+            status_code=429,
+            detail={"status": "error", "message": message},
+        )
+
+
+def _audit(event: str, **fields) -> None:
+    """最小审计日志：只记录键值 + 脱敏短值，绝不落密码 / 完整邀请码 / token。"""
+    parts = []
+    for key, value in sorted(fields.items()):
+        text = str(value)
+        text = text.replace("\n", " ").replace("\r", " ")
+        parts.append(f"{key}={text[:64]}")
+    logger.info("[Audit][%s] %s", event, " ".join(parts))
+
+
+def _registration_mode() -> str:
+    """解析注册模式；未知值 fail-closed 视为 closed。"""
+    raw = str(getattr(settings, "REGISTRATION_MODE", "invite") or "invite").strip().lower()
+    if raw not in ("open", "invite", "closed"):
+        logger.warning("[register] 未知 REGISTRATION_MODE=%r，按 closed 处理", raw)
+        return "closed"
+    return raw
+
+
+def _invite_code_ok(supplied: str) -> bool:
+    """常量时间比较邀请码；未配置邀请码 ⇒ 一律 False（不能让空码等于空配置）。"""
+    expected = str(getattr(settings, "REGISTRATION_INVITE_CODE", "") or "")
+    if not expected or not supplied:
+        return False
+    try:
+        return hmac.compare_digest(expected.encode("utf-8"), supplied.encode("utf-8"))
+    except Exception:  # pragma: no cover
+        return False
+
+
+def _registration_gate() -> Optional[JSONResponse]:
+    """注册门禁：返回 None 表示放行，否则返回应直接返回的 403 响应。"""
+    mode = _registration_mode()
+    if mode == "open":
+        return None
+    if mode == "closed":
+        return JSONResponse(
+            status_code=403,
+            content={
+                "status": "error",
+                "error": "registration_closed",
+                "message": "本站未开放自助注册，请联系管理员开通账号",
+            },
+        )
+    # invite
+    if not str(getattr(settings, "REGISTRATION_INVITE_CODE", "") or ""):
+        # 配了 invite 却没配邀请码 ⇒ fail-closed（否则等于 open）
+        logger.error("[register] REGISTRATION_MODE=invite 但未配置 REGISTRATION_INVITE_CODE，按 closed 处理")
+        return JSONResponse(
+            status_code=403,
+            content={
+                "status": "error",
+                "error": "registration_unavailable",
+                "message": "注册暂未开放（缺少邀请码配置），请联系管理员",
+            },
+        )
+    return None
 
 
 # ==========================================
@@ -407,7 +544,12 @@ async def update_agent_settings(
     agent = _get_agent_or_404(db, hash, user_id)
 
     if body.alias is not None:
-        agent.name = body.alias
+        # T03a：重命名只有一个实现（只写 name/updated_at，不碰 persona/初始化状态）
+        from services.agent_init_service import agent_init_service
+        try:
+            agent = agent_init_service.rename_agent(db, agent, body.alias)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
     if body.is_pinned is not None:
         agent.is_pinned = body.is_pinned
     if body.is_dnd is not None:
@@ -569,23 +711,40 @@ async def update_agent_config(
 @router.post("/register")
 async def register_user(
     request: Request,
+    # 凭据建立端点：只做 Origin 校验（理由见 utils.csrf.csrf_protect_origin_only）
+    _csrf: None = Depends(csrf_protect_origin_only),
     db: Session = Depends(get_db)
 ):
     """
-    用户自助注册
+    用户自助注册（T18a：门禁 + 限流 + 审计）
 
     参数：
     - username: 用户名（3-32字符，字母数字下划线）
     - password: 密码（6-64字符）
     - email: 邮箱（可选）
+    - invite_code: 邀请码（`REGISTRATION_MODE=invite` 时必填）
+
+    门禁（`REGISTRATION_MODE`）：
+    - `open`   —— 允许自助注册
+    - `invite` —— 必须带正确邀请码；未配置邀请码 ⇒ 等价 closed
+    - `closed` —— 403
 
     返回：
     - user_id: 用户ID
-    - requires_approval: 是否需要管理员审批
-    - message: 提示信息
+    - requires_approval: 恒为 False（「注册后等审批」需要 `users.is_active` 列，
+      当前模型没有该列 ⇒ 该模式未提供，见 T18a 跨界请求）
+    - token: 兼容字段（移动端/桌面端一次性过渡）；浏览器请用 HttpOnly cookie
     """
+    client_ip = _client_ip(request)
+
+    # 注册 IP 限流（先计数后判定：被拒的尝试也占额度，防爆破式刷邀请码）
+    await _enforce_rate_limit(
+        _register_limiter, f"ip:{client_ip}", "注册尝试次数过多，请稍后再试"
+    )
+
     # OAuth 已启用时禁止本地注册
     if settings.OAUTH_ENABLED:
+        _audit("register", ip=client_ip, result="oauth_required")
         return JSONResponse(
             status_code=403,
             content={
@@ -596,11 +755,36 @@ async def register_user(
             }
         )
 
+    gate = _registration_gate()
+    if gate is not None:
+        _audit("register", ip=client_ip, result="gated", mode=_registration_mode())
+        return gate
+
+    mode = _registration_mode()
+
     try:
         body = await request.json()
-        username = body.get("username", "").strip()
+        if not isinstance(body, dict):
+            raise HTTPException(status_code=400, detail={"status": "error", "message": "请求体必须是 JSON 对象"})
+        username = str(body.get("username", "") or "").strip()
         password = body.get("password", "")
-        email = body.get("email", "").strip() or None
+        email = str(body.get("email", "") or "").strip() or None
+        invite_code = str(body.get("invite_code", "") or "").strip()
+
+        # 邀请码校验（常量时间比较；失败不透露「码格式对不对」）
+        if mode == "invite":
+            if not _invite_code_ok(invite_code):
+                _audit("register", ip=client_ip, username=username, result="bad_invite")
+                # 与门禁响应同一形状（顶层 status/error/message），不要混用
+                # HTTPException 的 {"detail": {...}} —— 前端/测试只需一套解析。
+                return JSONResponse(
+                    status_code=403,
+                    content={
+                        "status": "error",
+                        "error": "invalid_invite_code",
+                        "message": "邀请码无效",
+                    },
+                )
 
         # 验证用户名
         if not username:
@@ -637,8 +821,12 @@ async def register_user(
         # 创建用户 — P0.4 bcrypt：salt 嵌入 hash 本身，无需单独存
         password_hash = hash_password(password)
 
-        # 直接激活用户（无需管理员审批）
-        # 如果需要审批机制，可以设置 is_active=False，需要管理员手动激活
+        # T18a：新用户**不再默认无限 pro**。
+        # `REGISTRATION_DEFAULT_TIER` 为 None 时回落到列默认值（旧库仍是 pro）；
+        # 显式 "free" 时写入 free —— 具体配额上限由产品/计费侧决定，本处只保证
+        # 「注册这一路径不再无条件给 pro」。
+        default_tier = getattr(settings, "REGISTRATION_DEFAULT_TIER", None)
+
         user = User(
             username=username,
             password_hash=password_hash,
@@ -647,49 +835,69 @@ async def register_user(
             is_admin=False,
             created_at=datetime.utcnow()
         )
+        if default_tier:
+            user.tier = str(default_tier)
+        if email:
+            user.email = email
 
         db.add(user)
         db.commit()
         db.refresh(user)
 
-        logger.info(f"[User] 新用户注册成功: {username} (id={user.id})")
+        _audit(
+            "register", ip=client_ip, username=username, user_id=user.id,
+            mode=mode, result="created", tier=default_tier or "(column default)",
+        )
 
         # 生成 JWT Token（注册后自动登录）
         token = create_jwt_token({"user_id": user.id, "username": user.username})
+        csrf_token = generate_csrf_token()
 
-        return JSONResponse(content={
+        resp = JSONResponse(content={
             "status": "success",
             "user_id": user.id,
             "username": user.username,
             "requires_approval": False,
             "message": "注册成功",
-            "token": token
+            "session": "cookie",
+            "csrf_token": csrf_token,
+            # 兼容字段：未升级的移动端/桌面端仍可从这里取 token（一次性过渡）
+            "token": token,
         })
+        set_session_cookie(resp, token, request)
+        set_csrf_cookie(resp, csrf_token, request)
+        return resp
 
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"[User] 注册失败: {e}")
         db.rollback()
+        _audit("register", ip=client_ip, result="error")
         raise HTTPException(status_code=500, detail={"status": "error", "message": "注册失败，请稍后重试"})
 
 
 @router.post("/login")
 async def login_user(
     request: Request,
+    # 凭据建立端点：只做 Origin 校验（理由见 utils.csrf.csrf_protect_origin_only）
+    _csrf: None = Depends(csrf_protect_origin_only),
     db: Session = Depends(get_db)
 ):
     """
-    用户登录
+    用户登录（T18a：HttpOnly cookie + 限流统一 + redirect 白名单）
 
     参数：
     - username: 用户名
     - password: 密码
+    - redirect_to: 可选，登录后跳转路径（**只接受内部规范相对路径**）
 
     返回：
-    - token: JWT Token
-    - user_id: 用户ID
+    - token: JWT（兼容字段；浏览器改用 HttpOnly cookie，前端不应再持久化它）
+    - csrf_token: 双提交 CSRF token（前端存内存，随 `X-CSRF-Token` 回传）
     """
+    client_ip = _client_ip(request)
+
     # OAuth 已启用时禁止本地登录
     if settings.OAUTH_ENABLED:
         return JSONResponse(
@@ -702,31 +910,35 @@ async def login_user(
             }
         )
 
-    from utils.auth import verify_password
-
     try:
         body = await request.json()
-        username = body.get("username", "").strip()
+        if not isinstance(body, dict):
+            raise HTTPException(status_code=400, detail={"status": "error", "message": "请求体必须是 JSON 对象"})
+        username = str(body.get("username", "") or "").strip()
         password = body.get("password", "")
+        requested_redirect = body.get("redirect_to")
 
         if not username or not password:
             raise HTTPException(status_code=400, detail={"status": "error", "message": "用户名和密码不能为空"})
 
         # Q20/H17：登录限流（IP + username），失败尝试过多返回 429
-        client_ip = request.client.host if request.client else "unknown"
-        if _login_limiter.is_limited(f"{client_ip}:{username}"):
-            raise HTTPException(status_code=429, detail={"status": "error", "message": "尝试次数过多，请稍后再试"})
+        await _enforce_rate_limit(
+            _login_limiter, f"{client_ip}:{username}", "尝试次数过多，请稍后再试"
+        )
         # FIX-A（H17）：IP 单桶，防「用户名喷洒」；阈值放宽避免误伤 NAT 多人。
-        if _login_ip_limiter.is_limited(f"ip:{client_ip}"):
-            raise HTTPException(status_code=429, detail={"status": "error", "message": "尝试次数过多，请稍后再试"})
+        await _enforce_rate_limit(
+            _login_ip_limiter, f"ip:{client_ip}", "尝试次数过多，请稍后再试"
+        )
 
         # 查找用户
         user = db.query(User).filter(User.username == username).first()
         if not user:
+            _audit("login", ip=client_ip, username=username, result="no_user")
             raise HTTPException(status_code=401, detail={"status": "error", "message": "用户名或密码错误"})
 
         # 验证密码 — P0.4：新签名 verify_password(password, password_hash)
         if not verify_password(password, user.password_hash):
+            _audit("login", ip=client_ip, username=username, result="bad_password")
             raise HTTPException(status_code=401, detail={"status": "error", "message": "用户名或密码错误"})
 
         # P0.4 透明懒迁移：legacy SHA-256+salt 用户登录成功后自动升级到 bcrypt
@@ -740,9 +952,9 @@ async def login_user(
         # 生成 Token
         token = create_jwt_token({"user_id": user.id, "username": user.username})
 
-        logger.info(f"[User] 用户登录成功: {username} (id={user.id})")
+        _audit("login", ip=client_ip, username=username, user_id=user.id, result="ok")
 
-        # 配置向导：若 .env 标记未完成 → 登录后跳到 /setup
+        # 配置向导：若 .env 标记未完成 → 登录后跳到 /setup（优先级最高）
         redirect_to = None
         try:
             from services.setup_service import is_setup_complete
@@ -752,6 +964,11 @@ async def login_user(
             # 配置检测失败不影响登录
             logger.debug(f"[User] setup 检测异常（忽略）: {_e}")
 
+        if redirect_to is None and requested_redirect:
+            # T18a：唯一白名单入口，非法值回落 None（前端再用默认页）
+            redirect_to = safe_internal_redirect_path(str(requested_redirect), default="/dashboard")
+
+        csrf_token = generate_csrf_token()
         resp = JSONResponse(content={
             "status": "success",
             "token": token,
@@ -759,30 +976,13 @@ async def login_user(
             "username": user.username,
             "is_admin": user.is_admin,
             "redirect": redirect_to,
+            "session": "cookie",
+            "csrf_token": csrf_token,
         })
-        # 自动检测是否应设置 secure cookie：
-        # - HTTPS 请求或 CDN 转发 (X-Forwarded-Proto) → 永远 secure
-        # - COOKIE_SECURE 显式 true 时强制 secure（哪怕 HTTP）
-        # - COOKIE_SECURE 显式 false 只对「非 HTTPS」生效：本地 HTTP 开发 → secure=False
-        #   （FIX-F G7：false 不再能把生产 HTTPS 会话降级为明文传输）
-        _is_https = (
-            str(request.url.scheme) == "https"
-            or request.headers.get("x-forwarded-proto", "").lower() == "https"
-        )
-        _cookie_secure = getattr(settings, "COOKIE_SECURE", None)
-        if _cookie_secure is not None:
-            _is_secure = bool(_cookie_secure) or _is_https
-        else:
-            _is_secure = _is_https
-        resp.set_cookie(
-            key="feclaw_jwt",
-            value=token,
-            httponly=True,
-            secure=_is_secure,
-            max_age=86400 * 30,
-            samesite="lax",
-            path="/",
-        )
+        # T18a：浏览器认证走服务端 HttpOnly cookie（secure 按 HTTPS 自动探测，
+        # FIX-F G7 口径不变：HTTPS 请求永远 Secure）。
+        set_session_cookie(resp, token, request)
+        set_csrf_cookie(resp, csrf_token, request)
         return resp
 
     except HTTPException:
@@ -790,6 +990,68 @@ async def login_user(
     except Exception as e:
         logger.error(f"[User] 登录失败: {e}")
         raise HTTPException(status_code=500, detail={"status": "error", "message": "登录失败，请稍后重试"})
+
+
+class AdoptSessionRequest(BaseModel):
+    """把「已经拿到的一次性 token」（例如子域 SSO 中继 `#token=`）换成
+    HttpOnly 会话 cookie，前端不再把 token 写进 localStorage。"""
+
+    token: str
+
+
+@router.post("/session")
+async def adopt_session(
+    body: AdoptSessionRequest,
+    request: Request,
+    _csrf: None = Depends(csrf_protect),
+    db: Session = Depends(get_db),
+):
+    """会话接管：`{token}` → HttpOnly cookie。
+
+    为什么需要它：跨子域 SSO（`GET /api/auth/sync`）会把 token 放在 URL fragment 里，
+    老前端把它写进 localStorage。迁移后浏览器**不持久化** JWT：前端拿到 fragment
+    后立刻调本端点，由服务端种 HttpOnly cookie，然后立即清掉 URL fragment。
+
+    安全：
+    - 只接受**会话类型**且未吊销的令牌（TOTP / agent / refresh 一律拒绝）；
+    - 过 `csrf_protect`：浏览器跨站 POST 会被 Origin 校验挡住
+      （否则攻击者可以把**自己的** token 塞进受害者浏览器 ⇒ 登录 CSRF）；
+    - 按 IP 限流（复用登录 IP 桶的独立键）。
+    """
+    client_ip = _client_ip(request)
+    await _enforce_rate_limit(_login_ip_limiter, f"ip:adopt:{client_ip}", "尝试次数过多，请稍后再试")
+
+    raw_token = (body.token or "").strip()
+    if not raw_token:
+        raise HTTPException(status_code=401, detail={"status": "unauthorized"})
+
+    payload = decode_jwt_token(raw_token)
+    if not payload or not assert_token_type(payload, {TOKEN_TYPE_SESSION}):
+        _audit("session_adopt", ip=client_ip, result="bad_token")
+        raise HTTPException(status_code=401, detail={"status": "unauthorized"})
+    if is_token_revoked(payload, db=db):
+        _audit("session_adopt", ip=client_ip, result="revoked")
+        raise HTTPException(status_code=401, detail={"status": "unauthorized"})
+    user_id = user_id_from_payload(payload)
+    if user_id is None:
+        raise HTTPException(status_code=401, detail={"status": "unauthorized"})
+
+    user = db.query(User).filter(User.id == user_id).first()
+    if user is None:
+        raise HTTPException(status_code=401, detail={"status": "unauthorized"})
+
+    csrf_token = generate_csrf_token()
+    resp = JSONResponse(content={
+        "status": "success",
+        "user_id": user.id,
+        "username": user.username,
+        "session": "cookie",
+        "csrf_token": csrf_token,
+    })
+    set_session_cookie(resp, raw_token, request)
+    set_csrf_cookie(resp, csrf_token, request)
+    _audit("session_adopt", ip=client_ip, user_id=user.id, result="ok")
+    return resp
 
 
 class ChangePasswordRequest(BaseModel):
@@ -800,14 +1062,26 @@ class ChangePasswordRequest(BaseModel):
 @router.post("/change-password")
 async def change_password(
     body: ChangePasswordRequest,
+    request: Request,
     user: User = Depends(get_current_user),
+    _csrf: None = Depends(csrf_protect),
     db: Session = Depends(get_db)
 ):
-    """修改密码"""
-    from utils.auth import verify_password
+    """修改密码（T18a：CSRF 保护 + 限流 + 其它设备会话失效）
+
+    - 参数顺序有意为之：`get_current_user` 在 `csrf_protect` 之前，
+      保证匿名请求得到 401（而不是 403）—— 与既有路由审计矩阵口径一致。
+    - 成功后 `jwt_version += 1`：**其它设备**的旧 token 立刻失效；
+      当前浏览器拿不到旧 cookie 会被踢下线，所以同一响应里重签一个会话 cookie。
+    """
+    client_ip = _client_ip(request)
+    await _enforce_rate_limit(
+        _password_change_limiter, f"pw:{client_ip}:{user.id}", "操作过于频繁，请稍后再试"
+    )
 
     # 验证当前密码 — P0.4：新签名
     if not verify_password(body.current_password, user.password_hash):
+        _audit("change_password", ip=client_ip, user_id=user.id, result="bad_current")
         raise HTTPException(status_code=400, detail={"message": "当前密码错误"})
 
     # 验证新密码长度
@@ -820,7 +1094,24 @@ async def change_password(
     user.password_version = 2
     db.commit()
 
-    return {"status": "success", "message": "密码已修改"}
+    # 吊销该用户此前签发的全部会话令牌（其它设备/标签页立即失效）
+    revoked = bump_user_jwt_version(user.id)
+    new_token = create_jwt_token({"user_id": user.id, "username": user.username})
+
+    _audit("change_password", ip=client_ip, user_id=user.id, result="ok", revoked=revoked)
+
+    csrf_token = generate_csrf_token()
+    resp = JSONResponse(content={
+        "status": "success",
+        "message": "密码已修改",
+        "revoked_other_sessions": bool(revoked),
+        "csrf_token": csrf_token,
+        # 兼容字段：仍走 Bearer 的客户端需要换用新 token
+        "token": new_token,
+    })
+    set_session_cookie(resp, new_token, request)
+    set_csrf_cookie(resp, csrf_token, request)
+    return resp
 
 # ==========================================
 # Desktop API (Phase 4a)
@@ -857,7 +1148,10 @@ async def get_user_permissions(
     ).count()
 
     return JSONResponse(content={
-        "tier": user.tier or "pro",
+        # T18a：tier 回落值从 "pro" 改为 "free" —— 缺省（老库未写 tier 的账号）
+        # 不再被当成无限额度的 pro。配额上限的**执行**仍属产品/计费切片，
+        # 本端点只如实报出档位与用量，见 T18a 报告的跨界请求。
+        "tier": user.tier or "free",
         "user_id": user.id,
         "username": user.username,
         "features": {

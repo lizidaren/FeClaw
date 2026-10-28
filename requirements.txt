@@ -1,61 +1,96 @@
+# =============================================================================
+# FeClaw 依赖声明层（人类可读的版本范围）
+#
+# 与 requirements.lock 的关系（两者不冲突，职责不同）：
+#   * 本文件 = 声明层：直接依赖 + 允许的版本范围（`>=`）；可读、可评审、可升级。
+#   * requirements.lock = 锁定层：**已验证可跑**的精确版本（`==`），按分组标注
+#     core / optional / fuse / test / transitive；可重现安装用它。
+#
+# 因此：
+#   * 可重现安装（唯一权威）：pip install -r requirements.lock
+#   * 只想装核心（不含 FUSE/可选功能）：取 requirements.lock 的 `core` 分组
+#   * FUSE 挂载：额外装 requirements-fuse.txt（trio + pyfuse3），lock 里是 `fuse` 分组
+#   * 测试：requirements-dev.txt（lock 里是 `test` 分组）
+#
+# 改本文件后 lock 不会自动更新：按 requirements.lock 头部「如何重新生成」那一节
+# 复现一次，并把新版本在干净 venv 里跑过测试再提交（不要凭空 pin 未验证的版本）。
+#
+# 分组依据（2026-10-25 基线 e2adb08，Python 3.12.9 venv 实测）：
+#   对 345 个 .py 文件做 AST 扫描，凡在 app 树（main/config/models/routers/
+#   services/utils）里**模块级、未 guard** import 的第三方模块 → core；
+#   只在函数体内或 try/except ImportError 内 import 的 → optional（缺失时该功能
+#   不可用，而不是整个应用起不来）。
+# =============================================================================
+
+# ─── core：启动与请求主路径必需 ──────────────────────────────────────────────
 fastapi>=0.104.0
+# main.py 直接 import starlette；fastapi 0.115.x 的元数据要求 starlette<0.47.0，
+# 这条上界就是把 starlette 钉在 0.41.x 的原因（详见 requirements.lock 的 excluded 说明）。
+starlette>=0.40,<0.47
 uvicorn[standard]>=0.24.0
 sqlalchemy>=2.0.0
+pymysql>=1.1.0                # SQLAlchemy 的 mysql+pymysql:// 驱动
 pydantic>=2.0.0
 pydantic-settings>=2.0.0
 python-jose[cryptography]>=3.3.0
+cryptography>=42.0.0          # services/wechatbot_sdk/crypto.py 直接 import
+PyJWT>=2.0.0                  # routers/feclaw_domain.py（与 python-jose 并存，勿混用）
+bcrypt>=4.0.0                 # 密码哈希（自 2026-07 起逐步替代 SHA-256+salt）
 httpx[http2]>=0.25.0
+aiohttp>=3.9.0                # routers/wechat.py 等
+jinja2>=3.1.0                 # FastAPI Jinja2Templates
+python-multipart>=0.0.6       # 157 处 UploadFile/File()/Form()——框架运行时硬要求
+nest_asyncio>=1.5.0           # services/tools/base.py
+apscheduler>=3.10.0           # 定时任务调度
+redis>=5.0.0                  # 缓存/会话/限流（缺失时功能降级，但 import 在模块级）
+pyotp>=2.9.0                  # TOTP（services/totp_service.py 模块级 import）
+numpy>=1.26.0                 # services/vector_search_service.py 模块级 import
+psutil>=5.9.0                 # 系统指标
+certifi>=2024.0.0
+python-dotenv>=1.0.0          # services/image_describer.py 等 load_dotenv
+requests>=2.31.0              # services/cos_patch.py 的异常分支
 cos-python-sdk-v5>=1.9.30
-qcloud-python-sts>=3.1.0   # COS 临时密钥 STS（前端直传用）
-python-multipart>=0.0.6
-pymysql>=1.1.0  # MySQL driver
-aiohttp>=3.9.0  # Async HTTP client
-pyotp>=2.9.0   # TOTP support
-Pillow>=10.0.0  # Image processing
-qrcode[pil]     # QR code generation
+qcloud-python-sts>=3.1.0      # COS 临时密钥 STS（前端直传用）
 
-numpy>=1.26.0
-bcrypt>=4.0.0   # 密码哈希（自 2026-07 起逐步替代 SHA-256+salt）
+# ─── optional：按功能分组；缺失时对应功能报「不可用」，核心仍可启动 ──────────
+# 文档解析（services/tools/universal_parser.py 内 try/except ImportError）
+PyMuPDF>=1.23.0               # fitz：PDF 解析
+python-docx>=1.0.0            # .docx
+python-pptx>=1.0.0            # .pptx（services/tools/pptx_tools.py）
+openpyxl>=3.0.0               # .xlsx
 
-# ─── V 阶段：照片管线二值化 ───
-# opencv-python-headless 提供 cv2（无 GUI 依赖，适合服务器）；
-# 若本地已装 opencv-python 可跳过，两者二选一。
-opencv-python-headless>=4.8.0   # 智能二值化 / 多色融合
-
-jinja2>=3.1.0           # 模板引擎（FastAPI Jinja2Templates）
-nest_asyncio>=1.5.0     # 嵌套事件循环支持
-apscheduler>=3.10.0     # 定时任务调度
-# ─── 部署就绪性补全（可选：pyfuse3 在 requirements-fuse.txt） ───
-redis>=5.0.0                # Redis 缓存/会话
-aiofiles>=24.0.0            # 异步文件 I/O
-certifi>=2024.0.0           # SSL 证书
-psutil>=5.9.0               # 系统指标监控
-python-docx>=1.0.0          # .docx 文档解析
-openpyxl>=3.0.0             # .xlsx 表格解析
-PyJWT>=2.0.0            # JWT 编解码（feclaw_domain.py）
-
-# ─── 可选依赖（按功能分组，不安装不影响核心启动） ───
-# 文档/媒体解析
-PyMuPDF>=1.23.0             # PDF 解析
-python-pptx>=1.0.0          # PPTX 解析
+# 图片/向量
+opencv-python-headless>=4.8.0 # cv2；二选一，服务器用 headless
+pillow>=10.0.0                # PIL（services/image_describer.py 延迟 import）
+qrcode[pil]>=7.4              # utils/qr.py（try/except guard，TOTP 注册二维码）
+aiofiles>=24.0.0              # 异步文件 I/O（services/image_describer.py 延迟 import）
 
 # TTS 语音合成
-pydub>=0.25.0               # 音频拼接
-dashscope>=1.14.0           # 阿里云百炼 SDK（CosyVoice TTS）
+pydub>=0.25.0                 # 音频拼接（services/tts_client.py try/except）
+dashscope>=1.14.0             # 阿里云百炼 SDK（CosyVoice TTS / ASR / Omni）
 
-# SVG 处理
-cairosvg>=2.7.0             # SVG → PNG 转换
-svglib>=1.5.0               # SVG → 其他格式
-reportlab>=4.0.0            # PDF/图像生成
+# SVG → PPTX/PNG
+CairoSVG>=2.7.0               # 注意：Windows 本机缺 libcairo，import 会 OSError
+svglib>=1.5.0
+reportlab>=4.0.0
 
-# SSE 服务端（B1 R 代理 2026-07-18: 群聊 SSE 订阅）
-# sse-starlette 提供 EventSourceResponse + 完整 SSE 协议帧；目前 routers/group.py
-# 优先用 FastAPI 内置 StreamingResponse(text/event-stream) 走最小实现，引入本包
-# 是为后续补全 retry/id 等 SSE 字段预留依赖。
-sse-starlette>=2.0.0        # 群聊 SSE 订阅端点（routers/group.py:GET /api/groups/{id}/stream）
+# 静态站 CNAME 校验
+dnspython>=2.6.0              # services/static_site_service.py 延迟 import dns.resolver
 
-# 浏览器自动化（仅某些高级功能需要）
-playwright>=1.40.0          # 浏览器自动化（需额外 npx playwright install）
+# 浏览器自动化（web 工具 + tests/browser + scripts/health_check.py）
+playwright>=1.40.0            # 装后还需 `playwright install`（或 channel="msedge"）
 
-# 沙箱（可选，pyfuse3 在 requirements-fuse.txt）
-eval_type_backport>=0.2.0     # Pydantic runtime type annotation parsing（Python 3.9 兼容）
+# LLM 供应商 SDK（services/tools/ai_tools.py 函数内 import）
+openai>=1.0.0                 # 见下方 lock-pending：本机 venv 未安装，未锁定版本
+
+# ─── 已移除的依赖（保留说明，防止有人又加回去） ──────────────────────────────
+# sse-starlette：全仓库 **零** import（无 sse_starlette / EventSourceResponse），
+#   routers/group.py 用 FastAPI 内置 StreamingResponse；且 3.5.1 的元数据要求
+#   starlette>=0.49.1，与 fastapi 0.115.14 的 starlette<0.47.0 直接冲突
+#   （`pip check` 唯一一条冲突）。→ 从声明层移除，不锁版本。需要 SSE 时用
+#   StreamingResponse 或改用与 starlette 0.41 兼容的 sse-starlette 2.x 并重跑测试。
+# eval_type_backport：全仓库零 import；pydantic 2.14.1 不依赖它；仅 Python<3.10
+#   的 runtime 注解求值才需要，本项目 requires-python>=3.12。→ 移除。
+#
+# lock-pending: openai  # 本机 venv 未安装，无法给出已验证版本；
+#                       # 干净 venv 验证（T19b）时补 `openai==<ver>` 到 requirements.lock

@@ -39,6 +39,12 @@ from .network_isolation import NetworkIsolationManager
 
 # Q21/M13：沙箱单流输出上限（结果边界截断；完整流式封顶见报告残余项）
 _MAX_OUTPUT_CHARS = 1_000_000
+
+# T03a：`signal.SIGSYS` 只在 Linux 存在。Windows 上访问它会 AttributeError ——
+# 而这行在 `_make_result()` 的错误报告路径里，等于「沙箱刚被杀，汇报结果时自己
+# 又崩一次」，上层只能看到 500 而不是真实原因。用常量兜住平台差异（31 是 Linux
+# 上 SIGSYS 的编号；非 Linux 不会真的收到该信号，只是保证汇报路径不炸）。
+_SIGSYS_NO = getattr(signal, "SIGSYS", 31)
 # H5 fail-closed：网络隔离不可用时的统一拒绝文案（三条执行路径共用）。
 # 文案必须与实现一致 —— 这里是「拒绝执行」，绝不谎称「已隔离」。
 _NETNS_UNAVAILABLE_MSG = (
@@ -497,7 +503,7 @@ class SandboxManager:
                 timed_out=timed_out, sandbox_id=sandbox_id
             )
 
-        if sig == signal.SIGSYS:  # 31 — seccomp 拦截
+        if sig == _SIGSYS_NO:  # 31 — seccomp 拦截（Linux；常量见文件头 _SIGSYS_NO）
             friendly = (
                 "Security sandbox blocked: code attempted a syscall outside the allowed set.\n"
                 "Note: the sandbox isolates the filesystem namespace and enforces resource "
